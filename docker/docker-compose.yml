@@ -1,0 +1,52 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Sauce — Docker Compose configuration
+#
+# Usage:
+#   docker compose up -d          # start in background
+#   docker compose logs -f        # follow live output (cron.log tailed by CMD)
+#   docker compose down           # stop and remove container
+#   docker compose pull && docker compose up -d  # upgrade after git pull
+#
+# .env is mounted read-only so secrets never bake into the image.
+# ./data is mounted read-write so the SQLite DB and logs survive restarts.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    build:
+      context: ..          # repo root (pyproject.toml lives there)
+      dockerfile: docker/Dockerfile
+    container_name: sauce
+    restart: unless-stopped
+
+    # ── Secrets & config ──────────────────────────────────────────────────────
+    # .env provides all credentials and settings at runtime.
+    # It is mounted read-only — the container cannot modify it.
+    env_file:
+      - ../.env
+
+    # ── Persistent storage ────────────────────────────────────────────────────
+    # /app/data is the only path that writes data (SQLite DB + log files).
+    # Map it to the host so data survives `docker compose down` / upgrades.
+    volumes:
+      - ../data:/app/data
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+    # Docker captures stdout/stderr. The CMD tails cron.log to stdout so
+    # `docker compose logs -f` works like a live feed.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # ── Resource limits ───────────────────────────────────────────────────────
+    # Conservative limits suited to a 1 vCPU / 1 GB VPS.
+    # Each loop run lasts < 60 s. Peak memory is ~200–300 MB (pandas + models).
+    deploy:
+      resources:
+        limits:
+          cpus: "0.9"
+          memory: "512M"
+        reservations:
+          memory: "128M"

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# ──────────────────────────────────────────────────────────────────────────────
+# scripts/run_loop.sh — Cron entrypoint for the Sauce trading loop.
+#
+# Invoked by cron every 30 minutes:
+#   */30 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1
+#
+# Contract:
+#   - Logs a timestamped START and END line on every run.
+#   - A non-zero exit from the Python process is logged but does NOT crash cron.
+#   - Activates the virtual environment before running Python.
+#   - All stdout/stderr from Python is captured by the cron redirect (>> cron.log).
+# ──────────────────────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV="${APP_DIR}/.venv"
+LOGS_DIR="${APP_DIR}/data/logs"
+
+# ── Ensure log directory exists ───────────────────────────────────────────────
+mkdir -p "${LOGS_DIR}"
+
+# ── Timestamp helper ──────────────────────────────────────────────────────────
+ts() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+echo "----------------------------------------"
+echo "[$(ts)] SAUCE LOOP START"
+
+# ── Sanity checks ─────────────────────────────────────────────────────────────
+if [[ ! -f "${VENV}/bin/python" ]]; then
+    echo "[$(ts)] ERROR: virtual environment not found at ${VENV}" >&2
+    echo "[$(ts)] Run: python -m venv .venv && .venv/bin/pip install -e ." >&2
+    exit 1
+fi
+
+if [[ ! -f "${APP_DIR}/.env" ]]; then
+    echo "[$(ts)] ERROR: .env file not found at ${APP_DIR}/.env" >&2
+    echo "[$(ts)] Copy .env.example to .env and fill in credentials." >&2
+    exit 1
+fi
+
+# ── Activate virtual environment ──────────────────────────────────────────────
+# shellcheck source=/dev/null
+source "${VENV}/bin/activate"
+
+# ── Change to project root so relative imports work ───────────────────────────
+cd "${APP_DIR}"
+
+# ── Run the loop ──────────────────────────────────────────────────────────────
+# `|| true` ensures this script exits 0 even if the loop errors out.
+# The Python process logs its own errors to the audit DB before exiting.
+# Cron should never see a failure exit code here — that would trigger alert
+# noise without adding information (errors are in the DB, not cron's job).
+exit_code=0
+python -m sauce.core.loop || exit_code=$?
+
+if [[ "${exit_code}" -ne 0 ]]; then
+    echo "[$(ts)] WARNING: loop exited with code ${exit_code} — check audit DB for details"
+fi
+
+echo "[$(ts)] SAUCE LOOP END (exit=${exit_code})"
+echo "----------------------------------------"
+
+# Always exit 0 so cron does not treat a loop error as a cron failure.
+exit 0

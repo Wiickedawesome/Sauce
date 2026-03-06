@@ -1,0 +1,347 @@
+"""
+tests/test_loop.py — Tests for core/loop.py.
+
+Per Testing Rule 6.4: loop test with stubs must confirm:
+  - At least one AuditEvent with event_type="loop_start" in the DB.
+  - At least one AuditEvent with event_type="loop_end" in the DB.
+  - Zero rows in the orders table.
+
+All agents and broker calls are mocked — no real network calls.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+import sauce.adapters.db as db_module
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def reset_db_and_settings(tmp_path, monkeypatch):
+    """
+    Isolate each test: fresh DB path, clear settings cache, reset engine.
+    """
+    db_path = str(tmp_path / "test_loop.db")
+    monkeypatch.setenv("ALPACA_API_KEY", "test_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test_secret")
+    monkeypatch.setenv("LLM_PROVIDER", "github")
+    monkeypatch.setenv("DB_PATH", db_path)
+    monkeypatch.setenv("TRADING_PAUSE", "false")
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    # Small universe for speed
+    monkeypatch.setenv("TRADING_UNIVERSE_EQUITIES", "AAPL")
+    monkeypatch.setenv("TRADING_UNIVERSE_CRYPTO", "BTC/USD")
+
+    db_module._engine = None
+
+    from sauce.core.config import get_settings
+    get_settings.cache_clear()
+
+    yield
+
+    db_module._engine = None
+    get_settings.cache_clear()
+
+
+def make_fresh_quote(symbol: str = "AAPL") -> MagicMock:
+    from sauce.core.schemas import PriceReference
+    return PriceReference(
+        symbol=symbol,
+        bid=149.5,
+        ask=150.5,
+        mid=150.0,
+        as_of=datetime.now(timezone.utc),
+    )
+
+
+def make_stub_signal(symbol: str = "AAPL") -> MagicMock:
+    """Return a real Signal with side=hold."""
+    from datetime import timezone
+    from sauce.core.schemas import Evidence, Indicators, PriceReference, Signal
+    quote = make_fresh_quote(symbol)
+    evidence = Evidence(
+        symbol=symbol,
+        price_reference=quote,
+        indicators=Indicators(),
+        as_of=datetime.now(timezone.utc),
+    )
+    return Signal(
+        symbol=symbol,
+        side="hold",
+        confidence=0.0,
+        evidence=evidence,
+        reasoning="stub",
+        as_of=datetime.now(timezone.utc),
+        prompt_version="v1",
+    )
+
+
+def make_stub_risk_result(symbol: str = "AAPL") -> MagicMock:
+    from sauce.core.schemas import RiskCheckResult, RiskChecks
+    return RiskCheckResult(
+        symbol=symbol,
+        side="hold",
+        veto=True,
+        reason="stub",
+        qty=None,
+        checks=RiskChecks(
+            max_position_pct_ok=False,
+            max_exposure_ok=False,
+            daily_loss_ok=False,
+            volatility_ok=False,
+            confidence_ok=False,
+        ),
+        as_of=datetime.now(timezone.utc),
+        prompt_version="v1",
+    )
+
+
+def make_stub_portfolio_review() -> MagicMock:
+    from sauce.core.schemas import PortfolioReview
+    return PortfolioReview(
+        positions=[],
+        total_exposure_pct=0.0,
+        as_of=datetime.now(timezone.utc),
+        prompt_version="v1",
+    )
+
+
+def make_stub_supervisor_abort() -> MagicMock:
+    from sauce.core.schemas import SupervisorDecision
+    return SupervisorDecision(
+        action="abort",
+        final_orders=[],
+        vetoes=["stub"],
+        reason="stub abort",
+        as_of=datetime.now(timezone.utc),
+        prompt_version="v1",
+    )
+
+
+def make_fake_account() -> dict:
+    return {
+        "id": "test-acct",
+        "equity": "10000.00",
+        "last_equity": "10000.00",  # 0% loss — within limit
+        "buying_power": "10000.00",
+        "portfolio_value": "10000.00",
+    }
+
+
+# ── Helpers to count DB events ────────────────────────────────────────────────
+
+def count_events_by_type(event_type: str) -> int:
+    from sqlalchemy import text
+    from sauce.adapters.db import get_session
+    session = get_session()
+    try:
+        return session.execute(
+            text("SELECT COUNT(*) FROM audit_events WHERE event_type = :et"),
+            {"et": event_type},
+        ).scalar() or 0
+    finally:
+        session.close()
+
+
+def count_orders() -> int:
+    from sauce.adapters.db import get_session
+    from sauce.adapters.db import OrderRow
+    session = get_session()
+    try:
+        return session.query(OrderRow).count()
+    finally:
+        session.close()
+
+
+# ── Full stub run — audit trail ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_full_stub_run_writes_loop_start_and_end(monkeypatch):
+    """Rule 6.4: loop_start and loop_end must appear in DB after a stub run."""
+
+    quotes = {
+        "AAPL": make_fresh_quote("AAPL"),
+        "BTC/USD": make_fresh_quote("BTC/USD"),
+    }
+    signal = make_stub_signal("AAPL")
+    btc_signal = make_stub_signal("BTC/USD")
+    portfolio_review = make_stub_portfolio_review()
+    supervisor_decision = make_stub_supervisor_abort()
+
+    with patch("sauce.adapters.broker.get_account", return_value=make_fake_account()):
+        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+            with patch(
+                "sauce.adapters.market_data.get_universe_snapshot", return_value=quotes
+            ):
+                with patch(
+                    "sauce.agents.research.run",
+                    new=AsyncMock(side_effect=[signal, btc_signal]),
+                ):
+                    with patch("sauce.agents.risk.run", new=AsyncMock(return_value=make_stub_risk_result())):
+                        with patch(
+                            "sauce.agents.portfolio.run",
+                            new=AsyncMock(return_value=portfolio_review),
+                        ):
+                            with patch(
+                                "sauce.agents.supervisor.run",
+                                new=AsyncMock(return_value=supervisor_decision),
+                            ):
+                                with patch("sauce.agents.ops.run", new=AsyncMock()):
+                                    from sauce.core.loop import main
+                                    await main()
+
+    assert count_events_by_type("loop_start") >= 1, "loop_start not in DB"
+    assert count_events_by_type("loop_end") >= 1, "loop_end not in DB"
+
+
+@pytest.mark.asyncio
+async def test_full_stub_run_places_zero_orders(monkeypatch):
+    """Rule 6.4: zero rows in the orders table after a full stub run."""
+
+    quotes = {"AAPL": make_fresh_quote("AAPL"), "BTC/USD": make_fresh_quote("BTC/USD")}
+
+    with patch("sauce.adapters.broker.get_account", return_value=make_fake_account()):
+        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+            with patch(
+                "sauce.adapters.market_data.get_universe_snapshot", return_value=quotes
+            ):
+                with patch(
+                    "sauce.agents.research.run",
+                    new=AsyncMock(side_effect=[make_stub_signal("AAPL"), make_stub_signal("BTC/USD")]),
+                ):
+                    with patch("sauce.agents.risk.run", new=AsyncMock(return_value=make_stub_risk_result())):
+                        with patch(
+                            "sauce.agents.portfolio.run",
+                            new=AsyncMock(return_value=make_stub_portfolio_review()),
+                        ):
+                            with patch(
+                                "sauce.agents.supervisor.run",
+                                new=AsyncMock(return_value=make_stub_supervisor_abort()),
+                            ):
+                                with patch("sauce.agents.ops.run", new=AsyncMock()):
+                                    with patch(
+                                        "sauce.adapters.broker.place_order"
+                                    ) as mock_place:
+                                        from sauce.core.loop import main
+                                        await main()
+
+    # Verify that place_order was never called
+    mock_place.assert_not_called()
+    assert count_orders() == 0, "orders table should be empty after stub run"
+
+
+# ── TRADING_PAUSE causes early exit ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_loop_aborts_when_trading_paused(monkeypatch):
+    """If TRADING_PAUSE=true the loop should exit before calling any agent."""
+    monkeypatch.setenv("TRADING_PAUSE", "true")
+    from sauce.core.config import get_settings
+    get_settings.cache_clear()
+
+    with patch("sauce.agents.research.run", new=AsyncMock()) as mock_research:
+        with patch("sauce.adapters.broker.get_account") as mock_account:
+            from sauce.core.loop import main
+            await main()
+
+    mock_research.assert_not_called()
+    mock_account.assert_not_called()
+
+    # loop_start and loop_end must still be written even when paused
+    assert count_events_by_type("loop_start") >= 1
+    assert count_events_by_type("loop_end") >= 1
+
+
+# ── Stale data is skipped ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stale_quote_skips_research(monkeypatch):
+    """If a quote is stale, research.run must NOT be called for that symbol."""
+    from datetime import timedelta
+    from sauce.core.schemas import PriceReference
+
+    # Create a quote that is 1 hour old (stale)
+    stale_as_of = datetime.now(timezone.utc) - timedelta(hours=1)
+    stale_quote = PriceReference(
+        symbol="AAPL",
+        bid=149.5,
+        ask=150.5,
+        mid=150.0,
+        as_of=stale_as_of,
+    )
+    quotes = {"AAPL": stale_quote, "BTC/USD": make_fresh_quote("BTC/USD")}
+
+    with patch("sauce.adapters.broker.get_account", return_value=make_fake_account()):
+        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+            with patch(
+                "sauce.adapters.market_data.get_universe_snapshot", return_value=quotes
+            ):
+                with patch("sauce.agents.research.run", new=AsyncMock(return_value=make_stub_signal("BTC/USD"))) as mock_research:
+                    with patch("sauce.agents.risk.run", new=AsyncMock(return_value=make_stub_risk_result())):
+                        with patch(
+                            "sauce.agents.portfolio.run",
+                            new=AsyncMock(return_value=make_stub_portfolio_review()),
+                        ):
+                            with patch(
+                                "sauce.agents.supervisor.run",
+                                new=AsyncMock(return_value=make_stub_supervisor_abort()),
+                            ):
+                                with patch("sauce.agents.ops.run", new=AsyncMock()):
+                                    from sauce.core.loop import main
+                                    await main()
+
+    # research.run should only have been called for BTC/USD (crypto, always fresh check passes)
+    # AAPL quote was stale so research.run should not be called for AAPL
+    calls = mock_research.call_args_list
+    called_symbols = [c.kwargs.get("symbol") or c.args[0] for c in calls]
+    assert "AAPL" not in called_symbols, "research.run should not be called with stale data"
+
+
+# ── Daily loss breach aborts loop ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_loop_aborts_on_daily_loss_breach(monkeypatch):
+    """If daily loss is breached the loop should exit after checking account."""
+    monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "0.02")
+    from sauce.core.config import get_settings
+    get_settings.cache_clear()
+
+    # Account showing a 5% loss — exceeds 2% limit
+    bad_account = {
+        "id": "test",
+        "equity": "9500.00",
+        "last_equity": "10000.00",
+        "buying_power": "9500.00",
+        "portfolio_value": "9500.00",
+    }
+
+    with patch("sauce.adapters.broker.get_account", return_value=bad_account):
+        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+            with patch("sauce.agents.research.run", new=AsyncMock()) as mock_research:
+                from sauce.core.loop import main
+                await main()
+
+    mock_research.assert_not_called()
+
+    # Loop start/end must still be logged
+    assert count_events_by_type("loop_start") >= 1
+    assert count_events_by_type("loop_end") >= 1
+
+
+# ── loop_end always written even on exception ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_loop_end_written_even_when_account_fetch_fails(monkeypatch):
+    """loop_end must always be written, even when a step raises."""
+    from sauce.adapters.broker import BrokerError
+
+    with patch("sauce.adapters.broker.get_account", side_effect=BrokerError("API down")):
+        from sauce.core.loop import main
+        await main()
+
+    assert count_events_by_type("loop_start") >= 1
+    assert count_events_by_type("loop_end") >= 1
