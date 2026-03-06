@@ -9,6 +9,7 @@ Rules:
 """
 
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from sauce.core.schemas import AuditEvent, DailyStats
+
+logger = logging.getLogger(__name__)
 
 
 # ── ORM Base ──────────────────────────────────────────────────────────────────
@@ -102,27 +105,31 @@ class DailyStatsRow(Base):
 
 # ── Engine Factory ────────────────────────────────────────────────────────────
 
-_engine: Engine | None = None
+# Cache engines keyed by db_path so tests can use isolated DBs without the
+# singleton silently returning the first-call engine (Finding 7.4).
+_engines: dict[str, Engine] = {}
 
 
 def get_engine(db_path: str = "data/sauce.db") -> Engine:
     """
-    Return the cached SQLAlchemy engine, creating it on first call.
+    Return the cached SQLAlchemy engine for db_path, creating it on first call.
 
-    Creates the DB file and all tables if they don't exist.
+    Each distinct db_path gets its own engine so that test DBs are fully isolated
+    from the production DB even within the same process (Finding 7.4).
     """
-    global _engine
-    if _engine is None:
+    global _engines
+    if db_path not in _engines:
         # Ensure parent directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         url = f"sqlite:///{db_path}"
-        _engine = create_engine(
+        engine = create_engine(
             url,
             connect_args={"check_same_thread": False},
             echo=False,
         )
-        Base.metadata.create_all(_engine)
-    return _engine
+        Base.metadata.create_all(engine)
+        _engines[db_path] = engine
+    return _engines[db_path]
 
 
 def get_session(db_path: str = "data/sauce.db") -> Session:
@@ -154,6 +161,11 @@ def log_event(event: AuditEvent, db_path: str = "data/sauce.db") -> None:
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001 — last-resort catch so logging never crashes the loop
+        # Log to Python logging system so any log aggregator captures this (Finding 4.2).
+        logger.critical(
+            "DB write FAILED for AuditEvent [loop_id=%s event_type=%s]: %s",
+            event.loop_id, event.event_type, exc,
+        )
         import sys
         print(f"[db] CRITICAL: failed to write AuditEvent: {exc}", file=sys.stderr)
     finally:
@@ -211,27 +223,6 @@ def get_daily_stats(date: str, db_path: str = "data/sauce.db") -> DailyStats | N
         session.close()
 
 
-def is_trading_paused_in_db(db_path: str = "data/sauce.db") -> bool:
-    """
-    Check if a pause flag has been written to the DB by a previous loop run.
-
-    A DB-level pause persists across restarts. Only resume_trading() clears it.
-    """
-    session = get_session(db_path)
-    try:
-        result = session.execute(
-            text(
-                "SELECT COUNT(*) FROM audit_events "
-                "WHERE event_type = 'safety_check' "
-                "AND json_extract(payload, '$.paused') = 1 "
-                "ORDER BY timestamp DESC LIMIT 1"
-            )
-        ).scalar()
-        return bool(result and result > 0)
-    finally:
-        session.close()
-
-
 def count_orders_today(db_path: str = "data/sauce.db") -> int:
     """Return count of orders placed today. Used by Ops agent."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -243,5 +234,96 @@ def count_orders_today(db_path: str = "data/sauce.db") -> int:
             .count()
         )
         return int(count)
+    finally:
+        session.close()
+
+
+def upsert_daily_stats(
+    date: str,
+    db_path: str = "data/sauce.db",
+    **fields: object,
+) -> None:
+    """
+    Insert or update a DailyStatsRow for the given date (YYYY-MM-DD).
+
+    Uses merge() so multiple loop runs per day accumulate counts rather than
+    overwriting.  Additive fields (loop_runs, signals_generated, etc.) are
+    incremented; snapshot fields (starting_nav_usd, ending_nav_usd) are
+    overwritten with the latest value (Finding 5.1).
+
+    Parameters
+    ----------
+    date:    Trading day in YYYY-MM-DD format.
+    db_path: Path to the SQLite database.
+    **fields: Any subset of DailyStatsRow columns (excluding id, date).
+             Unset fields keep their existing DB values (or default to 0).
+    """
+    session = get_session(db_path)
+    try:
+        existing = session.query(DailyStatsRow).filter_by(date=date).first()
+        if existing is None:
+            row = DailyStatsRow(date=date)
+            session.add(row)
+        else:
+            row = existing
+
+        # Additive integer counters — accumulate across loop runs per day.
+        additive_int_fields = {
+            "loop_runs", "signals_generated", "signals_vetoed", "orders_placed",
+        }
+        for key, value in fields.items():
+            if not hasattr(row, key):
+                continue
+            if key in additive_int_fields and existing is not None:
+                current = getattr(row, key, 0) or 0
+                setattr(row, key, int(current) + int(value))  # type: ignore[arg-type]
+            else:
+                setattr(row, key, value)
+
+        row.updated_at = datetime.now(timezone.utc)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        import sys
+        print(f"[db] CRITICAL: upsert_daily_stats failed: {exc}", file=sys.stderr)
+    finally:
+        session.close()
+
+
+def has_recent_submitted_order(
+    symbol: str,
+    side: str,
+    minutes: int = 30,
+    db_path: str = "data/sauce.db",
+) -> bool:
+    """
+    Return True if a 'submitted' order for this symbol+side was written to the
+    orders table within the last `minutes` minutes.
+
+    Used as an idempotency guard before calling place_order(). If the loop
+    crashes mid-run and cron restarts it, orders already submitted to the
+    broker will be detected here and skipped rather than re-submitted
+    (Finding 3.2).
+
+    Fails OPEN (returns False) on any DB error so a transient read failure
+    never silently blocks a new order from going through.
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    session = get_session(db_path)
+    try:
+        count = (
+            session.query(OrderRow)
+            .filter(
+                OrderRow.symbol == symbol.upper(),
+                OrderRow.side == side.lower(),
+                OrderRow.status == "submitted",
+                OrderRow.created_at >= cutoff,
+            )
+            .count()
+        )
+        return count > 0
+    except Exception:  # noqa: BLE001 — fail open, never block a legitimate order
+        return False
     finally:
         session.close()

@@ -30,15 +30,13 @@ from sauce.core.schemas import AuditEvent, RiskCheckResult, RiskChecks, Signal
 
 logger = logging.getLogger(__name__)
 
-# Volatility guard: ATR/price above this threshold = too volatile to trade.
-_MAX_ATR_RATIO = 0.05  # 5% of price
-
 
 async def run(
     signal: Signal,
     account: dict,
     positions: list[dict],
     loop_id: str,
+    remaining_buying_power: float | None = None,
 ) -> RiskCheckResult:
     """
     Evaluate a signal against all configured risk limits.
@@ -48,10 +46,15 @@ async def run(
 
     Parameters
     ----------
-    signal:    Signal from the Research agent.
-    account:   Account dict from broker.get_account().
-    positions: Current open positions from broker.get_positions().
-    loop_id:   Current loop run UUID for audit correlation.
+    signal:               Signal from the Research agent.
+    account:              Account dict from broker.get_account().
+    positions:            Current open positions from broker.get_positions().
+    loop_id:              Current loop run UUID for audit correlation.
+    remaining_buying_power: Buying power still uncommitted in this loop run.
+                          Decremented by the loop after each approved buy order
+                          so that two simultaneous buy signals cannot both claim
+                          the full available cash.  When None, falls back to the
+                          raw buying_power from the account dict (safe default).
     """
     settings = get_settings()
     db_path = str(settings.db_path)
@@ -100,6 +103,14 @@ async def run(
         equity = float(account.get("equity") or 0.0)
         last_equity = float(account.get("last_equity") or equity)
         buying_power = float(account.get("buying_power") or 0.0)
+        # Use caller-supplied remaining_buying_power when available. This
+        # prevents multiple buy orders approved in the same loop run from each
+        # claiming the full raw buying_power (Finding 1.3).
+        effective_buying_power = (
+            remaining_buying_power
+            if remaining_buying_power is not None
+            else buying_power
+        )
     except (TypeError, ValueError):
         checks = RiskChecks(
             max_position_pct_ok=False,
@@ -130,6 +141,26 @@ async def run(
             confidence_ok=False,
         )
         return _veto("Mid price is zero — cannot size position.", checks)
+
+    # ── Check 0: Bid-ask spread guard (Finding 2.5) ────────────────────────────
+    price_ref = signal.evidence.price_reference
+    spread_too_wide = False
+    bid_ask_spread = 0.0
+    if price_ref.bid > 0 and price_ref.ask > 0 and price_ref.mid > 0:
+        bid_ask_spread = (price_ref.ask - price_ref.bid) / price_ref.mid
+        spread_too_wide = bid_ask_spread > settings.max_spread_pct
+
+    # ── Check 0b: Volume / liquidity guard (Finding 2.5) ─────────────────────
+    # Estimate the maximum proposed order size (shares) and compare against
+    # the average daily volume supplied by the Research agent. A proposed order
+    # exceeding max_volume_participation × daily_volume indicates excessive
+    # market impact and should be vetoed.
+    volume_too_low = False
+    volume_1d_avg = signal.evidence.indicators.volume_1d_avg
+    if volume_1d_avg is not None and volume_1d_avg > 0 and mid_price > 0:
+        # Conservative upper-bound estimate: full remaining position capacity.
+        max_proposed_qty = (equity * settings.max_position_pct) / mid_price
+        volume_too_low = max_proposed_qty > volume_1d_avg * settings.max_volume_participation
 
     # ── Check 1: Confidence floor ─────────────────────────────────────────────
     confidence_ok = signal.confidence >= settings.min_confidence
@@ -171,12 +202,15 @@ async def run(
 
     # ── Check 4: Volatility (ATR) guard ───────────────────────────────────────
     atr_14 = signal.evidence.indicators.atr_14
+    atr_ratio: float | None = None
     if atr_14 is not None and mid_price > 0:
         atr_ratio = atr_14 / mid_price
-        volatility_ok = atr_ratio < _MAX_ATR_RATIO
+        volatility_ok = atr_ratio < settings.max_atr_ratio
     else:
-        # ATR unavailable — treat as acceptable (don't block on missing data)
-        volatility_ok = True
+        # ATR unavailable — fail-closed unless operator has explicitly opted out
+        # (Finding 2.4). Instruments with too-short history or data outages are
+        # vetoed by default to prevent trading in unmeasurable volatility regimes.
+        volatility_ok = settings.allow_no_atr
 
     # ── Check 5: Daily loss ───────────────────────────────────────────────────
     # loop.py already checked this as a pre-flight. Re-confirm here.
@@ -199,6 +233,17 @@ async def run(
 
     # ── Consolidate ───────────────────────────────────────────────────────────
     failed: list[str] = []
+    if spread_too_wide:
+        failed.append(
+            f"bid-ask spread too wide ({bid_ask_spread:.2%} > {settings.max_spread_pct:.2%})"
+        )
+    if volume_too_low:
+        max_proposed_qty_display = (equity * settings.max_position_pct) / mid_price
+        failed.append(
+            f"order size ({max_proposed_qty_display:.0f} shares) would exceed "
+            f"{settings.max_volume_participation:.0%} of est. daily volume "
+            f"({volume_1d_avg:.0f} shares) — excessive market impact"
+        )
     if not confidence_ok:
         failed.append(
             f"confidence {signal.confidence:.2f} < min {settings.min_confidence}"
@@ -215,9 +260,12 @@ async def run(
             f"max ${max_exposure_value:.0f})"
         )
     if not volatility_ok:
-        failed.append(
-            f"ATR/price too high ({atr_14 / mid_price:.2%} > {_MAX_ATR_RATIO:.0%})"  # type: ignore[operator]
-        )
+        if atr_ratio is not None:
+            failed.append(
+                f"ATR/price too high ({atr_ratio:.2%} > {settings.max_atr_ratio:.0%})"
+            )
+        else:
+            failed.append("ATR unavailable — cannot assess volatility (allow_no_atr=False)")
     if not daily_loss_ok:
         failed.append("daily loss limit already breached")
 
@@ -226,9 +274,15 @@ async def run(
 
     # ── Compute approved qty ──────────────────────────────────────────────────
     approved_qty = remaining_capacity / mid_price
-    # Also cap by buying power for buy orders
+    # Also cap by buying power for buy orders. Use effective_buying_power which
+    # already has previously committed notional subtracted by the caller.
     if signal.side == "buy":
-        max_by_buying_power = buying_power / mid_price
+        if effective_buying_power <= 0:
+            return _veto(
+                "No remaining buying power for additional buy orders this run.",
+                checks,
+            )
+        max_by_buying_power = effective_buying_power / mid_price
         approved_qty = min(approved_qty, max_by_buying_power)
     # For sells: cap by existing qty (cannot short sell)
     elif signal.side == "sell":

@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from sauce.adapters.utils import call_with_retry
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent, Order, PriceReference
 
@@ -71,7 +72,7 @@ def get_account(loop_id: str = "unset") -> dict[str, Any]:
 
     try:
         client = _get_trading_client()
-        account = client.get_account()
+        account = call_with_retry(client.get_account)
         result: dict[str, Any] = account.__dict__
 
         log_event(AuditEvent(
@@ -113,7 +114,7 @@ def get_positions(loop_id: str = "unset") -> list[dict[str, Any]]:
 
     try:
         client = _get_trading_client()
-        positions = client.get_all_positions()
+        positions = call_with_retry(client.get_all_positions)
         result: list[dict[str, Any]] = [p.__dict__ for p in positions]
 
         log_event(AuditEvent(
@@ -275,13 +276,11 @@ def get_latest_quote(symbol: str, loop_id: str = "unset") -> PriceReference:
     ))
 
     try:
-        # Determine if this is a crypto pair or equity
-        is_crypto = "/" in symbol
+        # Delegate to market_data.get_quote() which enforces strict timestamp
+        # handling (no datetime.now() fallback) — Findings 6.2 and 7.5.
+        from sauce.adapters.market_data import MarketDataError, get_quote
 
-        if is_crypto:
-            price_ref = _get_crypto_quote(symbol)
-        else:
-            price_ref = _get_equity_quote(symbol)
+        price_ref = get_quote(symbol)
 
         log_event(AuditEvent(
             loop_id=loop_id,
@@ -297,57 +296,14 @@ def get_latest_quote(symbol: str, loop_id: str = "unset") -> PriceReference:
 
         return price_ref
 
+    except MarketDataError as exc:
+        _log_broker_error(loop_id, f"get_latest_quote({symbol})", exc)
+        raise BrokerError(f"get_latest_quote failed for {symbol}: {exc}") from exc
     except BrokerError:
         raise
     except Exception as exc:
         _log_broker_error(loop_id, f"get_latest_quote({symbol})", exc)
         raise BrokerError(f"get_latest_quote failed for {symbol}: {exc}") from exc
-
-
-def _get_equity_quote(symbol: str) -> PriceReference:
-    """Fetch latest equity quote via Alpaca data API."""
-    from alpaca.data.historical import StockHistoricalDataClient  # type: ignore[import-untyped]
-    from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
-
-    settings = get_settings()
-    client = StockHistoricalDataClient(
-        api_key=settings.alpaca_api_key,
-        secret_key=settings.alpaca_secret_key,
-    )
-    request = StockLatestQuoteRequest(symbol_or_symbols=symbol)
-    response = client.get_stock_latest_quote(request)
-    quote = response[symbol]
-
-    bid = float(quote.bid_price or 0.0)
-    ask = float(quote.ask_price or 0.0)
-    mid = (bid + ask) / 2 if bid > 0 and ask > 0 else float(quote.ask_price or quote.bid_price or 0.0)
-
-    as_of = quote.timestamp if hasattr(quote, "timestamp") and quote.timestamp else datetime.now(timezone.utc)
-
-    return PriceReference(symbol=symbol, bid=bid, ask=ask, mid=mid, as_of=as_of)
-
-
-def _get_crypto_quote(symbol: str) -> PriceReference:
-    """Fetch latest crypto quote via Alpaca crypto data API."""
-    from alpaca.data.historical import CryptoHistoricalDataClient  # type: ignore[import-untyped]
-    from alpaca.data.requests import CryptoLatestQuoteRequest  # type: ignore[import-untyped]
-
-    settings = get_settings()
-    client = CryptoHistoricalDataClient(
-        api_key=settings.alpaca_api_key,
-        secret_key=settings.alpaca_secret_key,
-    )
-    request = CryptoLatestQuoteRequest(symbol_or_symbols=symbol)
-    response = client.get_crypto_latest_quote(request)
-    quote = response[symbol]
-
-    bid = float(quote.bid_price or 0.0)
-    ask = float(quote.ask_price or 0.0)
-    mid = (bid + ask) / 2 if bid > 0 and ask > 0 else float(quote.ask_price or quote.bid_price or 0.0)
-
-    as_of = quote.timestamp if hasattr(quote, "timestamp") and quote.timestamp else datetime.now(timezone.utc)
-
-    return PriceReference(symbol=symbol, bid=bid, ask=ask, mid=mid, as_of=as_of)
 
 
 # ── Error logging helper ──────────────────────────────────────────────────────

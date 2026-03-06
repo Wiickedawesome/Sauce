@@ -20,6 +20,7 @@ from typing import Any
 
 import pandas as pd
 
+from sauce.adapters.utils import call_with_retry
 from sauce.core.config import get_settings
 from sauce.core.schemas import PriceReference
 
@@ -76,7 +77,10 @@ def _equity_quote(symbol: str) -> PriceReference:
     from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
 
     client = _get_stock_client()
-    response = client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbol))
+    response = call_with_retry(
+        client.get_stock_latest_quote,
+        StockLatestQuoteRequest(symbol_or_symbols=symbol),
+    )
     quote = response[symbol]
 
     bid = float(quote.bid_price or 0.0)
@@ -91,7 +95,10 @@ def _crypto_quote(symbol: str) -> PriceReference:
     from alpaca.data.requests import CryptoLatestQuoteRequest  # type: ignore[import-untyped]
 
     client = _get_crypto_client()
-    response = client.get_crypto_latest_quote(CryptoLatestQuoteRequest(symbol_or_symbols=symbol))
+    response = call_with_retry(
+        client.get_crypto_latest_quote,
+        CryptoLatestQuoteRequest(symbol_or_symbols=symbol),
+    )
     quote = response[symbol]
 
     bid = float(quote.bid_price or 0.0)
@@ -152,7 +159,7 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
         limit=bars,
         adjustment="raw",
     )
-    bars_response = client.get_stock_bars(request)
+    bars_response = call_with_retry(client.get_stock_bars, request)
     df = bars_response.df
 
     if df.empty:
@@ -174,7 +181,7 @@ def _crypto_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
         start=start,
         limit=bars,
     )
-    bars_response = client.get_crypto_bars(request)
+    bars_response = call_with_retry(client.get_crypto_bars, request)
     df = bars_response.df
 
     if df.empty:
@@ -221,7 +228,10 @@ def _equity_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
 
     client = _get_stock_client()
-    response = client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbols))
+    response = call_with_retry(
+        client.get_stock_latest_quote,
+        StockLatestQuoteRequest(symbol_or_symbols=symbols),
+    )
 
     result: dict[str, PriceReference] = {}
     for symbol, quote in response.items():
@@ -238,7 +248,10 @@ def _crypto_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     from alpaca.data.requests import CryptoLatestQuoteRequest  # type: ignore[import-untyped]
 
     client = _get_crypto_client()
-    response = client.get_crypto_latest_quote(CryptoLatestQuoteRequest(symbol_or_symbols=symbols))
+    response = call_with_retry(
+        client.get_crypto_latest_quote,
+        CryptoLatestQuoteRequest(symbol_or_symbols=symbols),
+    )
 
     result: dict[str, PriceReference] = {}
     for symbol, quote in response.items():

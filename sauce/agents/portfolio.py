@@ -26,18 +26,13 @@ from sauce.core.schemas import AuditEvent, PortfolioReview, PositionNote, Signal
 
 logger = logging.getLogger(__name__)
 
-# ATR multipliers for stop-loss and profit target
-_STOP_LOSS_ATR_MULTIPLE: float = 2.0
-_PROFIT_TARGET_ATR_MULTIPLE: float = 3.0
-# Flag as over-concentrated if position value > equity * max_position_pct * multiplier
-_OVER_CONCENTRATION_MULTIPLIER: float = 2.0
-
 
 async def run(
     symbols: list[str],
     positions: list[dict[str, Any]],
     signals: list[Signal],
     loop_id: str,
+    equity: float = 0.0,
 ) -> PortfolioReview:
     """
     Review current portfolio and generate position notes.
@@ -48,6 +43,9 @@ async def run(
     positions:  Current open positions from broker.get_positions().
     signals:    All signals generated this run (for stop/target computation).
     loop_id:    Current loop run UUID for audit correlation.
+    equity:     Account equity in USD, used for accurate exposure and
+                concentration calculations (Finding 1.5, 1.6). When 0 the
+                agent falls back to position-count approximation.
 
     Returns
     -------
@@ -62,8 +60,8 @@ async def run(
     }
     universe_upper: set[str] = {s.upper() for s in symbols}
 
-    # ── Compute total position value (for exposure fraction) ───────────────────────
-    # Use market_value if available, otherwise qty * mid from signal
+    # ── Compute total position value and effective equity ───────────────────────
+    # Use market_value if available, otherwise qty * mid from signal.
     total_pos_value = 0.0
     for pos in positions:
         try:
@@ -72,12 +70,12 @@ async def run(
             mv = 0.0
         total_pos_value += abs(mv)
 
-    # Equity from positions is not available here directly; approximate with
-    # sum of market values as denominator only for concentration ratio.
-    # Over-concentration uses settings.max_position_pct * multiplier * total_pos_value.
+    # For concentration checks prefer caller-supplied equity; fall back to
+    # total position value only when equity is unavailable (Finding 1.6).
+    effective_equity = equity if equity > 0 else total_pos_value
     max_single_position_value = (
-        total_pos_value * settings.max_position_pct * _OVER_CONCENTRATION_MULTIPLIER
-        if total_pos_value > 0
+        effective_equity * settings.max_position_pct * settings.over_concentration_multiplier
+        if effective_equity > 0
         else 0.0
     )
 
@@ -110,11 +108,11 @@ async def run(
         suggested_target: float | None = None
         if mid_for_stops is not None and atr_14 is not None and atr_14 > 0:
             if qty > 0:  # Long position
-                suggested_stop = mid_for_stops - _STOP_LOSS_ATR_MULTIPLE * atr_14
-                suggested_target = mid_for_stops + _PROFIT_TARGET_ATR_MULTIPLE * atr_14
+                suggested_stop = mid_for_stops - settings.stop_loss_atr_multiple * atr_14
+                suggested_target = mid_for_stops + settings.profit_target_atr_multiple * atr_14
             else:  # Short position
-                suggested_stop = mid_for_stops + _STOP_LOSS_ATR_MULTIPLE * atr_14
-                suggested_target = mid_for_stops - _PROFIT_TARGET_ATR_MULTIPLE * atr_14
+                suggested_stop = mid_for_stops + settings.stop_loss_atr_multiple * atr_14
+                suggested_target = mid_for_stops - settings.profit_target_atr_multiple * atr_14
 
         # Over-concentration check
         over_concentrated = (
@@ -135,10 +133,12 @@ async def run(
             )
         )
 
-    # ── Total exposure fraction ────────────────────────────────────────────────
-    # Approximate: each position at max_position_pct contributes that fraction.
-    # Cap at 1.0 (fully exposed).
-    total_exposure_pct = min(1.0, len(positions) * settings.max_position_pct)
+    # ── Total exposure fraction (Finding 1.5) ───────────────────────────────
+    # Prefer real equity as denominator; fall back to position-count estimate.
+    if equity > 0:
+        total_exposure_pct = min(1.0, total_pos_value / equity)
+    else:
+        total_exposure_pct = min(1.0, len(positions) * settings.max_position_pct)
 
     # ── Uncovered symbols ──────────────────────────────────────────────────────
     covered_symbols = set(signal_by_symbol.keys())

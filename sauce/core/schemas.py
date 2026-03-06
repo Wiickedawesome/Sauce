@@ -45,6 +45,7 @@ class Indicators(StrictModel):
     rsi_14: float | None = None
     atr_14: float | None = None
     volume_ratio: float | None = None  # today's volume / 20-day avg volume
+    volume_1d_avg: float | None = None  # estimated average daily volume in shares (Finding 2.5)
 
 
 class Evidence(StrictModel):
@@ -181,7 +182,8 @@ class AuditEvent(StrictModel):
         "risk_check",
         "order",
         "order_prepared",
-        "fill",
+        "order_submitted",   # broker confirmed submission (not fill) — Finding 5.4
+        "fill",              # kept for legacy compatibility; prefer order_submitted
         "veto",
         "error",
         "stub_called",

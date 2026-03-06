@@ -38,8 +38,8 @@ _NOW = datetime(2024, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
 
 def _fresh_quote(
     symbol: str = "AAPL",
-    bid: float = 99.0,
-    ask: float = 101.0,
+    bid: float = 99.9,
+    ask: float = 100.1,
     mid: float = 100.0,
 ) -> PriceReference:
     return PriceReference(
@@ -188,6 +188,14 @@ def _settings_patch(tmp_path: Path) -> dict:
         "max_price_deviation": 0.01,
         "trading_universe": ["AAPL", "MSFT"],
         "alpaca_paper": True,
+        "max_atr_ratio": 0.05,
+        "allow_no_atr": False,
+        "stop_loss_atr_multiple": 2.0,
+        "profit_target_atr_multiple": 3.0,
+        "over_concentration_multiplier": 2.0,
+        "max_limit_price_premium": 0.001,
+        "max_spread_pct": 0.005,
+        "alert_webhook_url": "",
     }
 
 
@@ -942,11 +950,11 @@ class TestOpsAgent:
             asyncio.run(ops.run("test-loop", summary))
 
         log_dir = Path(str(settings.db_path)).parent / "logs"
-        log_files = list(log_dir.glob("daily_*.txt"))
+        log_files = list(log_dir.glob("daily_*.jsonl"))
         assert len(log_files) == 1
         content = log_files[0].read_text()
-        assert "test-loo" in content  # loop_id[:8] truncation
-        assert "supervisor=execute" in content
+        assert "test-loop" in content
+        assert "execute" in content
 
     def test_detects_100pct_veto_anomaly(self, tmp_path: Path) -> None:
         """All signals vetoed across 3 symbols → pause_trading called."""

@@ -36,14 +36,14 @@ def reset_db_and_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADING_UNIVERSE_EQUITIES", "AAPL")
     monkeypatch.setenv("TRADING_UNIVERSE_CRYPTO", "BTC/USD")
 
-    db_module._engine = None
+    db_module._engines = {}
 
     from sauce.core.config import get_settings
     get_settings.cache_clear()
 
     yield
 
-    db_module._engine = None
+    db_module._engines = {}
     get_settings.cache_clear()
 
 
@@ -319,8 +319,8 @@ async def test_loop_aborts_on_daily_loss_breach(monkeypatch):
         "portfolio_value": "9500.00",
     }
 
-    with patch("sauce.adapters.broker.get_account", return_value=bad_account):
-        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+    with patch("sauce.core.loop.get_account", return_value=bad_account):
+        with patch("sauce.core.loop.get_positions", return_value=[]):
             with patch("sauce.agents.research.run", new=AsyncMock()) as mock_research:
                 from sauce.core.loop import main
                 await main()

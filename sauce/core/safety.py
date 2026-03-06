@@ -15,7 +15,7 @@ Market hours note:
 """
 
 import logging
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 from sauce.core.config import get_settings
@@ -29,6 +29,11 @@ _ET = ZoneInfo("America/New_York")
 # US equity market open/close times (Eastern)
 _MARKET_OPEN = time(9, 30, 0)
 _MARKET_CLOSE = time(16, 0, 0)
+
+# Minimum time-of-day before trusting last_equity for daily-loss calc (Finding 1.7).
+# Alpaca resets last_equity at market open; before ~06:30 ET it may still carry
+# the prior session’s value and produce a misleading daily P&L figure.
+_MIN_DAILY_LOSS_CHECK_TIME = time(6, 30, 0)
 
 
 def _now_et() -> datetime:
@@ -204,12 +209,36 @@ def check_daily_loss(account: dict, loop_id: str = "unset") -> bool:
     from sauce.adapters.db import log_event
 
     settings = get_settings()
+    db_path = str(settings.db_path)
+
+    # Finding 1.7: Skip daily loss check before 06:30 ET.
+    # Alpaca resets last_equity at market open; checking before it settles
+    # can produce a spurious large loss and block legitimate trading.
+    now_et = _now_et()
+    if now_et.time() < _MIN_DAILY_LOSS_CHECK_TIME:
+        logger.info(
+            "check_daily_loss: before %s ET (%s) — skipping stale last_equity check [loop_id=%s]",
+            _MIN_DAILY_LOSS_CHECK_TIME.strftime("%H:%M"),
+            now_et.strftime("%H:%M %Z"),
+            loop_id,
+        )
+        log_event(
+            AuditEvent(
+                loop_id=loop_id,
+                event_type="safety_check",
+                payload={
+                    "check": "daily_loss",
+                    "result": True,
+                    "reason": "pre-06:30 ET — last_equity not yet settled",
+                },
+            ),
+            db_path=db_path,
+        )
+        return True
 
     try:
         equity = float(account.get("equity") or 0.0)
         last_equity = float(account.get("last_equity") or 0.0)
-
-        db_path = str(settings.db_path)
 
         if last_equity <= 0.0:
             # Cannot compute — default to blocking if we have no reference point
@@ -273,6 +302,80 @@ def check_daily_loss(account: dict, loop_id: str = "unset") -> bool:
         return False
 
 
+# ── NYSE holiday helpers (Finding 7.7) ───────────────────────────────────────
+
+def _nyse_holidays(year: int) -> frozenset[date]:
+    """
+    Return the set of NYSE market holidays for the given year.
+
+    Computed algorithmically from the official NYSE holiday schedule:
+    New Year’s, MLK Day, Presidents’ Day, Good Friday, Memorial Day,
+    Juneteenth, Independence Day, Labor Day, Thanksgiving, Christmas.
+
+    Saturday holidays are observed the preceding Friday; Sunday holidays
+    are observed the following Monday — matching NYSE practice.
+    """
+    import calendar
+    from datetime import timedelta
+
+    def _observed(d: date) -> date:
+        """Shift weekend holidays to their NYSE-observed weekday."""
+        if d.weekday() == 5:   # Saturday → Friday
+            return d - timedelta(days=1)
+        if d.weekday() == 6:   # Sunday → Monday
+            return d + timedelta(days=1)
+        return d
+
+    def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+        """Return the n-th occurrence (1-based) of weekday in the given month/year."""
+        # weekday: 0=Mon, 6=Sun
+        first = date(year, month, 1)
+        delta = (weekday - first.weekday()) % 7
+        first_occurrence = first + timedelta(days=delta)
+        return first_occurrence + timedelta(weeks=n - 1)
+
+    def _last_weekday(year: int, month: int, weekday: int) -> date:
+        """Return the last occurrence of weekday in the given month."""
+        last_day = date(year, month, calendar.monthrange(year, month)[1])
+        delta = (last_day.weekday() - weekday) % 7
+        return last_day - timedelta(days=delta)
+
+    def _good_friday(year: int) -> date:
+        """Compute Good Friday via the anonymous Gregorian algorithm."""
+        a = year % 19
+        b, c = divmod(year, 100)
+        d, e = divmod(b, 4)
+        f = (b + 8) // 25
+        g = (b - f + 1) // 3
+        h = (19 * a + b - d - g + 15) % 30
+        i, k = divmod(c, 4)
+        l = (32 + 2 * e + 2 * i - h - k) % 7  # noqa: E741
+        m = (a + 11 * h + 22 * l) // 451
+        month = (h + l - 7 * m + 114) // 31
+        day = ((h + l - 7 * m + 114) % 31) + 1
+        easter_sunday = date(year, month, day)
+        return easter_sunday - timedelta(days=2)
+
+    holidays = {
+        _observed(date(year, 1, 1)),                      # New Year’s Day
+        _nth_weekday(year, 1, 0, 3),                      # MLK Day (3rd Mon Jan)
+        _nth_weekday(year, 2, 0, 3),                      # Presidents’ Day (3rd Mon Feb)
+        _good_friday(year),                               # Good Friday
+        _last_weekday(year, 5, 0),                        # Memorial Day (last Mon May)
+        _observed(date(year, 6, 19)),                     # Juneteenth
+        _observed(date(year, 7, 4)),                      # Independence Day
+        _nth_weekday(year, 9, 0, 1),                      # Labor Day (1st Mon Sep)
+        _nth_weekday(year, 11, 3, 4),                     # Thanksgiving (4th Thu Nov)
+        _observed(date(year, 12, 25)),                    # Christmas Day
+    }
+    return frozenset(holidays)
+
+
+def _is_nyse_holiday(d: date) -> bool:
+    """Return True if d is a NYSE market holiday."""
+    return d in _nyse_holidays(d.year)
+
+
 # ── Market Hours ──────────────────────────────────────────────────────────────
 
 def check_market_hours(symbol: str = "", loop_id: str = "unset") -> bool:
@@ -302,5 +405,127 @@ def check_market_hours(symbol: str = "", loop_id: str = "unset") -> bool:
     if now_et.weekday() >= 5:
         return False
 
+    # NYSE market holiday check (Finding 7.7)
+    if _is_nyse_holiday(now_et.date()):
+        return False
+
     current_time = now_et.time()
     return _MARKET_OPEN <= current_time < _MARKET_CLOSE
+
+
+# ── Earnings Proximity Guard (Finding 2.6) ────────────────────────────────────
+
+# Keywords that indicate an earnings event in a news headline.
+_EARNINGS_KEYWORDS = frozenset({
+    "earnings",
+    "quarterly results",
+    "q1 results", "q2 results", "q3 results", "q4 results",
+    "annual results",
+    "eps",
+    "profit report",
+    "reports earnings",
+    "beats estimates",
+    "misses estimates",
+})
+
+
+def has_earnings_risk(symbol: str, loop_id: str = "unset") -> bool:
+    """
+    Return True if the symbol has a scheduled or recently-announced earnings
+    event within the configured blackout window (earnings_blackout_days).
+
+    Detection strategy: query Alpaca News for the symbol over the blackout
+    window and scan headlines for earnings-related keywords. If the news
+    API is unavailable, fails OPEN (returns False) so infrastructure outages
+    do not block trading.
+
+    Called per-symbol in the loop eligibility filter BEFORE research.run().
+
+    Parameters
+    ----------
+    symbol:   Trading symbol to check.
+    loop_id:  For audit correlation.
+
+    Returns
+    -------
+    True  → earnings risk detected; suppress signal for this window.
+    False → no earnings risk detected (or News API unavailable).
+    """
+    from datetime import timedelta
+
+    from sauce.adapters.db import log_event
+
+    settings = get_settings()
+    db_path = str(settings.db_path)
+    blackout_days = settings.earnings_blackout_days
+
+    if blackout_days <= 0:
+        return False  # operator has disabled earnings blackout
+
+    # Crypto pairs (e.g. BTC/USD) don't have earnings — skip the check entirely.
+    if "/" in symbol:
+        return False
+
+    now_utc = datetime.now(timezone.utc)
+    window_start = now_utc - timedelta(days=blackout_days)
+    window_end = now_utc + timedelta(days=blackout_days)
+
+    try:
+        from alpaca.data.historical import NewsClient  # type: ignore[import-untyped]
+        from alpaca.data.requests import NewsRequest  # type: ignore[import-untyped]
+
+        client = NewsClient(
+            api_key=settings.alpaca_api_key,
+            secret_key=settings.alpaca_secret_key,
+        )
+        request = NewsRequest(
+            symbols=[symbol],
+            start=window_start,
+            end=window_end,
+            limit=20,
+        )
+        response = client.get_news(request)
+        articles = response.news if hasattr(response, "news") else []
+
+        for article in articles:
+            headline = str(getattr(article, "headline", "")).lower()
+            summary = str(getattr(article, "summary", "")).lower()
+            combined = headline + " " + summary
+            if any(kw in combined for kw in _EARNINGS_KEYWORDS):
+                logger.info(
+                    "has_earnings_risk[%s]: earnings signal detected in news — vetoing. "
+                    "headline=%r [loop_id=%s]",
+                    symbol, headline[:120], loop_id,
+                )
+                log_event(
+                    AuditEvent(
+                        loop_id=loop_id,
+                        event_type="safety_check",
+                        symbol=symbol,
+                        payload={
+                            "check": "earnings_proximity",
+                            "result": True,
+                            "headline_preview": headline[:120],
+                            "blackout_days": blackout_days,
+                        },
+                    ),
+                    db_path=db_path,
+                )
+                return True
+
+        return False
+
+    except ImportError:
+        # alpaca-py NewsClient not available in this SDK version — skip check
+        logger.debug(
+            "has_earnings_risk[%s]: NewsClient not available — skipping [loop_id=%s]",
+            symbol, loop_id,
+        )
+        return False
+    except Exception as exc:
+        # Any infrastructure failure → fail open (don't block trading on a lookup error)
+        logger.warning(
+            "has_earnings_risk[%s]: news API error — skipping earnings check: %s [loop_id=%s]",
+            symbol, exc, loop_id,
+        )
+        return False

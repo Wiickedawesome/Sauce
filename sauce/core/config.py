@@ -55,11 +55,81 @@ class Settings(BaseSettings):
     data_ttl_seconds: int = Field(default=120, ge=1)
     max_price_deviation: float = Field(default=0.01, ge=0.0, le=1.0)
 
+    # ── Volatility / ATR parameters (Finding 1.8 / 2.4) ─────────────────────
+    max_atr_ratio: float = Field(
+        default=0.05, ge=0.0,
+        description="Maximum ATR/price ratio permitted before vetoing a trade (5%).",
+    )
+    allow_no_atr: bool = Field(
+        default=False,
+        description="If True, approve trades when ATR data is unavailable. "
+                    "Defaults to False (fail-closed) to prevent trading illiquid/new instruments.",
+    )
+    stop_loss_atr_multiple: float = Field(
+        default=2.0, ge=0.0,
+        description="Stop-loss distance = ATR × this multiple.",
+    )
+    profit_target_atr_multiple: float = Field(
+        default=3.0, ge=0.0,
+        description="Profit-target distance = ATR × this multiple.",
+    )
+    over_concentration_multiplier: float = Field(
+        default=2.0, ge=1.0,
+        description="A single position exceeding equity × max_position_pct × this "
+                    "value is flagged as over-concentrated.",
+    )
+
+    # ── Order Execution parameters (Finding 1.9) ─────────────────────────────
+    max_limit_price_premium: float = Field(
+        default=0.001, ge=0.0, le=0.05,
+        description="Maximum deviation of limit_price from ask/bid as a fraction "
+                    "(e.g. 0.001 = 0.1%). Buy orders must not exceed ask × (1 + premium).",
+    )
+
+    # ── Liquidity / Spread parameters (Finding 2.5) ──────────────────────────
+    max_spread_pct: float = Field(
+        default=0.005, ge=0.0, le=1.0,
+        description="Maximum permissible bid-ask spread as a fraction of mid price "
+                    "(e.g. 0.005 = 0.5%). Trades on wider instruments are vetoed.",
+    )
+    max_volume_participation: float = Field(
+        default=0.01, ge=0.0, le=1.0,
+        description="Maximum fraction of estimated daily volume the proposed order "
+                    "may represent (e.g. 0.01 = 1%). Orders exceeding this are vetoed "
+                    "to avoid excessive market impact (Finding 2.5).",
+    )
+
+    # ── Earnings blackout parameters (Finding 2.6) ────────────────────────────
+    earnings_blackout_days: int = Field(
+        default=1, ge=0,
+        description="Number of calendar days before and after a scheduled earnings "
+                    "announcement to suppress trading signals for that symbol (Finding 2.6).",
+    )
+
+    # ── Fund Fee Parameters ───────────────────────────────────────────────────
+    annual_management_fee_pct: float = Field(
+        default=0.01, ge=0.0, le=0.10,
+        description="Annual management fee as a decimal (e.g. 0.01 = 1%). "
+                    "Accrued daily as equity × rate / 252.",
+    )
+    performance_fee_pct: float = Field(
+        default=0.20, ge=0.0, le=0.50,
+        description="Performance fee rate above the high-water mark (e.g. 0.20 = 20%). "
+                    "Applied only when ending NAV exceeds the prior high-water mark.",
+    )
+
     # ── Safety ────────────────────────────────────────────────────────────────
     trading_pause: bool = Field(default=False)
 
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = Field(default="data/sauce.db")
+
+    # ── Alerting (Finding 5.2) ────────────────────────────────────────────────
+    alert_webhook_url: str = Field(
+        default="",
+        description="Slack or generic webhook URL for critical alert notifications. "
+                    "If empty, alerts are written to Python logging only.",
+    )
 
     # ── Prompt Versioning ─────────────────────────────────────────────────────
     prompt_version: str = Field(default="v1")

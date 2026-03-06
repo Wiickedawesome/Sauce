@@ -28,8 +28,9 @@ from sauce.adapters import llm
 from sauce.adapters.db import log_event
 from sauce.core.config import get_settings
 from sauce.core.safety import is_data_fresh, is_trading_paused
-from sauce.core.schemas import AuditEvent, Order, RiskCheckResult, Signal, SupervisorDecision
+from sauce.core.schemas import AuditEvent, Order, PortfolioReview, RiskCheckResult, Signal, SupervisorDecision
 from sauce.prompts import supervisor as supervisor_prompts
+from sauce.prompts.utils import sanitize_llm_text
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ async def run(
     risk_results: list[RiskCheckResult],
     account: dict,
     loop_id: str,
+    portfolio_review: PortfolioReview | None = None,
 ) -> SupervisorDecision:
     """
     Perform pre-flight checks then ask Claude for a final execute/abort decision.
@@ -54,6 +56,10 @@ async def run(
     risk_results: All risk results from the Risk agent (same loop run).
     account:      Account dict from broker.get_account().
     loop_id:      Current loop run UUID for audit correlation.
+    portfolio_review: Optional portfolio review from the Portfolio agent.  When
+                  provided, the summary is included in the Claude prompt so that
+                  the model is aware of existing exposure and rebalance needs
+                  (Finding 2.2).
     """
     settings = get_settings()
     db_path = str(settings.db_path)
@@ -129,7 +135,25 @@ async def run(
             f"Orders for {unapproved} have no approved risk check — aborting all.",
             vetoes=unapproved,
         )
-
+    # ── Pre-flight 5: Deterministic buying-power check (Finding 2.3) ───────────
+    # Block submission before calling Claude if the aggregate buy notional
+    # already exceeds 90% of buying power. This is a hard, arithmetic gate—not
+    # subject to LLM hallucination or mis-parse.
+    try:
+        buying_power = float(account.get("buying_power") or 0.0)
+        total_buy_notional = sum(
+            (o.limit_price or 0.0) * (o.qty or 0.0)
+            for o in orders
+            if o.side == "buy"
+        )
+        if buying_power > 0 and total_buy_notional > buying_power * 0.90:
+            return _abort(
+                f"Aggregate buy notional ${total_buy_notional:.2f} exceeds "
+                f"90% of buying power ${buying_power:.2f} — aborting.",
+                vetoes=[o.symbol for o in orders if o.side == "buy"],
+            )
+    except (TypeError, ValueError):
+        pass  # If we can’t parse buying power, let Claude decide.
     # ── Claude gate ─────────────────────────────────────────────────────────────
     orders_dicts = [o.model_dump(mode="json") for o in orders]
     signals_summary = [
@@ -137,7 +161,14 @@ async def run(
             "symbol": s.symbol,
             "side": s.side,
             "confidence": s.confidence,
-            "reasoning": s.reasoning,
+            # Sanitize and delimit LLM-generated reasoning before embedding in
+            # this prompt. Prevents a compromised Research agent from injecting
+            # instructions into the Supervisor gate (Finding 6.1).
+            "reasoning": (
+                "[RESEARCH_REASONING_START] "
+                + sanitize_llm_text(s.reasoning, max_len=200)
+                + " [RESEARCH_REASONING_END]"
+            ),
         }
         for s in signals
         if s.side != "hold"
@@ -148,6 +179,7 @@ async def run(
         account=account,
         prompt_version=settings.prompt_version,
         as_of_utc=as_of,
+        portfolio_review=portfolio_review.model_dump(mode="json") if portfolio_review else None,
     )
 
     try:

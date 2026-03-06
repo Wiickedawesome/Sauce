@@ -19,8 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sauce.adapters.db import log_event
+from sauce.adapters.db import log_event, upsert_daily_stats
+from sauce.adapters.notify import send_alert
 from sauce.core.config import get_settings
+from sauce.core.nav import compute_nav_and_fees
 from sauce.core.safety import pause_trading
 from sauce.core.schemas import AuditEvent
 
@@ -30,6 +32,8 @@ logger = logging.getLogger(__name__)
 _ANOMALY_VETO_SYMBOL_THRESHOLD = 3
 # How many times the same symbol must be vetoed to flag it as anomalous.
 _PER_SYMBOL_VETO_THRESHOLD = 3
+# How many consecutive loop-level errors before triggering circuit breaker (Finding 4.3).
+_CIRCUIT_BREAKER_THRESHOLD = 3
 
 
 async def run(
@@ -124,7 +128,37 @@ async def run(
             "ops[%s]: supervisor aborted %d prepared orders",
             loop_id, orders_prepared,
         )
+    # Anomaly 5: circuit breaker — consecutive loop-level errors (Finding 4.3)
+    # Count error events at loop/infrastructure scope (not per-symbol) in recent
+    # runs. If the last N loop_end events all had preceding stage errors, the
+    # infrastructure is likely broken — pause and alert.
+    try:
+        _recent_error_count = _count_recent_loop_errors(
+            db_path=db_path,
+            threshold=_CIRCUIT_BREAKER_THRESHOLD,
+        )
+        if _recent_error_count >= _CIRCUIT_BREAKER_THRESHOLD:
+            _cb_reason = (
+                f"Circuit breaker: {_recent_error_count} consecutive loop-level "
+                "errors detected — auto-pausing."
+            )
+            anomalies.append("circuit_breaker_triggered")
+            logger.critical("ops[%s]: %s", loop_id, _cb_reason)
+            send_alert("CRITICAL", _cb_reason, loop_id=loop_id)
+            try:
+                pause_trading(reason=_cb_reason, loop_id=loop_id)
+            except Exception as _pause_exc:  # noqa: BLE001
+                logger.error("ops[%s]: circuit-breaker pause failed: %s", loop_id, _pause_exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ops[%s]: circuit-breaker check failed: %s", loop_id, exc)
 
+    # Send alert for any high-severity anomalies found this run.
+    if anomalies:
+        send_alert(
+            "WARNING",
+            f"Anomalies detected: {', '.join(anomalies)}",
+            loop_id=loop_id,
+        )
     # ── Log final AuditEvent ─────────────────────────────────────────────────────
     log_event(
         AuditEvent(
@@ -141,7 +175,46 @@ async def run(
         ),
         db_path=db_path,
     )
+    # ── NAV calculation and daily stats (Finding 1.1, Finding 5.1) ─────────────
+    date_str = now.strftime("%Y-%m-%d")
+    equity_usd: float = float(summary.get("equity_usd") or 0.0)
+    nav_result: dict[str, float] = {}
 
+    if equity_usd > 0:
+        try:
+            nav_result = compute_nav_and_fees(
+                equity=equity_usd,
+                date=date_str,
+                db_path=db_path,
+                settings=settings,
+                loop_id=loop_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("ops[%s]: NAV computation failed: %s", loop_id, exc)
+            log_event(
+                AuditEvent(
+                    loop_id=loop_id,
+                    event_type="error",
+                    payload={"agent": "ops", "error": f"NAV computation: {exc}"},
+                    prompt_version=settings.prompt_version,
+                ),
+                db_path=db_path,
+            )
+
+    # Persist daily stats so DailyStatsRow is actually populated (Finding 5.1).
+    try:
+        upsert_daily_stats(
+            date=date_str,
+            db_path=db_path,
+            loop_runs=1,
+            signals_generated=signals_total,
+            signals_vetoed=risk_vetoes,
+            orders_placed=int(summary.get("orders_placed", 0)),
+            ending_nav_usd=nav_result.get("fully_adjusted_nav", equity_usd),
+            trading_paused=supervisor_action == "abort",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("ops[%s]: upsert_daily_stats failed: %s", loop_id, exc)
     # ── Write daily log file ──────────────────────────────────────────────────────
     _write_daily_log(
         loop_id=loop_id,
@@ -169,23 +242,95 @@ def _write_daily_log(
     orders_placed: int,
     anomalies: list[str],
 ) -> None:
-    """Append one line per loop run to the daily log file."""
+    """Append one JSON line per loop run to the daily log file (jsonlines format, Finding 5.3)."""
+    import json
     try:
         log_dir = Path(db_path).parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         date_str = now.strftime("%Y-%m-%d")
-        log_file = log_dir / f"daily_{date_str}.txt"
-        line = (
-            f"{now.isoformat()} "
-            f"loop={loop_id[:8]} "
-            f"signals={signals_total}(active={signals_buy_sell}) "
-            f"vetoes={risk_vetoes} "
-            f"orders_prepared={orders_prepared} "
-            f"supervisor={supervisor_action} "
-            f"placed={orders_placed} "
-            f"anomalies={anomalies or 'none'}\n"
-        )
+        log_file = log_dir / f"daily_{date_str}.jsonl"
+        record = {
+            "timestamp": now.isoformat(),
+            "loop_id": loop_id,
+            "signals_total": signals_total,
+            "signals_buy_sell": signals_buy_sell,
+            "risk_vetoes": risk_vetoes,
+            "orders_prepared": orders_prepared,
+            "supervisor_action": supervisor_action,
+            "orders_placed": orders_placed,
+            "anomalies": anomalies,
+        }
         with log_file.open("a", encoding="utf-8") as fh:
-            fh.write(line)
+            fh.write(json.dumps(record) + "\n")
     except OSError as exc:
         logger.error("ops: failed to write daily log: %s", exc)
+
+
+def _count_recent_loop_errors(
+    db_path: str,
+    threshold: int = 3,
+) -> int:
+    """
+    Count how many of the most recent loop runs ended with a stage-level error
+    event (e.g. stage in get_account, get_positions, supervisor, etc.).
+
+    Returns the count of such loop IDs found in the last threshold*2 loop_end
+    events.  Used by the circuit breaker (Finding 4.3).
+    """
+    try:
+        from sqlalchemy import text
+        from sauce.adapters.db import get_session
+
+        session = get_session(db_path)
+        try:
+            # Fetch the most recent (threshold * 2) loop IDs from loop_end events.
+            loop_rows = session.execute(
+                text(
+                    "SELECT loop_id FROM audit_events "
+                    "WHERE event_type = 'loop_end' "
+                    "ORDER BY timestamp DESC "
+                    "LIMIT :limit"
+                ),
+                {"limit": threshold * 2},
+            ).fetchall()
+
+            if not loop_rows:
+                return 0
+
+            recent_loop_ids = [str(r[0]) for r in loop_rows]
+
+            # For each loop ID, check if it has a stage-level error event.
+            # Stage-level errors: stage in (get_account, get_positions,
+            # get_universe_snapshot, supervisor, portfolio, ops, main).
+            error_loop_ids: set[str] = set()
+            for lid in recent_loop_ids:
+                count = session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM audit_events "
+                        "WHERE loop_id = :lid "
+                        "AND event_type = 'error' "
+                        "AND json_extract(payload, '$.stage') IN ("
+                        "  'get_account', 'get_positions', 'get_universe_snapshot',"
+                        "  'supervisor', 'portfolio', 'ops', 'main'"
+                        ")"
+                    ),
+                    {"lid": lid},
+                ).scalar()
+                if count and count > 0:
+                    error_loop_ids.add(lid)
+        finally:
+            session.close()
+
+        # Count consecutive runs from the most recent that had errors.
+        consecutive = 0
+        for lid in recent_loop_ids:
+            if lid in error_loop_ids:
+                consecutive += 1
+            else:
+                break  # First clean run resets the streak.
+
+        return consecutive
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ops: _count_recent_loop_errors failed: %s", exc)
+        return 0

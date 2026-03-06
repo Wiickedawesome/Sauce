@@ -132,6 +132,17 @@ async def run(
     except (TypeError, ValueError, IndexError):
         volume_ratio = None
 
+    # Average daily volume estimate: sum all bars, divide by estimated trading days.
+    # 60 bars of 30-min data ≈ 4–5 trading days for equities (13 bars/day).
+    # Crypto trades 24/7 (48 bars/day), giving a slightly tighter estimate.
+    # Using 13 bars/day is conservative for equities and reasonable for crypto.
+    _BARS_PER_DAY = 13
+    try:
+        estimated_days = max(len(df) / _BARS_PER_DAY, 1.0)
+        volume_1d_avg: float | None = float(volume.sum()) / estimated_days
+    except (TypeError, ValueError, ZeroDivisionError):
+        volume_1d_avg = None
+
     # ── Step 3: Build prompt ──────────────────────────────────────────────────
     user_prompt = research_prompts.build_user_prompt(
         symbol=symbol,
@@ -196,6 +207,7 @@ async def run(
         rsi_14=rsi_14,
         atr_14=atr_14,
         volume_ratio=volume_ratio,
+        volume_1d_avg=volume_1d_avg,
     )
     evidence = Evidence(
         symbol=symbol,

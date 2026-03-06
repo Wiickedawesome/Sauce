@@ -154,12 +154,14 @@ async def run(
         return _abort("LLM response parse error")
 
     # ── Step 5: Sanity-check price ───────────────────────────────────────────────
-    # Buy limit price must be within 1% below bid to 1% above ask (wide enough for fill)
-    # Sell limit price must be within 1% below bid to 1% above ask
+    # Limit price must stay within ±max_limit_price_premium of bid/ask (Finding 1.9).
+    # Default 0.1% keeps prices from straying far from the market while still
+    # tolerating tiny floating-point rounding in Claude's output.
     limit_price = raw_limit_price
     if limit_price is not None:
-        lo_bound = quote.bid * 0.99
-        hi_bound = quote.ask * 1.01
+        premium = settings.max_limit_price_premium
+        lo_bound = quote.bid * (1.0 - premium)
+        hi_bound = quote.ask * (1.0 + premium)
         if not (lo_bound <= limit_price <= hi_bound):
             logger.warning(
                 "execution[%s]: Claude limit_price %.4f out of sane range [%.4f, %.4f]; "

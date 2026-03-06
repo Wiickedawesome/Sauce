@@ -209,11 +209,13 @@ async def _call_anthropic(
         prompt_version=get_settings().prompt_version,
     ))
 
+    # Construct the client once — not inside the retry loop — to avoid creating
+    # a new HTTP connection pool on every attempt (Finding 7.6).
+    client = anthropic.AsyncAnthropic(api_key=api_key)
     last_exc: Exception | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            client = anthropic.AsyncAnthropic(api_key=api_key)
             message = await client.messages.create(
                 model=model,
                 max_tokens=2048,
