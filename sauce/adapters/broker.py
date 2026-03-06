@@ -181,7 +181,10 @@ def place_order(order: Order, loop_id: str = "unset") -> dict[str, Any]:
             "ioc": TimeInForce.IOC,
             "fok": TimeInForce.FOK,
         }
-        tif = tif_map[order.time_in_force]
+        # Alpaca crypto pairs only support gtc/ioc/fok — never day.
+        # Force gtc for any symbol containing "/" (e.g. BTC/USD, ETH/USD).
+        effective_tif = "gtc" if "/" in order.symbol and order.time_in_force == "day" else order.time_in_force
+        tif = tif_map[effective_tif]
 
         order_request: Any
         if order.order_type == "market":
