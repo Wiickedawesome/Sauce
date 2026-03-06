@@ -35,6 +35,24 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 2.0  # seconds — doubles each attempt
 
 
+def _strip_fences(text: str) -> str:
+    """Strip markdown code fences Claude sometimes wraps JSON in.
+
+    Handles:
+        ```json\n{...}\n```
+        ```\n{...}\n```
+    Returns the inner content stripped of surrounding whitespace.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # Remove opening fence line (e.g. ```json or ```)
+        stripped = stripped[stripped.index("\n") + 1:] if "\n" in stripped else stripped[3:]
+        # Remove closing fence
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+    return stripped.strip()
+
+
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
 class LLMError(Exception):
@@ -128,7 +146,7 @@ async def _call_github_models(
 
                 response.raise_for_status()
                 data = response.json()
-                content: str = data["choices"][0]["message"]["content"]
+                content: str = _strip_fences(data["choices"][0]["message"]["content"])
 
                 log_event(AuditEvent(
                     loop_id=loop_id,
@@ -202,7 +220,7 @@ async def _call_anthropic(
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
-            content = message.content[0].text  # type: ignore[index]
+            content = _strip_fences(message.content[0].text)  # type: ignore[index]
 
             log_event(AuditEvent(
                 loop_id=loop_id,
