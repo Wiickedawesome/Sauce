@@ -40,10 +40,9 @@ RUN mkdir -p /app/data/logs
 # ── Cron setup ────────────────────────────────────────────────────────────────
 # Write the crontab entry. Output is appended to /app/data/logs/cron.log
 # which is on the mounted volume and survives container restarts.
-RUN echo "*/30 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1" \
+RUN printf "*/30 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1\n" \
         > /etc/cron.d/sauce \
-    && chmod 0644 /etc/cron.d/sauce \
-    && crontab /etc/cron.d/sauce
+    && chmod 0644 /etc/cron.d/sauce
 
 # Ensure run_loop.sh is executable
 RUN chmod +x /app/scripts/run_loop.sh
