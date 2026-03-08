@@ -73,7 +73,7 @@ def test_alpaca_paper_empty_string_defaults_to_true(monkeypatch: pytest.MonkeyPa
 def test_llm_provider_defaults_to_github(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
-    s = Settings()
+    s = Settings(_env_file=None)  # bypass .env on disk; rely solely on monkeypatched env
     assert s.llm_provider == "github"
 
 

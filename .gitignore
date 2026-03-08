@@ -23,6 +23,7 @@ ENV/
 
 # ── Data & Logs ───────────────────────────────────────────────────────────────
 data/*.db
+data/*.db.bak*
 data/*.db-shm
 data/*.db-wal
 data/logs/

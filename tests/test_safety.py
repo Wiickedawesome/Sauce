@@ -35,15 +35,15 @@ def reset_db_and_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", db_path)
     # Do NOT set TRADING_PAUSE here — each test sets it as needed
 
-    # Reset engine so it picks up new DB path
-    db_module._engine = None
+    # Reset engine cache so it picks up new DB path
+    db_module._engines = {}
 
     from sauce.core.config import get_settings
     get_settings.cache_clear()
 
     yield
 
-    db_module._engine = None
+    db_module._engines = {}
     get_settings.cache_clear()
 
 
@@ -114,7 +114,7 @@ def test_pause_trading_writes_audit_event(monkeypatch):
 
     pause_trading("abnormal P&L", loop_id="audit-test")
 
-    session = get_session()
+    session = get_session(str(get_settings().db_path))
     try:
         from sqlalchemy import text
         row = session.execute(
@@ -140,7 +140,7 @@ def test_resume_trading_writes_audit_event(monkeypatch):
     pause_trading("testing")
     resume_trading(loop_id="resume-test")
 
-    session = get_session()
+    session = get_session(str(get_settings().db_path))
     try:
         from sqlalchemy import text
         count = session.execute(

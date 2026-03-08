@@ -118,6 +118,13 @@ class Settings(BaseSettings):
                     "Applied only when ending NAV exceeds the prior high-water mark.",
     )
 
+    # ── Data Feed ─────────────────────────────────────────────────────────────
+    data_feed: str = Field(
+        default="iex",
+        description="Alpaca market data feed for equities: 'iex' (free) or 'sip' (paid). "
+                    "Free-tier accounts MUST use 'iex'. Default is 'iex'.",
+    )
+
     # ── Safety ────────────────────────────────────────────────────────────────
     trading_pause: bool = Field(default=False)
 
@@ -157,6 +164,14 @@ class Settings(BaseSettings):
         allowed = {"github", "anthropic"}
         if v.lower() not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got '{v}'")
+        return v.lower()
+
+    @field_validator("data_feed")
+    @classmethod
+    def validate_data_feed(cls, v: str) -> str:
+        allowed = {"iex", "sip"}
+        if v.lower() not in allowed:
+            raise ValueError(f"data_feed must be one of {allowed}, got '{v}'")
         return v.lower()
 
     @field_validator("alpaca_paper", mode="before")

@@ -76,10 +76,11 @@ def get_quote(symbol: str) -> PriceReference:
 def _equity_quote(symbol: str) -> PriceReference:
     from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
 
+    s = get_settings()
     client = _get_stock_client()
     response = call_with_retry(
         client.get_stock_latest_quote,
-        StockLatestQuoteRequest(symbol_or_symbols=symbol),
+        StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=s.data_feed),
     )
     quote = response[symbol]
 
@@ -151,6 +152,7 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     tf = _parse_timeframe(timeframe)
     start = datetime.now(timezone.utc) - timedelta(days=_days_back_for_bars(timeframe, bars))
 
+    s = get_settings()
     client = _get_stock_client()
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
@@ -158,6 +160,7 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
         start=start,
         limit=bars,
         adjustment="raw",
+        feed=s.data_feed,
     )
     bars_response = call_with_retry(client.get_stock_bars, request)
     df = bars_response.df
@@ -227,10 +230,11 @@ def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
 def _equity_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
 
+    s = get_settings()
     client = _get_stock_client()
     response = call_with_retry(
         client.get_stock_latest_quote,
-        StockLatestQuoteRequest(symbol_or_symbols=symbols),
+        StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=s.data_feed),
     )
 
     result: dict[str, PriceReference] = {}
