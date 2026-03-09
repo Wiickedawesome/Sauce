@@ -157,6 +157,7 @@ async def run(
         volume_ratio=volume_ratio,
         prompt_version=settings.prompt_version,
         as_of_utc=as_of,
+        is_crypto=market_data._is_crypto(symbol),
     )
 
     # ── Step 4: Call Claude ───────────────────────────────────────────────────

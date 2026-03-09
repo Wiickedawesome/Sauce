@@ -48,6 +48,8 @@ def build_user_prompt(
     volume_ratio: float | None,
     prompt_version: str,
     as_of_utc: datetime,
+    *,
+    is_crypto: bool = False,
 ) -> str:
     """
     Build the grounded user prompt for the Research agent.
@@ -91,7 +93,14 @@ def build_user_prompt(
             ),
             "volume_ratio": (
                 "above 1.5 = elevated volume (confirms moves); "
-                "below 0.5 = low volume (weak/unreliable signal)"
+                "below 0.5 = low volume (reduces conviction but does NOT by itself mean hold). "
+                "Low volume should lower confidence slightly, not force a hold when "
+                "trend and momentum indicators are clearly aligned."
+            ) if not is_crypto else (
+                "above 1.5 = elevated volume (confirms moves); "
+                "below 0.5 = low relative volume. For crypto, low volume_ratio is common "
+                "outside peak hours and on weekends — it should NOT be treated as a reason "
+                "to hold. Focus on trend alignment (SMAs) and momentum (RSI) instead."
             ),
             "price_vs_sma20": "price above SMA_20 = short-term bullish bias",
             "atr_14_interpretation": (
@@ -100,10 +109,13 @@ def build_user_prompt(
                 "If ATR is null, volatility is unknown."
             ),
         },
+        "asset_type": "crypto" if is_crypto else "equity",
         "confidence_calibration": (
             "Confidence below 0.5 will be treated as hold by the system. "
-            "Use hold (confidence=0.0) if you are not clearly confident in buy or sell. "
-            "Do not inflate confidence."
+            "Use hold (confidence=0.0) if indicators genuinely conflict or are insufficient. "
+            "When trend (SMAs) and momentum (RSI) align in the same direction, "
+            "a confidence of 0.5-0.7 is appropriate even with low volume. "
+            "Do not inflate confidence, but do not default to hold when evidence is clear."
         ),
         "required_output_schema": {
             "description": "Return ONLY this JSON object. No other text.",
