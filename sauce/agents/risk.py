@@ -155,9 +155,13 @@ async def run(
     # the average daily volume supplied by the Research agent. A proposed order
     # exceeding max_volume_participation × daily_volume indicates excessive
     # market impact and should be vetoed.
+    # NOTE: Skip for crypto pairs — Alpaca-reported crypto volume does not
+    # reflect actual exchange liquidity (orders are routed to real exchanges
+    # with far deeper books). The check remains active for equities.
     volume_too_low = False
     volume_1d_avg = signal.evidence.indicators.volume_1d_avg
-    if volume_1d_avg is not None and volume_1d_avg > 0 and mid_price > 0:
+    _is_crypto = "/" in signal.symbol
+    if not _is_crypto and volume_1d_avg is not None and volume_1d_avg > 0 and mid_price > 0:
         # Conservative upper-bound estimate: full remaining position capacity.
         max_proposed_qty = (equity * settings.max_position_pct) / mid_price
         volume_too_low = max_proposed_qty > volume_1d_avg * settings.max_volume_participation

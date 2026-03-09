@@ -134,11 +134,12 @@ async def run(
 
     # Average daily volume estimate: sum all bars, divide by estimated trading days.
     # 60 bars of 30-min data ≈ 4–5 trading days for equities (13 bars/day).
-    # Crypto trades 24/7 (48 bars/day), giving a slightly tighter estimate.
-    # Using 13 bars/day is conservative for equities and reasonable for crypto.
-    _BARS_PER_DAY = 13
+    # Crypto trades 24/7 → 48 bars/day for 30-min timeframe.
+    _BARS_PER_DAY_EQUITY = 13
+    _BARS_PER_DAY_CRYPTO = 48
+    _bars_per_day = _BARS_PER_DAY_CRYPTO if market_data._is_crypto(symbol) else _BARS_PER_DAY_EQUITY
     try:
-        estimated_days = max(len(df) / _BARS_PER_DAY, 1.0)
+        estimated_days = max(len(df) / _bars_per_day, 1.0)
         volume_1d_avg: float | None = float(volume.sum()) / estimated_days
     except (TypeError, ValueError, ZeroDivisionError):
         volume_1d_avg = None
