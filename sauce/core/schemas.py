@@ -195,6 +195,7 @@ class AuditEvent(StrictModel):
         "supervisor_decision",
         "portfolio_review",
         "ops_summary",
+        "reconciliation",
     ]
     symbol: str | None = None
     payload: dict = Field(default_factory=dict)  # serialised model or error detail
