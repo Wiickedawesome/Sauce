@@ -48,17 +48,17 @@ class Settings(BaseSettings):
     )
 
     # ── Risk Limits ───────────────────────────────────────────────────────────
-    max_position_pct: float = Field(default=0.05, ge=0.0, le=1.0)
+    max_position_pct: float = Field(default=0.08, ge=0.0, le=1.0)
     max_portfolio_exposure: float = Field(default=1.0, ge=0.0, le=2.0)
-    max_daily_loss_pct: float = Field(default=0.02, ge=0.0, le=1.0)
-    min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    max_daily_loss_pct: float = Field(default=0.03, ge=0.0, le=1.0)
+    min_confidence: float = Field(default=0.40, ge=0.0, le=1.0)
     data_ttl_seconds: int = Field(default=120, ge=1)
     max_price_deviation: float = Field(default=0.01, ge=0.0, le=1.0)
 
     # ── Volatility / ATR parameters (Finding 1.8 / 2.4) ─────────────────────
     max_atr_ratio: float = Field(
-        default=0.05, ge=0.0,
-        description="Maximum ATR/price ratio permitted before vetoing a trade (5%).",
+        default=0.08, ge=0.0,
+        description="Maximum ATR/price ratio permitted before vetoing a trade (8%).",
     )
     allow_no_atr: bool = Field(
         default=False,

@@ -36,11 +36,11 @@ RETRY_BASE_DELAY = 2.0  # seconds — doubles each attempt
 
 
 def _strip_fences(text: str) -> str:
-    """Strip markdown code fences Claude sometimes wraps JSON in.
+    """Strip markdown code fences and extract JSON from mixed prose.
 
-    Handles:
-        ```json\n{...}\n```
-        ```\n{...}\n```
+    Handles (in order):
+      1. ```json\n{...}\n```  or  ```\n{...}\n```
+      2. Prose before/after a JSON object — extracts the first { ... } block.
     Returns the inner content stripped of surrounding whitespace.
     """
     stripped = text.strip()
@@ -50,7 +50,20 @@ def _strip_fences(text: str) -> str:
         # Remove closing fence
         if stripped.endswith("```"):
             stripped = stripped[: stripped.rfind("```")]
-    return stripped.strip()
+        return stripped.strip()
+
+    # If the response is already valid JSON, return as-is
+    if stripped.startswith("{"):
+        return stripped
+
+    # Extract first JSON object from mixed prose (e.g. "Let me analyze...\n{...}")
+    brace_start = stripped.find("{")
+    if brace_start != -1:
+        brace_end = stripped.rfind("}")
+        if brace_end > brace_start:
+            return stripped[brace_start:brace_end + 1].strip()
+
+    return stripped
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
@@ -95,6 +108,7 @@ async def _call_github_models(
             {"role": "user", "content": user},
         ],
         "temperature": 0.1,  # low temperature for consistent structured output
+        "response_format": {"type": "json_object"},  # force valid JSON output
     }
 
     log_event(AuditEvent(

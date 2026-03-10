@@ -327,3 +327,92 @@ def has_recent_submitted_order(
         return False
     finally:
         session.close()
+
+
+def get_recent_signals(
+    symbol: str,
+    days: int = 7,
+    db_path: str = "data/sauce.db",
+) -> list[dict]:
+    """
+    Return recent signals for a symbol from the signals table.
+
+    Each dict has: side, confidence, vetoed, created_at.
+    Returns an empty list on any error (fail open).
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    session = get_session(db_path)
+    try:
+        rows = (
+            session.query(SignalRow)
+            .filter(
+                SignalRow.symbol == symbol.upper(),
+                SignalRow.created_at >= cutoff,
+            )
+            .order_by(SignalRow.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        return [
+            {
+                "side": r.side,
+                "confidence": r.confidence,
+                "vetoed": r.vetoed,
+                "created_at": str(r.created_at),
+            }
+            for r in rows
+        ]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        session.close()
+
+
+def get_supervisor_abort_rate(
+    days: int = 7,
+    db_path: str = "data/sauce.db",
+) -> dict:
+    """
+    Return supervisor decision stats over the given window.
+
+    Returns dict with: total_decisions, aborts, executes, abort_rate.
+    On error returns a safe default dict.
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    session = get_session(db_path)
+    try:
+        rows = (
+            session.query(AuditEventRow)
+            .filter(
+                AuditEventRow.event_type == "supervisor_decision",
+                AuditEventRow.timestamp >= cutoff,
+            )
+            .all()
+        )
+        total = len(rows)
+        aborts = 0
+        executes = 0
+        for r in rows:
+            try:
+                payload = json.loads(r.payload) if isinstance(r.payload, str) else r.payload
+                action = payload.get("action", "")
+                if action == "abort":
+                    aborts += 1
+                elif action == "execute":
+                    executes += 1
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return {
+            "total_decisions": total,
+            "aborts": aborts,
+            "executes": executes,
+            "abort_rate": round(aborts / total, 4) if total > 0 else 0.0,
+        }
+    except Exception:  # noqa: BLE001
+        return {"total_decisions": 0, "aborts": 0, "executes": 0, "abort_rate": 0.0}
+    finally:
+        session.close()

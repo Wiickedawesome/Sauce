@@ -20,7 +20,7 @@ import pandas_ta as ta  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from sauce.adapters import llm, market_data
-from sauce.adapters.db import log_event
+from sauce.adapters.db import get_recent_signals, log_event
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent, Evidence, Indicators, PriceReference, Signal
 from sauce.prompts import research as research_prompts
@@ -144,6 +144,86 @@ async def run(
     except (TypeError, ValueError, ZeroDivisionError):
         volume_1d_avg = None
 
+    # MACD (12, 26, 9)
+    macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+    if macd_df is not None and not macd_df.empty:
+        macd_line = _last_float(macd_df.iloc[:, 0])
+        macd_signal = _last_float(macd_df.iloc[:, 1])
+        macd_histogram = _last_float(macd_df.iloc[:, 2])
+    else:
+        macd_line = macd_signal = macd_histogram = None
+
+    # Bollinger Bands (20, 2)
+    bb_df = ta.bbands(close, length=20, std=2)
+    if bb_df is not None and not bb_df.empty:
+        bb_lower = _last_float(bb_df.iloc[:, 0])
+        bb_middle = _last_float(bb_df.iloc[:, 1])
+        bb_upper = _last_float(bb_df.iloc[:, 2])
+    else:
+        bb_upper = bb_middle = bb_lower = None
+
+    # Stochastic Oscillator (14, 3, 3)
+    stoch_df = ta.stoch(high, low, close, k=14, d=3, smooth_k=3)
+    if stoch_df is not None and not stoch_df.empty:
+        stoch_k = _last_float(stoch_df.iloc[:, 0])
+        stoch_d = _last_float(stoch_df.iloc[:, 1])
+    else:
+        stoch_k = stoch_d = None
+
+    # VWAP
+    vwap_series = ta.vwap(high, low, close, volume)
+    vwap_val = _last_float(vwap_series) if vwap_series is not None else None
+
+    # ── Step 2b: Fetch daily bars for higher-timeframe trend context ──────────
+    daily_trend: dict | None = None
+    try:
+        df_daily = market_data.get_history(symbol, timeframe="1Day", bars=50)
+        if not df_daily.empty and len(df_daily) >= 20:
+            d_close = df_daily["close"]
+            d_sma_20 = _last_float(ta.sma(d_close, length=20))
+            d_sma_50 = (
+                _last_float(ta.sma(d_close, length=50))
+                if len(df_daily) >= 50
+                else None
+            )
+            d_rsi_14 = _last_float(ta.rsi(d_close, length=14))
+            d_close_price = (
+                float(d_close.iloc[-1]) if not d_close.empty else None
+            )
+
+            # Classify daily trend
+            if d_sma_20 and d_sma_50 and d_close_price:
+                if d_close_price > d_sma_20 > d_sma_50:
+                    trend = "bullish"
+                elif d_close_price < d_sma_20 < d_sma_50:
+                    trend = "bearish"
+                else:
+                    trend = "neutral"
+            elif d_sma_20 and d_close_price:
+                trend = "bullish" if d_close_price > d_sma_20 else "bearish"
+            else:
+                trend = "unknown"
+
+            daily_trend = {
+                "daily_sma_20": round(d_sma_20, 4) if d_sma_20 else None,
+                "daily_sma_50": round(d_sma_50, 4) if d_sma_50 else None,
+                "daily_rsi_14": round(d_rsi_14, 4) if d_rsi_14 else None,
+                "daily_close": round(d_close_price, 4) if d_close_price else None,
+                "trend_classification": trend,
+            }
+    except market_data.MarketDataError:
+        pass  # Daily data unavailable — proceed with 30min only
+
+    # ── Step 2c: Fetch recent signal history for feedback loop ─────────────
+    signal_history: list[dict] | None = None
+    try:
+        db_path = str(settings.db_path)
+        recent = get_recent_signals(symbol=symbol, days=7, db_path=db_path)
+        if recent:
+            signal_history = recent
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("research[%s]: signal history unavailable: %s", symbol, exc)
+
     # ── Step 3: Build prompt ──────────────────────────────────────────────────
     user_prompt = research_prompts.build_user_prompt(
         symbol=symbol,
@@ -155,6 +235,17 @@ async def run(
         rsi_14=rsi_14,
         atr_14=atr_14,
         volume_ratio=volume_ratio,
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        macd_histogram=macd_histogram,
+        bb_upper=bb_upper,
+        bb_middle=bb_middle,
+        bb_lower=bb_lower,
+        stoch_k=stoch_k,
+        stoch_d=stoch_d,
+        vwap=vwap_val,
+        daily_trend_context=daily_trend,
+        signal_history=signal_history,
         prompt_version=settings.prompt_version,
         as_of_utc=as_of,
         is_crypto=market_data._is_crypto(symbol),
@@ -210,6 +301,15 @@ async def run(
         atr_14=atr_14,
         volume_ratio=volume_ratio,
         volume_1d_avg=volume_1d_avg,
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        macd_histogram=macd_histogram,
+        bb_upper=bb_upper,
+        bb_middle=bb_middle,
+        bb_lower=bb_lower,
+        stoch_k=stoch_k,
+        stoch_d=stoch_d,
+        vwap=vwap_val,
     )
     evidence = Evidence(
         symbol=symbol,
@@ -257,6 +357,15 @@ async def run(
                     "rsi_14": rsi_14,
                     "atr_14": atr_14,
                     "volume_ratio": volume_ratio,
+                    "macd_line": macd_line,
+                    "macd_signal": macd_signal,
+                    "macd_histogram": macd_histogram,
+                    "bb_upper": bb_upper,
+                    "bb_middle": bb_middle,
+                    "bb_lower": bb_lower,
+                    "stoch_k": stoch_k,
+                    "stoch_d": stoch_d,
+                    "vwap": vwap_val,
                 },
             },
             prompt_version=settings.prompt_version,

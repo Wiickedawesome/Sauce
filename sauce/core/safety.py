@@ -479,7 +479,7 @@ def has_earnings_risk(symbol: str, loop_id: str = "unset") -> bool:
             secret_key=settings.alpaca_secret_key,
         )
         request = NewsRequest(
-            symbols=[symbol],
+            symbols=symbol,
             start=window_start,
             end=window_end,
             limit=20,

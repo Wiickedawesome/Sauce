@@ -26,7 +26,7 @@ not present in the input.
 provided indicators.
 - Do not fabricate indicator values. If an indicator is null in the input, treat it as \
 unavailable and do not use it in your reasoning.
-- confidence is a strict float between 0.0 and 1.0. Values below 0.5 will be automatically \
+- confidence is a strict float between 0.0 and 1.0. Values below 0.40 will be automatically \
 treated as hold by the system — Claude should know this.
 - Prefer hold when uncertain rather than inflating confidence.
 - Your output will be parsed by a strict JSON schema validator. Deviating from the schema \
@@ -46,8 +46,19 @@ def build_user_prompt(
     rsi_14: float | None,
     atr_14: float | None,
     volume_ratio: float | None,
-    prompt_version: str,
-    as_of_utc: datetime,
+    macd_line: float | None = None,
+    macd_signal: float | None = None,
+    macd_histogram: float | None = None,
+    bb_upper: float | None = None,
+    bb_middle: float | None = None,
+    bb_lower: float | None = None,
+    stoch_k: float | None = None,
+    stoch_d: float | None = None,
+    vwap: float | None = None,
+    daily_trend_context: dict | None = None,
+    signal_history: list[dict] | None = None,
+    prompt_version: str = "",
+    as_of_utc: datetime | None = None,
     *,
     is_crypto: bool = False,
 ) -> str:
@@ -57,6 +68,8 @@ def build_user_prompt(
     All indicator values passed explicitly — Claude must never be asked to
     look up or derive data not present in the input.
     """
+    if as_of_utc is None:
+        as_of_utc = datetime.now(timezone.utc)
     timestamp_str = as_of_utc.replace(tzinfo=timezone.utc).isoformat()
 
     indicators = {
@@ -65,6 +78,15 @@ def build_user_prompt(
         "rsi_14": round(rsi_14, 4) if rsi_14 is not None else None,
         "atr_14": round(atr_14, 4) if atr_14 is not None else None,
         "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
+        "macd_line": round(macd_line, 4) if macd_line is not None else None,
+        "macd_signal": round(macd_signal, 4) if macd_signal is not None else None,
+        "macd_histogram": round(macd_histogram, 4) if macd_histogram is not None else None,
+        "bb_upper": round(bb_upper, 4) if bb_upper is not None else None,
+        "bb_middle": round(bb_middle, 4) if bb_middle is not None else None,
+        "bb_lower": round(bb_lower, 4) if bb_lower is not None else None,
+        "stoch_k": round(stoch_k, 4) if stoch_k is not None else None,
+        "stoch_d": round(stoch_d, 4) if stoch_d is not None else None,
+        "vwap": round(vwap, 4) if vwap is not None else None,
     }
 
     payload = {
@@ -108,14 +130,77 @@ def build_user_prompt(
                 "High ATR = high risk/high reward. "
                 "If ATR is null, volatility is unknown."
             ),
+            "macd": (
+                "MACD line crossing above signal line = bullish momentum; "
+                "crossing below = bearish momentum. "
+                "Histogram > 0 and growing = strengthening bullish momentum; "
+                "histogram < 0 and shrinking = weakening bearish momentum."
+            ),
+            "bollinger_bands": (
+                "Price near bb_upper = potentially overbought / strong uptrend; "
+                "price near bb_lower = potentially oversold / strong downtrend; "
+                "price at bb_middle = neutral. "
+                "Bandwidth squeeze (bb_upper close to bb_lower) = low volatility, "
+                "potential breakout incoming."
+            ),
+            "stochastic": (
+                "stoch_k > 80 = overbought; stoch_k < 20 = oversold. "
+                "stoch_k crossing above stoch_d = bullish signal; "
+                "stoch_k crossing below stoch_d = bearish signal."
+            ),
+            "vwap": (
+                "Price above VWAP = bullish intraday bias (buyers in control); "
+                "price below VWAP = bearish intraday bias (sellers in control). "
+                "VWAP acts as dynamic intraday support/resistance."
+            ),
         },
         "asset_type": "crypto" if is_crypto else "equity",
         "confidence_calibration": (
-            "Confidence below 0.5 will be treated as hold by the system. "
+            "Confidence below 0.40 will be treated as hold by the system. "
             "Use hold (confidence=0.0) if indicators genuinely conflict or are insufficient. "
-            "When trend (SMAs) and momentum (RSI) align in the same direction, "
-            "a confidence of 0.5-0.7 is appropriate even with low volume. "
-            "Do not inflate confidence, but do not default to hold when evidence is clear."
+            "When 3+ indicators (SMAs, RSI, MACD, Stochastic, Bollinger, VWAP) align in "
+            "the same direction, confidence of 0.55-0.75 is appropriate. "
+            "When the daily trend confirms the 30-minute signal, boost confidence by ~0.10. "
+            "Do not inflate confidence, but do not default to hold when evidence is clear. "
+            "Aggressive growth mandate: the system is designed to capture opportunities, "
+            "not to sit on the sidelines. Lean toward action when the data supports it."
+        ),
+        "daily_trend_context": daily_trend_context,
+        "signal_history": (
+            {
+                "description": (
+                    "Recent signals generated for this symbol over the past 7 days. "
+                    "Use this to identify patterns: repeated holds (maybe you are being "
+                    "too cautious), repeated buys that reversed (maybe confidence was too "
+                    "high), or missed opportunities. Adjust your current analysis "
+                    "accordingly — learn from recent outcomes."
+                ),
+                "recent_signals": signal_history,
+            }
+            if signal_history
+            else None
+        ),
+        "daily_trend_interpretation": (
+            {
+                "usage": (
+                    "The daily_trend_context provides the bigger picture. "
+                    "Use it to confirm or contradict 30-minute signals."
+                ),
+                "bullish_daily_plus_30m_oversold": (
+                    "Daily trend bullish + 30min RSI oversold = buy-the-dip opportunity. "
+                    "High conviction setup — confidence 0.60-0.75."
+                ),
+                "bearish_daily_plus_30m_overbought": (
+                    "Daily trend bearish + 30min RSI overbought = potential sell/short. "
+                    "Confidence 0.55-0.70."
+                ),
+                "conflicting_timeframes": (
+                    "If daily and 30min disagree, reduce confidence by 0.10-0.15 "
+                    "but do NOT automatically hold. The 30min signal still has value."
+                ),
+            }
+            if daily_trend_context is not None
+            else None
         ),
         "required_output_schema": {
             "description": "Return ONLY this JSON object. No other text.",

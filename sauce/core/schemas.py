@@ -46,6 +46,15 @@ class Indicators(StrictModel):
     atr_14: float | None = None
     volume_ratio: float | None = None  # today's volume / 20-day avg volume
     volume_1d_avg: float | None = None  # estimated average daily volume in shares (Finding 2.5)
+    macd_line: float | None = None
+    macd_signal: float | None = None
+    macd_histogram: float | None = None
+    bb_upper: float | None = None
+    bb_middle: float | None = None
+    bb_lower: float | None = None
+    stoch_k: float | None = None
+    stoch_d: float | None = None
+    vwap: float | None = None
 
 
 class Evidence(StrictModel):
