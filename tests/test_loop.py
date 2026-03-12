@@ -200,6 +200,26 @@ def count_orders() -> int:
         session.close()
 
 
+def get_latest_event_payload(event_type: str) -> dict:
+    import json
+    from sqlalchemy import text
+    from sauce.adapters.db import get_session
+
+    session = get_session()
+    try:
+        row = session.execute(
+            text(
+                "SELECT payload FROM audit_events WHERE event_type = :et "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"et": event_type},
+        ).fetchone()
+        assert row is not None, f"No audit event found for {event_type}"
+        return json.loads(row[0])
+    finally:
+        session.close()
+
+
 # ── Full stub run — audit trail ───────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -388,3 +408,52 @@ async def test_loop_end_written_even_when_account_fetch_fails(monkeypatch):
 
     assert count_events_by_type("loop_start") >= 1
     assert count_events_by_type("loop_end") >= 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_matches_crypto_position_symbols_without_slash(monkeypatch):
+    """Crypto reconciliation should match BTC/USD orders against BTCUSD positions."""
+    from sauce.core.schemas import Order, SupervisorDecision
+
+    quotes = {"BTC/USD": make_fresh_quote("BTC/USD")}
+    buy_signal = make_stub_signal("BTC/USD").model_copy(update={"side": "buy", "confidence": 0.75})
+    approved_risk = make_stub_risk_result("BTC/USD").model_copy(
+        update={"side": "buy", "veto": False, "reason": None, "qty": 0.01}
+    )
+    prepared_order = Order(
+        symbol="BTC/USD",
+        side="buy",
+        qty=0.01,
+        order_type="limit",
+        time_in_force="day",
+        limit_price=70000.0,
+        stop_price=None,
+        as_of=datetime.now(timezone.utc),
+        prompt_version="v1",
+    )
+    execute_decision = SupervisorDecision(
+        action="execute",
+        final_orders=[prepared_order],
+        vetoes=[],
+        reason="approved",
+        as_of=datetime.now(timezone.utc),
+        prompt_version="v1",
+    )
+
+    with patch("sauce.core.loop.check_market_hours", return_value=True):
+        with patch("sauce.core.loop.get_account", return_value=make_fake_account()):
+            with patch("sauce.core.loop.get_positions", side_effect=[[], [{"symbol": "BTCUSD", "qty": "0.01", "market_value": "700.0"}]]):
+                with patch("sauce.core.loop.get_universe_snapshot", return_value=quotes):
+                    with patch("sauce.agents.research.run", new=AsyncMock(return_value=buy_signal)):
+                        with patch("sauce.agents.risk.run", new=AsyncMock(return_value=approved_risk)):
+                            with patch("sauce.agents.execution.run", new=AsyncMock(return_value=prepared_order)):
+                                with patch("sauce.agents.portfolio.run", new=AsyncMock(return_value=make_stub_portfolio_review())):
+                                    with patch("sauce.agents.supervisor.run", new=AsyncMock(return_value=execute_decision)):
+                                        with patch("sauce.agents.ops.run", new=AsyncMock()):
+                                            with patch("sauce.core.loop.place_order", return_value={"id": "broker-1", "status": "submitted"}):
+                                                from sauce.core.loop import main
+                                                await main()
+
+    payload = get_latest_event_payload("reconciliation")
+    assert payload["position_confirmed"] is True
+    assert payload["position_qty"] == "0.01"

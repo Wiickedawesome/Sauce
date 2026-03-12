@@ -59,6 +59,11 @@ from sauce.core.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _canonicalize_symbol(symbol: str) -> str:
+    """Normalize broker and strategy symbols for reconciliation lookups."""
+    return symbol.replace("/", "").upper()
+
+
 async def main() -> None:
     """
     Execute one full trading cycle.
@@ -542,10 +547,10 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
             try:
                 _reconciled = await asyncio.to_thread(get_positions, loop_id)
                 _reconciled_by_sym = {
-                    str(p.get("symbol", "")).upper(): p for p in _reconciled
+                    _canonicalize_symbol(str(p.get("symbol", ""))): p for p in _reconciled
                 }
                 for _order in decision.final_orders:
-                    _rp = _reconciled_by_sym.get(_order.symbol.upper())
+                    _rp = _reconciled_by_sym.get(_canonicalize_symbol(_order.symbol))
                     log_event(AuditEvent(
                         loop_id=loop_id,
                         event_type="reconciliation",
