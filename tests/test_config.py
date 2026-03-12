@@ -103,7 +103,7 @@ def test_llm_provider_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> No
 def test_max_position_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     s = Settings()
-    assert s.max_position_pct == 0.05
+    assert s.max_position_pct == 0.08
 
 
 def test_max_position_pct_out_of_range_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,13 +116,13 @@ def test_max_position_pct_out_of_range_raises(monkeypatch: pytest.MonkeyPatch) -
 def test_max_daily_loss_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     s = Settings()
-    assert s.max_daily_loss_pct == 0.02
+    assert s.max_daily_loss_pct == 0.03
 
 
 def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     s = Settings()
-    assert s.min_confidence == 0.5
+    assert s.min_confidence == 0.4
 
 
 # ── Trading universe parsing ──────────────────────────────────────────────────

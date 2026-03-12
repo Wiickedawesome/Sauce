@@ -983,6 +983,7 @@ class TestOpsAgent:
 
         with (
             patch("sauce.agents.ops.get_settings", return_value=settings),
+            patch("sauce.agents.ops.send_alert"),
             patch("sauce.agents.ops.log_event"),
             patch("sauce.agents.ops.pause_trading") as mock_pause,
         ):
