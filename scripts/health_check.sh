@@ -7,6 +7,8 @@
 # Checks:
 #   1. Docker container 'sauce' is in "running" state.
 #   2. cron.log was written within the last 70 minutes (just over 2 cron cycles).
+#   3. Broker account auth works from inside the live container.
+#   4. Market data auth works from inside the live container.
 #
 # Usage: bash scripts/health_check.sh
 # Env:   DO_APP_PATH or script-local APP_PATH default below.
@@ -43,6 +45,28 @@ else
     FAIL=1
   else
     echo "OK:   cron.log updated within last ${LOG_STALE_MINUTES} minutes"
+  fi
+fi
+
+# ── 3. Broker + Market Data auth inside container ────────────────────────────
+if [[ "${STATUS}" == "running" ]]; then
+  if docker exec "${CONTAINER_NAME}" /app/.venv/bin/python -c '
+from sauce.adapters.broker import get_account
+from sauce.adapters.market_data import get_history
+
+account = get_account(loop_id="health-check")
+equity = account.get("equity", "unknown")
+history = get_history("SPY", timeframe="30Min", bars=1)
+
+print(f"BROKER_OK equity={equity}")
+print(f"MARKET_DATA_OK bars={len(history)}")
+' >/tmp/sauce_health_check_output.txt 2>/tmp/sauce_health_check_error.txt; then
+    cat /tmp/sauce_health_check_output.txt
+    echo "OK:   broker and market data auth succeeded inside container"
+  else
+    echo "FAIL: live API probe failed inside container"
+    cat /tmp/sauce_health_check_error.txt
+    FAIL=1
   fi
 fi
 
