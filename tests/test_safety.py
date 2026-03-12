@@ -153,7 +153,7 @@ def test_resume_trading_writes_audit_event(monkeypatch):
 
     # At least 2 safety_check events (pause + resume); is_trading_paused() may
     # also write diagnostic events so we assert >=2 rather than ==2
-    assert count >= 2
+    assert (count or 0) >= 2
 
 
 # ── is_data_fresh ─────────────────────────────────────────────────────────────
@@ -191,9 +191,8 @@ def test_data_fresh_naive_datetime_treated_as_utc():
     from sauce.core.safety import is_data_fresh
     import warnings
 
-    # datetime.utcnow() → naive datetime numerically equal to UTC
-    # After replace(tzinfo=utc) inside is_data_fresh it is treated as UTC correctly
-    naive_utc_recent = datetime.utcnow() - timedelta(seconds=10)
+    # Build a naive UTC datetime so is_data_fresh's replace(tzinfo=utc) works
+    naive_utc_recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
     assert is_data_fresh(naive_utc_recent, ttl_sec=120) is True
 
 

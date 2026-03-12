@@ -33,6 +33,7 @@ async def run(
     signals: list[Signal],
     loop_id: str,
     equity: float = 0.0,
+    max_position_pct: float | None = None,
 ) -> PortfolioReview:
     """
     Review current portfolio and generate position notes.
@@ -46,12 +47,17 @@ async def run(
     equity:     Account equity in USD, used for accurate exposure and
                 concentration calculations (Finding 1.5, 1.6). When 0 the
                 agent falls back to position-count approximation.
+    max_position_pct: Per-tier override for max position sizing. When None,
+                      falls back to settings.max_position_pct.
 
     Returns
     -------
     PortfolioReview with suggested levels, exposure, and over-concentration flags.
     """
     settings = get_settings()
+    effective_max_position_pct = (
+        max_position_pct if max_position_pct is not None else settings.max_position_pct
+    )
     db_path = str(settings.db_path)
     as_of = datetime.now(timezone.utc)
 
@@ -74,7 +80,7 @@ async def run(
     # total position value only when equity is unavailable (Finding 1.6).
     effective_equity = equity if equity > 0 else total_pos_value
     max_single_position_value = (
-        effective_equity * settings.max_position_pct * settings.over_concentration_multiplier
+        effective_equity * effective_max_position_pct * settings.over_concentration_multiplier
         if effective_equity > 0
         else 0.0
     )

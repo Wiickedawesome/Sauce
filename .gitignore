@@ -37,6 +37,7 @@ data/logs/
 htmlcov/
 .coverage
 coverage.xml
+*MagicMock*
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/settings.json

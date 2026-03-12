@@ -66,6 +66,7 @@ def make_risk_checks(**overrides: object) -> RiskChecks:
     base = {
         "max_position_pct_ok": True,
         "max_exposure_ok": True,
+        "asset_class_ok": True,
         "daily_loss_ok": True,
         "volatility_ok": True,
         "confidence_ok": True,

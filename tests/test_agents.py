@@ -113,6 +113,7 @@ def _approved_risk(symbol: str = "AAPL", qty: float = 5.0) -> RiskCheckResult:
         checks=RiskChecks(
             max_position_pct_ok=True,
             max_exposure_ok=True,
+            asset_class_ok=True,
             daily_loss_ok=True,
             volatility_ok=True,
             confidence_ok=True,
@@ -132,6 +133,7 @@ def _vetoed_risk(symbol: str = "AAPL") -> RiskCheckResult:
         checks=RiskChecks(
             max_position_pct_ok=False,
             max_exposure_ok=False,
+            asset_class_ok=False,
             daily_loss_ok=True,
             volatility_ok=True,
             confidence_ok=False,
@@ -177,13 +179,19 @@ def _settings_patch(tmp_path: Path) -> dict:
     """Return a dict of settings fields for patching get_settings()."""
     db_file = tmp_path / "data" / "sauce.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
+    session_mem_db = tmp_path / "data" / "session_memory.db"
+    strategic_mem_db = tmp_path / "data" / "strategic_memory.db"
     return {
         "db_path": db_file,
+        "session_memory_db_path": str(session_mem_db),
+        "strategic_memory_db_path": str(strategic_mem_db),
         "prompt_version": "test-v1",
         "min_confidence": 0.5,
         "max_position_pct": 0.05,
         "max_portfolio_exposure": 0.5,
         "max_daily_loss_pct": 0.02,
+        "max_crypto_allocation_pct": 0.40,
+        "max_equity_allocation_pct": 0.70,
         "data_ttl_seconds": 300,
         "max_price_deviation": 0.01,
         "trading_universe": ["AAPL", "MSFT"],

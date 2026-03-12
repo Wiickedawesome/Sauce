@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     max_position_pct: float = Field(default=0.08, ge=0.0, le=1.0)
     max_portfolio_exposure: float = Field(default=1.0, ge=0.0, le=2.0)
     max_daily_loss_pct: float = Field(default=0.03, ge=0.0, le=1.0)
+
+    # ── Asset-Class Allocation Caps ───────────────────────────────────────────
+    # Independent caps — they do not need to sum to 1.0 (remainder is cash).
+    max_crypto_allocation_pct: float = Field(
+        default=0.40, ge=0.0, le=1.0,
+        description="Maximum fraction of equity that may be allocated to crypto "
+                    "positions combined (e.g. 0.40 = 40%).",
+    )
+    max_equity_allocation_pct: float = Field(
+        default=0.70, ge=0.0, le=1.0,
+        description="Maximum fraction of equity that may be allocated to equity "
+                    "positions combined (e.g. 0.70 = 70%).",
+    )
     min_confidence: float = Field(default=0.40, ge=0.0, le=1.0)
     data_ttl_seconds: int = Field(default=120, ge=1)
     max_price_deviation: float = Field(default=0.01, ge=0.0, le=1.0)
@@ -130,6 +143,8 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = Field(default="data/sauce.db")
+    session_memory_db_path: str = Field(default="data/session_memory.db")
+    strategic_memory_db_path: str = Field(default="data/strategic_memory.db")
 
     # ── Alerting (Finding 5.2) ────────────────────────────────────────────────
     alert_webhook_url: str = Field(

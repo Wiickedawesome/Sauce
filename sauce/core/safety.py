@@ -196,7 +196,11 @@ def is_data_fresh(as_of: datetime, ttl_sec: int = 120) -> bool:
 
 # ── Daily P&L Guard ───────────────────────────────────────────────────────────
 
-def check_daily_loss(account: dict, loop_id: str = "unset") -> bool:
+def check_daily_loss(
+    account: dict,
+    loop_id: str = "unset",
+    max_daily_loss_pct: float | None = None,
+) -> bool:
     """
     Return True if today's loss is within the configured limit.
     Return False (block trading) if the daily loss limit is breached.
@@ -205,10 +209,18 @@ def check_daily_loss(account: dict, loop_id: str = "unset") -> bool:
 
     The Alpaca account dict contains 'equity' and 'last_equity' as strings.
     Daily P&L = (equity - last_equity) / last_equity × 100%.
+
+    Parameters
+    ----------
+    max_daily_loss_pct: Per-tier override for daily loss limit. When None,
+                        falls back to settings.max_daily_loss_pct.
     """
     from sauce.adapters.db import log_event
 
     settings = get_settings()
+    effective_max_daily_loss_pct = (
+        max_daily_loss_pct if max_daily_loss_pct is not None else settings.max_daily_loss_pct
+    )
     db_path = str(settings.db_path)
 
     # Finding 1.7: Skip daily loss check before 06:30 ET.
@@ -260,7 +272,7 @@ def check_daily_loss(account: dict, loop_id: str = "unset") -> bool:
             return False
 
         daily_pnl_pct = (equity - last_equity) / last_equity
-        limit = -abs(settings.max_daily_loss_pct)  # e.g. -0.02
+        limit = -abs(effective_max_daily_loss_pct)  # e.g. -0.02
 
         ok = daily_pnl_pct >= limit
 
@@ -272,7 +284,7 @@ def check_daily_loss(account: dict, loop_id: str = "unset") -> bool:
                     "check": "daily_loss",
                     "result": ok,
                     "daily_pnl_pct": round(daily_pnl_pct * 100, 4),
-                    "limit_pct": round(abs(settings.max_daily_loss_pct) * 100, 4),
+                    "limit_pct": round(abs(effective_max_daily_loss_pct) * 100, 4),
                     "equity": equity,
                     "last_equity": last_equity,
                 },

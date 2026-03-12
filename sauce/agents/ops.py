@@ -22,6 +22,7 @@ from typing import Any
 from sauce.adapters.db import log_event, upsert_daily_stats
 from sauce.adapters.notify import send_alert
 from sauce.core.config import get_settings
+from sauce.memory.learning import run_learning_cycle
 from sauce.core.nav import compute_nav_and_fees
 from sauce.core.safety import pause_trading
 from sauce.core.schemas import AuditEvent
@@ -215,6 +216,75 @@ async def run(
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("ops[%s]: upsert_daily_stats failed: %s", loop_id, exc)
+
+    # ── Learning loop (Sprint 6) ──────────────────────────────────────────────────
+    run_weekly = bool(summary.get("run_weekly", False))
+    try:
+        learning_result = run_learning_cycle(
+            loop_id=loop_id,
+            strategic_db_path=str(settings.strategic_memory_db_path),
+            run_weekly=run_weekly,
+        )
+        if learning_result.get("drift_alert"):
+            anomalies.append("learning_drift_detected")
+            send_alert(
+                "WARNING",
+                f"Win-rate drift detected: {learning_result['drift_alert']}",
+                loop_id=loop_id,
+            )
+            log_event(
+                AuditEvent(
+                    loop_id=loop_id,
+                    event_type="learning_drift_detected",
+                    payload={"agent": "ops", "drift": learning_result["drift_alert"]},
+                    prompt_version=settings.prompt_version,
+                ),
+                db_path=db_path,
+            )
+        if learning_result.get("weekly_report"):
+            log_event(
+                AuditEvent(
+                    loop_id=loop_id,
+                    event_type="learning_weekly_report",
+                    payload={"agent": "ops", "report_count": len(learning_result["weekly_report"])},
+                    prompt_version=settings.prompt_version,
+                ),
+                db_path=db_path,
+            )
+        if learning_result.get("calibration"):
+            log_event(
+                AuditEvent(
+                    loop_id=loop_id,
+                    event_type="learning_calibration_analysis",
+                    payload={"agent": "ops", "total_entries": learning_result["calibration"].get("total_entries", 0)},
+                    prompt_version=settings.prompt_version,
+                ),
+                db_path=db_path,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("ops[%s]: run_learning_cycle failed: %s", loop_id, exc)
+
+    # ── Validation check ─────────────────────────────────────────────────────────
+    try:
+        from sauce.core.validation import run_validation
+
+        validation_result = run_validation(
+            loop_id=loop_id,
+            db_path=db_path,
+            strategic_db_path=str(settings.strategic_memory_db_path),
+        )
+        log_event(
+            AuditEvent(
+                loop_id=loop_id,
+                event_type="validation_daily_check",
+                payload={"agent": "ops", **validation_result},
+                prompt_version=settings.prompt_version,
+            ),
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("ops[%s]: run_validation failed: %s", loop_id, exc)
+
     # ── Write daily log file ──────────────────────────────────────────────────────
     _write_daily_log(
         loop_id=loop_id,

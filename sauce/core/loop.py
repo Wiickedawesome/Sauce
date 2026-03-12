@@ -35,7 +35,8 @@ from typing import Any
 from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
 from sauce.adapters.db import OrderRow, has_recent_submitted_order, log_event, log_order
 from sauce.adapters.market_data import get_universe_snapshot
-from sauce.agents import execution, ops, portfolio, research, risk, supervisor
+from sauce.agents import execution, market_context, ops, portfolio, research, risk, session_boot, supervisor
+from sauce.core.capital import detect_tier_transition, get_tier_parameters
 from sauce.core.config import get_settings
 from sauce.core.safety import (
     check_daily_loss,
@@ -46,6 +47,8 @@ from sauce.core.safety import (
 )
 from sauce.core.schemas import (
     AuditEvent,
+    BootContext,
+    MarketContext,
     Order,
     PortfolioReview,
     RiskCheckResult,
@@ -78,8 +81,12 @@ async def main() -> None:
 
     logger.info("Loop started [loop_id=%s]", loop_id)
 
+    # ── Agent 0: Session Boot ─────────────────────────────────────────────
+    boot_ctx = await session_boot.run(loop_id=loop_id)
+    logger.info("Session boot complete [loop_id=%s, suppressed=%s]", loop_id, boot_ctx.is_suppressed)
+
     try:
-        await _run_loop(loop_id=loop_id, settings=settings)
+        await _run_loop(loop_id=loop_id, settings=settings, boot_ctx=boot_ctx)
     except Exception as exc:
         logger.exception("Unhandled exception in loop [loop_id=%s]: %s", loop_id, exc)
         log_event(AuditEvent(
@@ -97,15 +104,22 @@ async def main() -> None:
         logger.info("Loop ended [loop_id=%s]", loop_id)
 
 
-async def _run_loop(loop_id: str, settings: Any) -> None:
+async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
     """
     Inner loop body. Separated so main() can guarantee loop_end is always logged.
     """
 
-    # ── Step 2: Safety pre-flight ─────────────────────────────────────────────
+    # ── Step 1b: Safety pre-flight ────────────────────────────────────────────
     if is_trading_paused(loop_id=loop_id):
         logger.warning("Trading is paused — aborting loop [loop_id=%s]", loop_id)
         return
+
+    # ── Agent 1: Market Context ───────────────────────────────────────────────
+    mkt_ctx = await market_context.run(loop_id=loop_id, boot_ctx=boot_ctx)
+    logger.info(
+        "Market context ready [loop_id=%s, regime=%s, dead=%s]",
+        loop_id, mkt_ctx.regime.regime_type, mkt_ctx.is_dead,
+    )
 
     # ── Step 3: Account + positions ───────────────────────────────────────────
     try:
@@ -119,7 +133,33 @@ async def _run_loop(loop_id: str, settings: Any) -> None:
         ))
         return
 
-    if not check_daily_loss(account, loop_id=loop_id):
+    # ── Step 3b: Capital tier detection ────────────────────────────────────
+    try:
+        _equity = float(account.get("equity") or 0.0)
+        tier_params = get_tier_parameters(_equity)
+    except (TypeError, ValueError):
+        _equity = 0.0
+        tier_params = get_tier_parameters(500.0)  # fallback to seed tier
+
+    log_event(AuditEvent(
+        loop_id=loop_id,
+        event_type="tier_transition",
+        payload={
+            "tier": tier_params.tier,
+            "equity": _equity,
+            "max_position_pct": tier_params.max_position_pct,
+            "max_daily_loss_pct": tier_params.max_daily_loss_pct,
+            "max_positions": tier_params.max_positions,
+        },
+    ))
+    logger.info(
+        "Capital tier: %s (equity=$%.2f, max_pos=%.1f%%, max_loss=%.1f%%)",
+        tier_params.tier, _equity,
+        tier_params.max_position_pct * 100,
+        tier_params.max_daily_loss_pct * 100,
+    )
+
+    if not check_daily_loss(account, loop_id=loop_id, max_daily_loss_pct=tier_params.max_daily_loss_pct):
         logger.warning("Daily loss limit breached — aborting [loop_id=%s]", loop_id)
         return
 
@@ -255,6 +295,8 @@ async def _run_loop(loop_id: str, settings: Any) -> None:
                 positions=positions,
                 loop_id=loop_id,
                 remaining_buying_power=_loop_buying_power,
+                max_position_pct=tier_params.max_position_pct,
+                max_daily_loss_pct=tier_params.max_daily_loss_pct,
             )
             risk_results.append(risk_result)
             # Deduct committed notional from the running buying-power pool so
@@ -369,6 +411,7 @@ async def _run_loop(loop_id: str, settings: Any) -> None:
             signals=signals,
             loop_id=loop_id,
             equity=equity_usd,
+            max_position_pct=tier_params.max_position_pct,
         )
     except Exception as exc:
         logger.error("Portfolio agent failed [loop_id=%s]: %s", loop_id, exc)

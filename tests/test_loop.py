@@ -47,6 +47,48 @@ def reset_db_and_settings(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def mock_boot_and_market_ctx():
+    """Mock Agent 0 (session_boot) and Agent 1 (market_context) for all loop tests."""
+    boot_ctx = make_stub_boot_ctx()
+    mkt_ctx = make_stub_market_ctx()
+    with patch("sauce.agents.session_boot.run", new=AsyncMock(return_value=boot_ctx)):
+        with patch("sauce.agents.market_context.run", new=AsyncMock(return_value=mkt_ctx)):
+            yield
+
+
+def make_stub_boot_ctx():
+    """Return a minimal BootContext for loop test stubs."""
+    from sauce.core.schemas import BootContext, StrategicContext
+    return BootContext(
+        was_reset=False,
+        calendar_events=[],
+        strategic_context=StrategicContext(as_of=datetime.now(timezone.utc)),
+        is_suppressed=False,
+        as_of=datetime.now(timezone.utc),
+    )
+
+
+def make_stub_market_ctx():
+    """Return a minimal MarketContext for loop test stubs."""
+    from sauce.core.schemas import IntradayNarrativeEntry, MarketContext, RegimeLogEntry
+    return MarketContext(
+        regime=RegimeLogEntry(
+            timestamp=datetime.now(timezone.utc),
+            regime_type="RANGING",
+            confidence=0.5,
+        ),
+        narrative=IntradayNarrativeEntry(
+            timestamp=datetime.now(timezone.utc),
+            narrative_text="Stub market context",
+        ),
+        calendar_events=[],
+        is_dead=False,
+        is_suppressed=False,
+        as_of=datetime.now(timezone.utc),
+    )
+
+
 def make_fresh_quote(symbol: str = "AAPL") -> MagicMock:
     from sauce.core.schemas import PriceReference
     return PriceReference(
@@ -91,6 +133,7 @@ def make_stub_risk_result(symbol: str = "AAPL") -> MagicMock:
         checks=RiskChecks(
             max_position_pct_ok=False,
             max_exposure_ok=False,
+            asset_class_ok=False,
             daily_loss_ok=False,
             volatility_ok=False,
             confidence_ok=False,
@@ -172,10 +215,10 @@ async def test_full_stub_run_writes_loop_start_and_end(monkeypatch):
     portfolio_review = make_stub_portfolio_review()
     supervisor_decision = make_stub_supervisor_abort()
 
-    with patch("sauce.adapters.broker.get_account", return_value=make_fake_account()):
-        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+    with patch("sauce.core.loop.get_account", return_value=make_fake_account()):
+        with patch("sauce.core.loop.get_positions", return_value=[]):
             with patch(
-                "sauce.adapters.market_data.get_universe_snapshot", return_value=quotes
+                "sauce.core.loop.get_universe_snapshot", return_value=quotes
             ):
                 with patch(
                     "sauce.agents.research.run",
@@ -204,10 +247,10 @@ async def test_full_stub_run_places_zero_orders(monkeypatch):
 
     quotes = {"AAPL": make_fresh_quote("AAPL"), "BTC/USD": make_fresh_quote("BTC/USD")}
 
-    with patch("sauce.adapters.broker.get_account", return_value=make_fake_account()):
-        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+    with patch("sauce.core.loop.get_account", return_value=make_fake_account()):
+        with patch("sauce.core.loop.get_positions", return_value=[]):
             with patch(
-                "sauce.adapters.market_data.get_universe_snapshot", return_value=quotes
+                "sauce.core.loop.get_universe_snapshot", return_value=quotes
             ):
                 with patch(
                     "sauce.agents.research.run",
@@ -224,7 +267,7 @@ async def test_full_stub_run_places_zero_orders(monkeypatch):
                             ):
                                 with patch("sauce.agents.ops.run", new=AsyncMock()):
                                     with patch(
-                                        "sauce.adapters.broker.place_order"
+                                        "sauce.core.loop.place_order"
                                     ) as mock_place:
                                         from sauce.core.loop import main
                                         await main()
@@ -244,7 +287,7 @@ async def test_loop_aborts_when_trading_paused(monkeypatch):
     get_settings.cache_clear()
 
     with patch("sauce.agents.research.run", new=AsyncMock()) as mock_research:
-        with patch("sauce.adapters.broker.get_account") as mock_account:
+        with patch("sauce.core.loop.get_account") as mock_account:
             from sauce.core.loop import main
             await main()
 
@@ -275,10 +318,10 @@ async def test_stale_quote_skips_research(monkeypatch):
     )
     quotes = {"AAPL": stale_quote, "BTC/USD": make_fresh_quote("BTC/USD")}
 
-    with patch("sauce.adapters.broker.get_account", return_value=make_fake_account()):
-        with patch("sauce.adapters.broker.get_positions", return_value=[]):
+    with patch("sauce.core.loop.get_account", return_value=make_fake_account()):
+        with patch("sauce.core.loop.get_positions", return_value=[]):
             with patch(
-                "sauce.adapters.market_data.get_universe_snapshot", return_value=quotes
+                "sauce.core.loop.get_universe_snapshot", return_value=quotes
             ):
                 with patch("sauce.agents.research.run", new=AsyncMock(return_value=make_stub_signal("BTC/USD"))) as mock_research:
                     with patch("sauce.agents.risk.run", new=AsyncMock(return_value=make_stub_risk_result())):
@@ -339,7 +382,7 @@ async def test_loop_end_written_even_when_account_fetch_fails(monkeypatch):
     """loop_end must always be written, even when a step raises."""
     from sauce.adapters.broker import BrokerError
 
-    with patch("sauce.adapters.broker.get_account", side_effect=BrokerError("API down")):
+    with patch("sauce.core.loop.get_account", side_effect=BrokerError("API down")):
         from sauce.core.loop import main
         await main()
 

@@ -1,0 +1,813 @@
+# SAUCE — Master Strategy Plan
+### God Level Architecture for an AI-Powered Personal Trading System
+
+---
+
+## Table of Contents
+
+1. [Core Philosophy](#1-core-philosophy)
+2. [The Problem With Guessing](#2-the-problem-with-guessing)
+3. [The Three Layers of Memory](#3-the-three-layers-of-memory)
+4. [Memory Database Architecture](#4-memory-database-architecture)
+5. [How Memory Gets Injected Into Claude](#5-how-memory-gets-injected-into-claude)
+6. [The Market Regime Classifier](#6-the-market-regime-classifier)
+7. [The Three Setups — Fully Specified](#7-the-three-setups--fully-specified)
+8. [The Intraday Narrative Builder](#8-the-intraday-narrative-builder)
+9. [The Learning Loop](#9-the-learning-loop)
+10. [The Complete Agent Redesign](#10-the-complete-agent-redesign)
+11. [Capital Tier System](#11-capital-tier-system)
+12. [The Validation Framework](#12-the-validation-framework)
+13. [Full Architecture Diagram](#13-full-architecture-diagram)
+14. [What Makes This Different](#14-what-makes-this-different)
+15. [Build Order — Sprint Plan](#15-build-order--sprint-plan)
+
+---
+
+## 1. Core Philosophy
+
+Everything flows from one insight.
+
+A human trader who has been watching the market all day is fundamentally different from one who just woke up and looked at a chart. They know what happened at 9:45. They remember that BTC tried to break out at 11:00 and failed. They noticed that SPY has been quietly trending down since lunch. They have **context** — and context is what separates a decision from a guess.
+
+The current system gives Claude no context. Every 30 minutes Claude wakes up with amnesia, looks at 12 numbers, and makes a call. That is not intelligence. That is a coin flip with extra steps.
+
+The memory system changes this fundamentally. Claude stops being a new analyst every cycle and starts being an experienced trader who has been watching the market all day, all week, all month — and who remembers exactly what worked and what did not.
+
+**Claude is not the analyst. Claude is the auditor.**
+
+The rule engine does the analysis. Claude reviews the case file. This is what Claude is genuinely good at — finding logical contradictions, evaluating whether evidence coheres, catching what rules miss. The entire architecture is built around this distinction.
+
+---
+
+## 2. The Problem With Guessing
+
+### What The Current System Does
+
+```
+Research Agent → "Here are 12 indicators for AAPL. What should I do?"
+Claude         → "The RSI is 45 and MACD is slightly positive... buy? confidence 0.6"
+```
+
+This is not a strategy. Claude has no edge here. It is correlating random numbers with no understanding of why they matter in this specific moment, this specific regime, this specific session.
+
+### What A Real Trader Thinks
+
+A real trader never looks at a number in isolation. They ask four questions:
+
+**1. What is the market doing right now?**
+Not just this stock — the whole environment. Is the market in risk-on or risk-off mode? Is it a trending day or a choppy day? A strategy that works in a trending market destroys you in a choppy one.
+
+**2. Where is this asset in its structure?**
+Is it in an uptrend, downtrend, or range? A mean reversion trade only makes sense inside a range. A breakout trade only makes sense at the edge of a range. These are completely different setups.
+
+**3. What is the most recent price story?**
+Not just the last bar — the narrative. Did price just fall hard and bounce? Did it grind up slowly? Did it gap? The shape of the move matters enormously.
+
+**4. Is there a reason this specific setup has edge?**
+Edge means something systematic is happening. Not a pattern that happened to work in the past — a structural reason why it works. If you cannot explain the structural reason, you do not have a strategy.
+
+**Claude needs to be told all four in structured, reasoned form — not raw numbers.**
+
+---
+
+## 3. The Three Layers of Memory
+
+### Layer 1 — Working Memory (Today Only)
+
+This is the trader's mental notepad for the current session. Resets at market close every day because yesterday's intraday context is mostly irrelevant today.
+
+**What it stores:**
+- The market regime at each cycle throughout the day — was 9:30 trending? Was 11:00 choppy? Claude sees the regime evolving, not just a snapshot.
+- Every setup detected today, whether approved or rejected, and why.
+- Every trade placed today — entry price, current status, unrealized P&L.
+- Which symbols have been "hot" today (repeated signals in same direction) vs "noisy" (signals flipping).
+- The intraday narrative — a running plain-English summary of what the market has been doing.
+
+**What this gives Claude:**
+When BTC triggers a mean reversion signal at 2:30 PM, Claude can see that this exact setup triggered at 10:00 AM and 12:00 PM today — and both times the bounce failed within 30 minutes. That context changes everything. Claude should be much more skeptical of a third attempt.
+
+Conversely, if SPY has been in a clean uptrend all day with two successful pullback entries, the third pullback is higher confidence, not lower. Claude can see that pattern.
+
+---
+
+### Layer 2 — Strategic Memory (Persistent, Never Resets)
+
+This is the trader's experience — everything learned over months of watching these specific assets.
+
+**What it stores:**
+- Setup performance statistics by setup type, symbol, time of day, and market regime. Not just win/loss — the full distribution. Average win size, average loss size, maximum consecutive losses.
+- Regime-to-setup correlation — which setups work in which regimes, derived from actual live results.
+- Symbol-specific behavior — does BTC mean reversion at RSI 32 reliably work? Or does it tend to continue down to RSI 25 first? The system learns this from its own trade history.
+- Claude's own veto patterns — what reasons does Claude most often cite for rejecting a setup? If Claude rejects 80% of mean reversion setups citing "MACD still negative," that is important signal.
+- Weekly patterns — does this system perform better on certain days? The system learns from its own data.
+
+---
+
+### Layer 3 — Market Knowledge Base (Semi-Permanent)
+
+Factual context that enriches Claude's understanding without needing to be derived from trade history.
+
+**What it stores:**
+- Known correlation relationships — when VIX spikes above 20, BTC and SPY correlation increases.
+- Economic calendar — FOMC dates, CPI releases, NFP dates. The system knows to suppress certain setups in the 2-hour window before major releases.
+- Asset-specific structural knowledge — BTC halving cycles, ETH gas fee impact on volatility, SPY options expiration patterns.
+- Regime transition history — how long do regimes typically last? A ranging regime running for 3 hours is more likely to break out than one that started 20 minutes ago.
+
+---
+
+## 4. Memory Database Architecture
+
+Two SQLite databases, completely separate from the existing audit database.
+
+### `data/session_memory.db`
+Wipes and rebuilds at the start of each trading day.
+
+| Table | Key Fields |
+|---|---|
+| `regime_log` | timestamp, regime_type, confidence, vix_proxy, market_bias |
+| `signal_log` | timestamp, symbol, setup_type, score, claude_decision, reason |
+| `trade_log` | timestamp, symbol, entry_price, direction, status, unrealized_pnl |
+| `intraday_narrative` | timestamp, narrative_text |
+| `symbol_character` | symbol, signal_count_today, direction_consistency, last_signal_result |
+
+### `data/strategic_memory.db`
+Never wipes. Grows forever.
+
+| Table | Key Fields |
+|---|---|
+| `setup_performance` | setup_type, symbol, regime_at_entry, time_of_day_bucket, win, pnl, hold_duration, date |
+| `regime_transitions` | from_regime, to_regime, duration_minutes, count |
+| `veto_patterns` | veto_reason, setup_type, count, last_seen |
+| `weekly_performance` | week, setup_type, trades, win_rate, avg_pnl, sharpe |
+| `symbol_learned_behavior` | symbol, setup_type, optimal_rsi_entry, avg_reversion_depth, avg_bounce_magnitude, sample_size |
+| `claude_calibration` | date, confidence_stated, outcome, setup_type |
+
+---
+
+## 5. How Memory Gets Injected Into Claude
+
+Memory does not help if it is appended as raw data. It must be synthesized into a narrative Claude can reason about.
+
+Prompt construction has three steps before Claude sees anything.
+
+### Step 1 — Session Context Builder
+
+Queries session memory. Builds a plain-English paragraph.
+
+```
+"Today's session: Market opened with mild upward momentum (+0.3% SPY first 30min).
+Regime shifted to ranging at 10:45 and has held since. BTC has shown 2 mean
+reversion signals today — the 10:15 signal was approved and hit target (+1.2%),
+the 12:30 signal was rejected (stale data). Current BTC character: oscillating
+in a 1.8% range, 2 signals today, 1 successful. You approved 3 setups today,
+rejected 4. Current open position: none."
+```
+
+### Step 2 — Strategic Context Builder
+
+Queries strategic memory for relevant historical performance.
+
+```
+"Historical performance for this exact setup (BTC Mean Reversion, Ranging Regime,
+14:00-16:00 ET): 23 occurrences, 65% win rate, avg win +1.8%, avg loss -0.9%,
+expectancy +0.73%. Note: This setup underperforms significantly when BTC has
+already attempted mean reversion twice in the same session (35% win rate on
+3rd attempt). This would be the 2nd attempt today."
+```
+
+### Step 3 — Complete Claude Prompt
+
+```
+[SESSION MEMORY]
+Today's session: Market opened trending, shifted to ranging at 10:45...
+Your decisions today: 3 approved, 4 rejected...
+Current positions: None open...
+
+[STRATEGIC MEMORY — RELEVANT]
+This exact setup (BTC Mean Reversion + Ranging Regime + 14:00-16:00 ET):
+- 23 historical occurrences
+- 65% win rate, expectancy +0.73%
+- WARNING: 2nd attempt same session historically underperforms (35% win rate)
+
+[MARKET CONTEXT NOW]
+Regime: RANGING (confirmed, 3.5 hours duration)
+Risk environment: NEUTRAL (VIX proxy 18.1)
+Time: 14:42 ET
+Macro events next 2hrs: None
+
+[SETUP DETECTED: BTC MEAN REVERSION]
+Score: 74/100
+
+EVIDENCE FOR:
+- RSI 30-min: 33.8 → CONFIRMS threshold met (<38)
+- Price at lower BB: $43,912 vs BB_lower $43,887 → CONFIRMS
+- 4hr trend intact: Price above 4hr SMA50 by 2.1% → CONFIRMS dip not breakdown
+- Volume flush: 1.9x average on down candles → CONFIRMS institutional selling
+
+EVIDENCE AGAINST:
+- MACD line still below signal (-0.002) → CAUTION momentum not fully reversed
+- Volume on last green candle only 0.8x average → WEAK recovery volume
+
+YOUR ROLE:
+You are auditing a pre-scored thesis. The rules have been evaluated.
+Find contradictions. Find reasons this specific thesis is wrong TODAY.
+Use the session and strategic memory — that data exists for this exact purpose.
+If the thesis withstands scrutiny: approve with calibrated confidence.
+If you find a genuine contradiction: reject with specific reason.
+
+Do not approve because the score is high.
+Do not reject because you are uncertain.
+Approve or reject based on whether the evidence coheres.
+```
+
+---
+
+## 6. The Market Regime Classifier
+
+Runs at the very start of every cycle — before any symbol analysis. Pure Python, no LLM, fully deterministic.
+
+### Five Regimes
+
+| Regime | Conditions | Strategy Behavior |
+|---|---|---|
+| **TRENDING UP** | Higher highs/lows on 30-min, SMA20 > SMA50, volume increasing on up bars | Trend pullbacks high probability. Mean reversion dangerous. |
+| **TRENDING DOWN** | Opposite of above | Mean reversion needs extreme oversold (RSI < 28). Most buys suppressed. |
+| **RANGING** | Price bouncing between levels, SMAs converging, volume decreasing | Ideal for mean reversion. Breakout setups premature. |
+| **VOLATILE** | VIX proxy elevated, BTC ATR spiking, wide swings both directions | All confidence scores reduced 20%. Position sizes halved. Some setups suppressed entirely. |
+| **DEAD** | Volume extremely low, price barely moving | No trades. Zero cycles wasted on analysis. |
+
+### Regime Duration Matters
+
+A ranging regime stable for 4 hours is more reliable than one formed 20 minutes ago. Strategic memory learns how long regimes typically last. When a regime is "aging out" — approaching its historical average duration — that context is passed to Claude. The system knows a breakout may be imminent before the breakout happens.
+
+---
+
+## 7. The Three Setups — Fully Specified
+
+### Setup 1: Crypto Mean Reversion
+
+**The structural edge:** Crypto markets overreact to short-term selling pressure because they are dominated by retail and leveraged traders. Liquidation cascades cause prices to overshoot fair value, then snap back. This is not a backtest pattern — it is a structural feature of the market.
+
+| Parameter | Value |
+|---|---|
+| **Regime** | RANGING or TRENDING UP only |
+| **Assets** | BTC/USD, ETH/USD |
+| **Timeframe** | 30-min signal, 30min–3hr hold |
+| **Min score to pass Claude** | 60/100 |
+
+**Hard Conditions (ALL must be true):**
+1. RSI 30-min below 38
+2. Price at or below lower Bollinger Band (within 0.5%)
+3. 4-hour price above 4hr SMA50 — buying a dip, not a downtrend
+4. Volume ratio on last 3 down candles above 1.5x — the flush is real
+5. MACD histogram is higher than 2 bars ago — curling, not continuing down
+6. No open position in this symbol already
+
+**Soft Conditions (each adds to score):**
+- RSI below 32: +15 pts
+- Stochastic K below 20: +10 pts
+- Price at or below daily SMA20: +10 pts
+- VWAP above current price: +5 pts
+- Strategic memory win rate above 60% for this regime: +10 pts
+
+**Automatic Disqualifiers (any one kills the setup regardless of score):**
+- Major economic event in next 90 minutes
+- Symbol already attempted mean reversion twice today (3rd attempt suppressed)
+- Regime is VOLATILE
+- Regime is TRENDING DOWN
+- Intraday narrative shows "continued selling pressure with no recovery attempts"
+
+---
+
+### Setup 2: Equity Trend Pullback
+
+**The structural edge:** Institutional buyers systematically add at moving averages in uptrending markets because it is the safest place to add to existing positions. This creates predictable buying pressure at these levels every time.
+
+| Parameter | Value |
+|---|---|
+| **Regime** | TRENDING UP only |
+| **Assets** | SPY, QQQ (individual stocks unlocked at Tier 4+) |
+| **Timeframe** | Daily signal, 1–5 day hold (swing trade) |
+| **Min score to pass Claude** | 65/100 |
+
+**Hard Conditions (ALL must be true):**
+1. Daily SMA20 above daily SMA50 — uptrend structure intact
+2. Price within 1% of daily SMA20 — at the pullback level
+3. Daily RSI between 38–58 — not overbought, not crashed
+4. Price above daily SMA50 — SMA20 test is just a pause in larger trend
+5. 30-min chart: last 2 candles not making lower lows — selling fading
+6. Volume on pullback bars below 20-day average — weak selling, not distribution
+
+**Soft Conditions:**
+- Price bounced off SMA20 exactly (touched and reversed): +20 pts
+- Weekly chart also in uptrend: +15 pts
+- 30-min RSI turning up from below 45: +10 pts
+- Very low volume contraction during pullback: +10 pts
+
+**Automatic Disqualifiers:**
+- FOMC, CPI, or NFP within 48 hours
+- Regime shifts to RANGING or VOLATILE during analysis
+- Daily chart shows bearish RSI divergence
+- Price has gapped down on the day
+- Friday after 2:00 PM ET (weekend risk on swing positions)
+
+---
+
+### Setup 3: Crypto Breakout
+
+**The structural edge:** When price breaks out of consolidation with volume, buyers have overwhelmed sellers at that level. The consolidation acts as a spring — compressed energy releases directionally. This is geometry, not statistics.
+
+| Parameter | Value |
+|---|---|
+| **Regime** | RANGING only (tight range about to break) |
+| **Assets** | BTC/USD primary, ETH/USD secondary |
+| **Timeframe** | 30-min signal, 1–6hr hold |
+| **Min score to pass Claude** | 70/100 |
+
+**Hard Conditions (ALL must be true):**
+1. Price has been in a range for at least 4 hours (max high - min low less than 2%)
+2. Volume declining during consolidation — energy compression confirmed
+3. Current bar has closed above the range high
+4. Volume on breakout bar is 2x or more above consolidation average
+5. 4-hour trend is in the same direction as the breakout
+6. No open positions currently
+
+**Soft Conditions:**
+- Consolidation lasted 6+ hours: +15 pts
+- Volume ratio on breakout 3x+: +15 pts
+- RSI trending up during consolidation while price was flat (hidden strength): +10 pts
+- Range formed immediately below known resistance: +10 pts
+- Strategic memory shows breakout setups performing well recently: +10 pts
+
+**Automatic Disqualifiers:**
+- Third breakout attempt (previous two failed — exhaustion pattern)
+- Price broke out but immediately reversed within the same bar (false breakout)
+- Volume was already elevated before the breakout (not compression, just noise)
+- Major event in next 2 hours
+- Regime is VOLATILE
+
+---
+
+## 8. The Intraday Narrative Builder
+
+Every cycle, before analyzing individual symbols, the system writes a one-paragraph plain-English description of what the market has been doing today. Stored in session memory. Injected into Claude's context.
+
+Built programmatically from objective data — not generated by Claude.
+
+**Example output:**
+
+> *"Session opened with moderate upward momentum (+0.3% SPY first 30min). Regime has been Ranging since 10:15 ET (3h 27min). 4 setups detected today: 2 BTC Mean Reversion (1 approved at 10:15 — hit target +1.4%, 1 rejected at 12:00 — stale data), 1 SPY Trend Pullback (approved at open — currently +0.6% unrealized), 1 BTC Breakout (rejected — insufficient volume). Account currently +1.2% today. Notable: BTC has been oscillating in a 1.8% range all session — regime very stable. Volume declining consistently since 11:00 — possible breakout building."*
+
+Claude reads this and has genuine situational awareness. Not guesses based on indicator snapshots — actual understanding of what has happened.
+
+---
+
+## 9. The Learning Loop
+
+Every trade that closes writes its outcome back to strategic memory with full context. Not just win/loss — the complete picture.
+
+**What gets recorded per trade:**
+- Market regime at entry
+- Time of day bucket
+- RSI level at entry
+- Strategic memory win rate prediction at the time
+- What Claude cited as the key risk — did it materialize?
+- Hold duration — did it hit target, stop, or was it exited early?
+- Final P&L
+
+**What the system learns over time:**
+
+```
+"BTC mean reversion works 68% in ranging regimes but 41% in trending down
+ → stop trading it in downtrends"
+
+"SPY trend pullback to SMA20 works best Tuesday and Wednesday, worse Monday
+ → adjust minimum score requirement by day of week"
+
+"When Claude's rejection reason is 'MACD not confirmed,' the setup goes on
+ to succeed 71% of the time → this reason is too conservative, adjust prompt"
+
+"Second BTC mean reversion attempt same session has 38% win rate
+ → the disqualifier rule is justified by data"
+```
+
+### Claude Calibration Tracking
+
+When Claude says confidence 0.75, does the trade win 75% of the time?
+
+If Claude says 0.75 and it wins 45% of the time, Claude is miscalibrated and the prompt needs adjustment. This is tracked in `claude_calibration` table. Over time, the system knows whether to trust Claude's stated confidence — and can adjust the minimum confidence threshold accordingly.
+
+**Calibration score formula:**
+
+```
+calibration_score = 1 - avg(|stated_confidence - actual_win_rate|)
+Target: above 0.60
+Action if below 0.50 for 20+ trades: review and adjust Claude prompt
+```
+
+---
+
+## 10. The Complete Agent Redesign
+
+### Agent 0 — Memory Initializer (new)
+
+Runs once at market open. Checks if `session_memory.db` needs to be wiped (new day). Builds starting context from strategic memory — what have recent sessions looked like? Loads the economic calendar for the day. Writes initial session state.
+
+**No LLM call. No broker call. Pure setup.**
+
+---
+
+### Agent 1 — Market Context Agent (new)
+
+Runs every cycle before anything else. Classifies current regime. Builds intraday narrative update. Writes to session memory. Returns a `Context` object that every subsequent agent reads.
+
+**If regime is DEAD → exit loop immediately. No further agents run.**
+
+**No LLM call. Pure Python.**
+
+---
+
+### Agent 2 — Strategy Scanner (replaces most of research agent)
+
+Pure Python. No LLM. Takes each eligible symbol, evaluates against all three active setups for current capital tier, scores each setup. Returns the highest-scoring setup per symbol if above threshold. Builds the evidence narrative in plain English.
+
+This is the analyst doing the work. Deterministic, fast, testable without any API calls.
+
+**Input:** Symbol + indicators + session memory + strategic memory
+**Output:** List of pre-scored, pre-qualified theses with evidence narratives
+
+---
+
+### Agent 3 — Claude Thesis Validator (new role for research Claude)
+
+Only called when Scanner finds a valid setup. Receives the complete context package:
+- Session memory narrative
+- Strategic memory performance data
+- Market context
+- Structured evidence case with evidence for and against
+
+Claude's only job: **audit the thesis.** Find contradictions. Find what the rules missed. Determine if the evidence truly coheres.
+
+Returns: `approve` or `reject` with specific reasoning. This reasoning is stored in session memory for calibration tracking.
+
+---
+
+### Agent 4 — Risk Agent (modified)
+
+Reads capital tier from current equity level. Gets dynamic position sizing. Checks all existing rules. Additionally:
+- Checks if approved setup is active for current capital tier
+- Reads session memory for current day exposure
+- Writes risk decision to session memory
+
+---
+
+### Agent 5 — Execution Agent (unchanged)
+
+Good as-is. No changes needed.
+
+---
+
+### Agent 6 — Portfolio Agent (enhanced)
+
+Now has access to full session memory. Flags when open positions are approaching end of their expected holding period based on setup type. Checks if any open position's original thesis has been invalidated by regime change — if the regime shifted, the trade may need to exit regardless of P&L.
+
+---
+
+### Agent 7 — Supervisor Agent (enhanced)
+
+Receives session memory summary. Knows it is reviewing a pre-scored, pre-validated, memory-informed thesis. The bar for aborting a well-validated thesis should be high. The bar for aborting a low-conviction thesis should be low. Its veto reasons are also stored in session memory for pattern analysis.
+
+---
+
+### Agent 8 — Ops Agent (enhanced)
+
+Now writes meaningful performance summaries to strategic memory. Tracks Claude calibration metrics. Updates learned behavior tables. Detects when a setup's win rate is drifting — if mean reversion win rate drops below 45% over the last 20 trades, it flags this for human review and can optionally auto-suppress the setup.
+
+---
+
+## 11. Capital Tier System
+
+The system automatically detects which tier it is in based on current equity. No manual configuration needed when you add money.
+
+### Tier 1 — Seed ($500–$2,499)
+
+| Parameter | Value |
+|---|---|
+| Active setups | Setup 1 only (Crypto Mean Reversion) |
+| Max positions | 1 |
+| Position sizing | 35% of equity |
+| Cash reserve | 30% minimum — never trade below this |
+| Max daily loss | 3% |
+
+**Rationale:** One strategy. One position. Prove the core edge works before adding complexity. Crypto only — no PDT risk, instant settlement.
+
+---
+
+### Tier 2 — Building ($2,500–$4,999)
+
+| Parameter | Value |
+|---|---|
+| Active setups | Setup 1 + Setup 2 |
+| Max positions | 2 (max 1 equity swing + 1 crypto) |
+| Position sizing | 25% of equity |
+| Cash reserve | 25% minimum |
+| Max daily loss | 3% |
+
+**Rationale:** SPY/QQQ swing trading added. Still conservative. Crypto mean reversion remains the primary edge.
+
+---
+
+### Tier 3 — Growing ($5,000–$9,999)
+
+| Parameter | Value |
+|---|---|
+| Active setups | All three |
+| Max positions | 3 |
+| Position sizing | 18% of equity |
+| Cash reserve | 25% minimum |
+| Max daily loss | 2.5% |
+
+**Rationale:** Full strategy set active. Begin building statistical significance in strategic memory.
+
+---
+
+### Tier 4 — Scaling ($10,000–$24,999)
+
+| Parameter | Value |
+|---|---|
+| Active setups | All three + custom setups if data supports |
+| Max positions | 5 |
+| Position sizing | 12% of equity |
+| Cash reserve | 20% minimum |
+| Max daily loss | 2% |
+
+**Rationale:** Real compounding begins. Sharpe ratio becomes meaningful. Individual stock setups unlocked.
+
+---
+
+### Tier 5 — Operating ($25,000+)
+
+| Parameter | Value |
+|---|---|
+| Active setups | All + full equity universe |
+| Max positions | 8 |
+| Position sizing | 10% of equity |
+| Cash reserve | 20% minimum |
+| Max daily loss | 2% |
+
+**Rationale:** Full system. PDT restriction lifted. Institutional-style risk management. The system has enough trade history to be genuinely self-learning.
+
+---
+
+## 12. The Validation Framework
+
+### Paper Trading Criteria
+
+All of the following must be true for 30 consecutive days before going live:
+
+| Metric | Required Threshold |
+|---|---|
+| Win rate | Above 52% |
+| Expectancy | Positive (avg win × win rate > avg loss × loss rate) |
+| Max drawdown | Below 8% of starting capital |
+| Sharpe ratio | Above 0.8 on daily returns |
+| Max single day loss | Never exceeding 3% |
+| Claude calibration score | Above 0.60 |
+
+If any criterion fails: diagnose, do not go live. Strategic memory provides the data to diagnose exactly which setup, which regime, which time of day is failing.
+
+### Live Trading — First 30 Days
+
+Same criteria apply. If any criterion fails in live trading:
+- **Step 1:** Auto-reduce to 50% position sizing for 2 weeks
+- **Step 2:** If criteria still failing, auto-pause all trading and flag for human review
+
+### The Number That Actually Matters Most
+
+**Expectancy.**
+
+Not win rate — a system can win 80% of the time and still lose money if the 20% losses are huge. Not return — a system can return 10% with a drawdown that would have wiped you out. Expectancy is the average dollar made per dollar risked, over all trades.
+
+```
+Expectancy = (Win Rate × Avg Win) - (Loss Rate × Avg Loss)
+
+Example:
+Win Rate: 60%, Avg Win: $180
+Loss Rate: 40%, Avg Loss: $120
+
+Expectancy = (0.60 × $180) - (0.40 × $120) = $108 - $48 = $60
+
+Meaning: for every trade taken, the system makes $60 on average.
+```
+
+If expectancy is positive and you have enough trades to be statistically significant (minimum 50 trades per setup before trusting the number), the system has edge.
+
+---
+
+## 13. Full Architecture Diagram
+
+```
+EVERY 30 MINUTES:
+│
+├─ Agent 0: Memory Initializer
+│   ├─ Is it a new day? → Wipe session_memory.db
+│   ├─ Load economic calendar for today
+│   ├─ Load strategic memory summary (recent performance)
+│   └─ Write initial session state
+│
+├─ Agent 1: Market Context
+│   ├─ Classify regime: TRENDING UP / DOWN / RANGING / VOLATILE / DEAD
+│   ├─ Build intraday narrative update (plain English paragraph)
+│   ├─ Write regime + narrative to session_memory
+│   └─ If DEAD regime → EXIT LOOP. Zero trades possible.
+│
+├─ Agent 2: Strategy Scanner (pure Python, no LLM)
+│   ├─ For each eligible symbol:
+│   │   ├─ Check hard conditions for each active setup (capital tier gates this)
+│   │   ├─ Score soft conditions
+│   │   ├─ Apply automatic disqualifiers
+│   │   ├─ Query session_memory (symbol character today)
+│   │   ├─ Query strategic_memory (historical performance for this exact context)
+│   │   └─ If score ≥ threshold → build structured evidence narrative
+│   └─ Returns: list of pre-scored, pre-qualified theses
+│
+├─ Agent 3: Claude Thesis Validator (LLM — auditor role)
+│   ├─ For each thesis:
+│   │   ├─ Build session context paragraph from session_memory
+│   │   ├─ Build strategic context paragraph from strategic_memory
+│   │   ├─ Inject market context
+│   │   ├─ Deliver structured evidence case (for + against)
+│   │   ├─ Claude audits: approve/reject + specific reason
+│   │   └─ Write Claude's decision + reasoning to session_memory
+│   └─ Returns: approved signals only
+│
+├─ Agent 4: Risk Agent
+│   ├─ Read current equity → determine capital tier
+│   ├─ Get position sizing from tier configuration
+│   ├─ Check setup is active for current tier
+│   ├─ Run all existing risk rules (unchanged)
+│   ├─ Write risk decision to session_memory
+│   └─ Returns: sized, approved orders
+│
+├─ Agent 5: Execution Agent (unchanged)
+│   └─ Build and validate order parameters
+│
+├─ Agent 6: Portfolio Agent
+│   ├─ Check open positions against intraday narrative
+│   ├─ Flag positions whose thesis regime has changed
+│   └─ Suggest exits if original thesis is invalidated
+│
+├─ Agent 7: Supervisor Agent
+│   ├─ Receives session_memory summary
+│   ├─ Reviews memory-informed, pre-validated thesis
+│   └─ Final gate — high bar to abort a well-validated thesis
+│
+├─ BROKER: Place approved orders
+│   └─ Idempotency check (existing) — no duplicate orders
+│
+└─ Agent 8: Ops Agent
+    ├─ Update session_memory with cycle outcome
+    ├─ Write any completed trade outcomes to strategic_memory
+    ├─ Update Claude calibration table
+    ├─ Check for win rate drift per setup (flag if below 45% over 20 trades)
+    ├─ Update symbol learned behavior table
+    └─ Write daily P&L and stats to audit DB (existing)
+```
+
+---
+
+## 14. What Makes This Different
+
+Most retail algorithmic systems are pattern-matching systems dressed up as intelligent ones. They find correlations in historical data and hope those correlations hold. Most fail within 12 months because they overfit to the past.
+
+This system is different in four fundamental ways.
+
+**Structural Foundations**
+The strategies have structural reasons they work — not because the backtest looked good. Mean reversion works because leverage liquidations cause overshoots in crypto. Trend pullback works because institutions accumulate at moving averages. Breakout works because consolidation compresses energy that releases directionally. These are features of market microstructure that do not disappear as markets evolve.
+
+**Claude Is Used Correctly**
+Claude cannot reliably identify whether RSI 45 is bullish or bearish on its own. But Claude is exceptional at identifying logical contradictions in a structured argument, evaluating whether evidence coheres, and catching what rule engines miss. The architecture puts Claude in that role — not as analyst, but as auditor.
+
+**Genuine Self-Learning**
+Every trade enriches the strategic memory. Every rejection updates the veto pattern log. Every regime transition gets recorded. After 6 months, the system knows things about how BTC behaves in ranging regimes on Thursday afternoons that no human would think to encode upfront. It derives these patterns from its own experience.
+
+**Memory Means Context**
+By the time Claude audits a thesis at 3 PM, it knows what the market has done since 9:30. It knows which setups worked and which failed today. It knows whether this specific setup has been reliable lately. It knows if this is the first or third attempt at the same pattern. That context is what transforms a guess into a judgment.
+
+---
+
+## 15. Build Order — Sprint Plan
+
+Work is designed so each sprint produces something testable before moving to the next.
+
+### Sprint 1 — Memory Foundation
+```
+├── session_memory.db schema + table creation
+├── strategic_memory.db schema + table creation
+├── Memory read helpers (get_session_context, get_strategic_context)
+├── Memory write helpers (write_signal, write_trade_outcome, write_regime)
+└── Session reset logic (new day detection)
+```
+**Test:** Write mock data to both DBs. Verify reads return correct structured data.
+
+---
+
+### Sprint 2 — Intelligence Layer
+```
+├── Market regime classifier (5 regimes, fully deterministic)
+├── Regime duration tracker
+├── Intraday narrative builder (programmatic, plain English)
+└── Economic calendar loader (hardcoded important dates first)
+```
+**Test:** Feed historical OHLCV data, verify correct regime classification across known market periods.
+
+---
+
+### Sprint 3 — Strategy Engine
+```
+├── Setup 1 full rule set + scorer (all hard + soft conditions)
+├── Setup 2 full rule set + scorer
+├── Setup 3 full rule set + scorer
+├── Automatic disqualifier engine
+└── Evidence narrative builder (plain English from rule outputs)
+```
+**Test:** Feed known setups, verify scores are correct. Feed known non-setups, verify they return nothing.
+
+---
+
+### Sprint 4 — Claude Repositioning
+```
+├── Session context builder (queries session_memory → paragraph)
+├── Strategic context builder (queries strategic_memory → paragraph)
+├── New research prompt template (auditor role, full memory injection)
+└── Claude calibration tracker (write confidence + outcome per trade)
+```
+**Test:** Run full prompt construction without LLM, verify output is coherent and complete. Then test with LLM, verify Claude responds to auditor role correctly.
+
+---
+
+### Sprint 5 — Capital and Risk
+```
+├── Capital tier system (equity → tier → parameters)
+├── Dynamic position sizing (reads tier, not static config)
+├── Setup activation gates per tier
+└── Tier transition detection (auto-adjusts mid-session if capital crosses boundary)
+```
+**Test:** Verify tier 1 suppresses Setup 2 and 3. Verify sizing changes correctly across tiers.
+
+---
+
+### Sprint 6 — Learning Loop
+```
+├── Trade outcome writer (ops agent → strategic_memory on close)
+├── Win rate drift detector (flag if below 45% over 20 trades)
+├── Claude calibration analyzer (weekly report)
+├── Symbol learned behavior updater
+└── Weekly performance reporter
+```
+**Test:** Write 50 mock trades with known outcomes, verify win rates and calibration scores compute correctly.
+
+---
+
+### Sprint 7 — Paper Validation
+```
+├── Run full system on paper for 30 days
+├── Evaluate all six validation criteria daily
+├── Review strategic memory after 30 days — what has the system learned?
+├── Review Claude calibration scores
+└── Go/no-go decision for live capital
+```
+**Criteria for go-live:** All six validation metrics met for 30 consecutive days.
+
+---
+
+### Sprint 8 — Go Live
+```
+├── Switch ALPACA_PAPER=false
+├── Fund account with $1,000
+├── Tier 1 active — Setup 1 only, 35% position sizing
+├── Monitor daily for first 2 weeks
+└── Add capital and tier up as results warrant
+```
+
+---
+
+## Appendix: The One Thing That Kills Retail Algo Systems
+
+**Overfitting.**
+
+Every setup in this system has a structural reason it works — not just "because the backtest showed it worked." The structural reasons:
+
+- **Mean reversion:** Leverage liquidations cause overshoots in crypto. Structural, not historical.
+- **Trend pullback:** Institutional accumulation at moving averages in uptrends. Structural, not historical.
+- **Breakout:** Energy compression followed by directional release. Structural, not historical.
+
+If you add a setup that does not have a structural reason — just a pattern that happened to appear in historical data — it will fail in live trading. This is the graveyard of every retail quant system.
+
+The rule is simple: **before coding any new setup, write one sentence explaining why it works in terms of market participant behavior.** If you cannot write that sentence, the setup does not get built.
+
+---
+
+*SAUCE — Personal multi-agent AI-driven trading system*
+*Version: God Level*
+*Status: Planning Complete — Ready for Sprint 1*

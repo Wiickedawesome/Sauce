@@ -98,6 +98,7 @@ class RiskChecks(StrictModel):
 
     max_position_pct_ok: bool
     max_exposure_ok: bool
+    asset_class_ok: bool
     daily_loss_ok: bool
     volatility_ok: bool
     confidence_ok: bool
@@ -205,6 +206,17 @@ class AuditEvent(StrictModel):
         "portfolio_review",
         "ops_summary",
         "reconciliation",
+        "session_boot",
+        "market_context",
+        "regime_transition",
+        "tier_transition",
+        "learning_drift_detected",
+        "learning_weekly_report",
+        "learning_calibration_analysis",
+        "learning_behavior_updated",
+        "validation_daily_check",
+        "validation_passed",
+        "validation_degradation",
     ]
     symbol: str | None = None
     payload: dict = Field(default_factory=dict)  # serialised model or error detail
@@ -251,3 +263,238 @@ class DailyStats(StrictModel):
     starting_nav_usd: float = 0.0
     ending_nav_usd: float = 0.0
     trading_paused: bool = False
+
+
+# ── Type Aliases ──────────────────────────────────────────────────────────────
+
+MarketRegime = Literal[
+    "TRENDING_UP", "TRENDING_DOWN", "RANGING", "VOLATILE", "DEAD"
+]
+
+SetupType = Literal[
+    "crypto_mean_reversion", "equity_trend_pullback", "crypto_breakout"
+]
+
+CapitalTier = Literal[
+    "seed", "building", "growing", "scaling", "operating"
+]
+
+EconomicEventType = Literal["FOMC", "CPI", "NFP"]
+
+
+# ── Economic Calendar ─────────────────────────────────────────────────────────
+
+class EconomicEvent(StrictModel):
+    """A scheduled major economic event (FOMC, CPI, NFP)."""
+
+    date: datetime = Field(..., description="Scheduled release time in UTC.")
+    event_type: EconomicEventType
+    description: str = Field("", description="Short label, e.g. 'FOMC Rate Decision'.")
+
+
+# ── Strategy Scanner (Sprint 3) ───────────────────────────────────────────────
+
+class HardConditionResult(StrictModel):
+    """Result of a single hard condition check."""
+
+    label: str
+    passed: bool
+    detail: str = ""
+
+
+class SoftConditionResult(StrictModel):
+    """Result of a single soft condition check with its point contribution."""
+
+    label: str
+    triggered: bool
+    points: float = Field(ge=0.0)
+
+
+class Disqualification(StrictModel):
+    """An automatic disqualifier that killed a setup."""
+
+    reason: str
+
+
+class SetupResult(StrictModel):
+    """
+    Output of the strategy scanner for one setup evaluation.
+
+    If all hard conditions pass and no disqualifiers fire, score >= min_score
+    means the setup is viable and should proceed to Claude for audit.
+    """
+
+    setup_type: SetupType
+    symbol: str
+    hard_conditions: list[HardConditionResult] = Field(default_factory=list)
+    soft_conditions: list[SoftConditionResult] = Field(default_factory=list)
+    disqualifiers: list[Disqualification] = Field(default_factory=list)
+    score: float = Field(ge=0.0, le=100.0)
+    min_score: float = Field(ge=0.0, le=100.0)
+    passed: bool = False
+    evidence_narrative: str = ""
+    as_of: datetime
+
+
+# ── Session Memory Models (data/session_memory.db — wiped daily) ─────────────
+
+class RegimeLogEntry(StrictModel):
+    """Snapshot of the detected market regime at a given cycle."""
+
+    timestamp: datetime
+    regime_type: MarketRegime
+    confidence: float = Field(ge=0.0, le=1.0)
+    vix_proxy: float | None = None
+    market_bias: str | None = None
+
+
+class SignalLogEntry(StrictModel):
+    """Record of every signal generated during the day, approved or not."""
+
+    timestamp: datetime
+    symbol: str
+    setup_type: SetupType
+    score: float = Field(ge=0.0, le=100.0)
+    claude_decision: Literal["approve", "reject", "hold"]
+    reason: str | None = None
+
+
+class TradeLogEntry(StrictModel):
+    """Intraday trade record including live P&L tracking."""
+
+    timestamp: datetime
+    symbol: str
+    entry_price: float = Field(gt=0.0)
+    direction: Literal["buy", "sell"]
+    status: Literal["open", "closed", "cancelled"]
+    unrealized_pnl: float = 0.0
+
+
+class IntradayNarrativeEntry(StrictModel):
+    """Running plain-English summary of market action during the day."""
+
+    timestamp: datetime
+    narrative_text: str
+
+
+class SymbolCharacterEntry(StrictModel):
+    """Per-symbol intraday behavior profile."""
+
+    symbol: str
+    signal_count_today: int = Field(ge=0, default=0)
+    direction_consistency: float = Field(ge=-1.0, le=1.0, default=0.0)
+    last_signal_result: Literal["win", "loss", "pending", "none"] = "none"
+
+
+# ── Strategic Memory Models (data/strategic_memory.db — never wipes) ─────────
+
+class SetupPerformanceEntry(StrictModel):
+    """Historical performance record for a specific setup execution."""
+
+    setup_type: SetupType
+    symbol: str
+    regime_at_entry: MarketRegime
+    time_of_day_bucket: str  # e.g. "09:30-12:00", "12:00-14:00", "14:00-16:00"
+    win: bool
+    pnl: float
+    hold_duration_minutes: float = Field(ge=0.0)
+    date: str  # YYYY-MM-DD
+
+
+class RegimeTransitionEntry(StrictModel):
+    """Tracks how regimes change over time to detect patterns."""
+
+    from_regime: MarketRegime
+    to_regime: MarketRegime
+    duration_minutes: float = Field(ge=0.0)
+    count: int = Field(ge=1, default=1)
+
+
+class VetoPatternEntry(StrictModel):
+    """Tracks recurring veto reasons by setup type."""
+
+    veto_reason: str
+    setup_type: SetupType
+    count: int = Field(ge=1, default=1)
+    last_seen: datetime
+
+
+class WeeklyPerformanceEntry(StrictModel):
+    """Aggregated weekly performance by setup type."""
+
+    week: str  # YYYY-Www (ISO week)
+    setup_type: SetupType
+    trades: int = Field(ge=0, default=0)
+    win_rate: float = Field(ge=0.0, le=1.0, default=0.0)
+    avg_pnl: float = 0.0
+    sharpe: float = 0.0
+
+
+class SymbolLearnedBehaviorEntry(StrictModel):
+    """Learned indicator thresholds per symbol/setup from trade history."""
+
+    symbol: str
+    setup_type: SetupType
+    optimal_rsi_entry: float | None = None
+    avg_reversion_depth: float | None = None
+    avg_bounce_magnitude: float | None = None
+    sample_size: int = Field(ge=0, default=0)
+
+
+class ClaudeCalibrationEntry(StrictModel):
+    """Tracks Claude's stated confidence vs actual trade outcome."""
+
+    date: str  # YYYY-MM-DD
+    confidence_stated: float = Field(ge=0.0, le=1.0)
+    outcome: Literal["win", "loss"]
+    setup_type: SetupType
+
+
+# ── Memory Context Aggregation Models ─────────────────────────────────────────
+
+class SessionContext(StrictModel):
+    """Aggregated session memory passed to Claude prompts."""
+
+    regime_history: list[RegimeLogEntry] = Field(default_factory=list)
+    signals_today: list[SignalLogEntry] = Field(default_factory=list)
+    trades_today: list[TradeLogEntry] = Field(default_factory=list)
+    narrative: str = ""
+    symbol_characters: list[SymbolCharacterEntry] = Field(default_factory=list)
+    as_of: datetime
+
+
+class StrategicContext(StrictModel):
+    """Aggregated strategic memory relevant to the current setup."""
+
+    setup_performance: list[SetupPerformanceEntry] = Field(default_factory=list)
+    regime_transitions: list[RegimeTransitionEntry] = Field(default_factory=list)
+    relevant_veto_patterns: list[VetoPatternEntry] = Field(default_factory=list)
+    weekly_trend: list[WeeklyPerformanceEntry] = Field(default_factory=list)
+    symbol_behavior: SymbolLearnedBehaviorEntry | None = None
+    claude_calibration: list[ClaudeCalibrationEntry] = Field(default_factory=list)
+    as_of: datetime
+
+
+# ── Boot & Market Context Models ─────────────────────────────────────────────
+
+class BootContext(StrictModel):
+    """Output of Agent 0 — session boot context assembled at market open."""
+
+    was_reset: bool
+    calendar_events: list[EconomicEvent] = Field(default_factory=list)
+    strategic_context: StrategicContext
+    is_suppressed: bool = False
+    as_of: datetime
+
+
+class MarketContext(StrictModel):
+    """Output of Agent 1 — market context assembled each cycle."""
+
+    regime: RegimeLogEntry
+    regime_duration_minutes: float | None = None
+    regime_aging_out: bool = False
+    narrative: IntradayNarrativeEntry
+    calendar_events: list[EconomicEvent] = Field(default_factory=list)
+    is_dead: bool = False
+    is_suppressed: bool = False
+    as_of: datetime

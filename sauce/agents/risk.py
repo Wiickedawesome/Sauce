@@ -12,6 +12,7 @@ Checks performed:
   1. Confidence floor: signal.confidence >= settings.min_confidence.
   2. Max position per symbol: existing + proposed <= equity * max_position_pct.
   3. Max portfolio exposure: total exposure + proposed <= equity * max_portfolio_exposure.
+  3b. Asset-class allocation cap: per-class exposure <= equity * max_{crypto,equity}_allocation_pct.
   4. Volatility (ATR) guard: ATR/price < 5% (avoid trading in extreme conditions).
   5. Daily loss already ok (was checked in loop pre-flight — double-check here).
 
@@ -37,6 +38,8 @@ async def run(
     positions: list[dict],
     loop_id: str,
     remaining_buying_power: float | None = None,
+    max_position_pct: float | None = None,
+    max_daily_loss_pct: float | None = None,
 ) -> RiskCheckResult:
     """
     Evaluate a signal against all configured risk limits.
@@ -55,8 +58,18 @@ async def run(
                           so that two simultaneous buy signals cannot both claim
                           the full available cash.  When None, falls back to the
                           raw buying_power from the account dict (safe default).
+    max_position_pct:     Per-tier override for max position sizing. When None,
+                          falls back to settings.max_position_pct.
+    max_daily_loss_pct:   Per-tier override for daily loss limit. When None,
+                          falls back to settings.max_daily_loss_pct.
     """
     settings = get_settings()
+    effective_max_position_pct = (
+        max_position_pct if max_position_pct is not None else settings.max_position_pct
+    )
+    effective_max_daily_loss_pct = (
+        max_daily_loss_pct if max_daily_loss_pct is not None else settings.max_daily_loss_pct
+    )
     db_path = str(settings.db_path)
     as_of = datetime.now(timezone.utc)
 
@@ -92,6 +105,7 @@ async def run(
         checks = RiskChecks(
             max_position_pct_ok=True,
             max_exposure_ok=True,
+            asset_class_ok=True,
             daily_loss_ok=True,
             volatility_ok=True,
             confidence_ok=False,
@@ -115,6 +129,7 @@ async def run(
         checks = RiskChecks(
             max_position_pct_ok=False,
             max_exposure_ok=False,
+            asset_class_ok=False,
             daily_loss_ok=False,
             volatility_ok=False,
             confidence_ok=False,
@@ -125,6 +140,7 @@ async def run(
         checks = RiskChecks(
             max_position_pct_ok=False,
             max_exposure_ok=False,
+            asset_class_ok=False,
             daily_loss_ok=False,
             volatility_ok=False,
             confidence_ok=False,
@@ -136,6 +152,7 @@ async def run(
         checks = RiskChecks(
             max_position_pct_ok=False,
             max_exposure_ok=False,
+            asset_class_ok=False,
             daily_loss_ok=False,
             volatility_ok=False,
             confidence_ok=False,
@@ -163,7 +180,7 @@ async def run(
     _is_crypto = "/" in signal.symbol
     if not _is_crypto and volume_1d_avg is not None and volume_1d_avg > 0 and mid_price > 0:
         # Conservative upper-bound estimate: full remaining position capacity.
-        max_proposed_qty = (equity * settings.max_position_pct) / mid_price
+        max_proposed_qty = (equity * effective_max_position_pct) / mid_price
         volume_too_low = max_proposed_qty > volume_1d_avg * settings.max_volume_participation
 
     # ── Check 1: Confidence floor ─────────────────────────────────────────────
@@ -182,7 +199,7 @@ async def run(
                 existing_value = 0.0
             break
 
-    max_position_value = equity * settings.max_position_pct
+    max_position_value = equity * effective_max_position_pct
     remaining_capacity = max_position_value - existing_value
     max_position_pct_ok = remaining_capacity > 0
 
@@ -201,8 +218,40 @@ async def run(
             pass
 
     max_exposure_value = equity * settings.max_portfolio_exposure
-    proposed_addition = min(remaining_capacity, equity * settings.max_position_pct)
+    proposed_addition = min(remaining_capacity, equity * effective_max_position_pct)
     max_exposure_ok = (total_existing_exposure + proposed_addition) <= max_exposure_value
+
+    # ── Check 3b: Asset-class allocation cap ──────────────────────────────────
+    # Prevent any single asset class (crypto or equities) from consuming all
+    # buying power.  Without this guard the 24/7 crypto market can exhaust
+    # capital before equities market opens.
+    crypto_exposure = 0.0
+    equity_exposure = 0.0
+    for pos in positions:
+        try:
+            mv = float(pos.get("market_value") or 0.0)
+            if mv == 0.0:
+                mv = abs(float(pos.get("qty") or 0.0)) * float(pos.get("current_price") or 0.0)
+            mv = abs(mv)
+        except (TypeError, ValueError):
+            mv = 0.0
+        sym = str(pos.get("symbol", ""))
+        if "/" in sym:
+            crypto_exposure += mv
+        else:
+            equity_exposure += mv
+
+    if signal.side == "buy":
+        if _is_crypto:
+            asset_class_cap = equity * settings.max_crypto_allocation_pct
+            asset_class_ok = (crypto_exposure + proposed_addition) <= asset_class_cap
+        else:
+            asset_class_cap = equity * settings.max_equity_allocation_pct
+            asset_class_ok = (equity_exposure + proposed_addition) <= asset_class_cap
+    else:
+        # Sells always OK — reducing exposure is never blocked by this cap.
+        asset_class_ok = True
+        asset_class_cap = 0.0  # not used
 
     # ── Check 4: Volatility (ATR) guard ───────────────────────────────────────
     atr_14 = signal.evidence.indicators.atr_14
@@ -221,7 +270,7 @@ async def run(
     try:
         if last_equity > 0:
             daily_pnl = (equity - last_equity) / last_equity
-            daily_loss_ok = daily_pnl >= -abs(settings.max_daily_loss_pct)
+            daily_loss_ok = daily_pnl >= -abs(effective_max_daily_loss_pct)
         else:
             daily_loss_ok = False
     except (TypeError, ValueError, ZeroDivisionError):
@@ -230,6 +279,7 @@ async def run(
     checks = RiskChecks(
         max_position_pct_ok=max_position_pct_ok,
         max_exposure_ok=max_exposure_ok,
+        asset_class_ok=asset_class_ok,
         daily_loss_ok=daily_loss_ok,
         volatility_ok=volatility_ok,
         confidence_ok=confidence_ok,
@@ -242,7 +292,7 @@ async def run(
             f"bid-ask spread too wide ({bid_ask_spread:.2%} > {settings.max_spread_pct:.2%})"
         )
     if volume_too_low:
-        max_proposed_qty_display = (equity * settings.max_position_pct) / mid_price
+        max_proposed_qty_display = (equity * effective_max_position_pct) / mid_price
         failed.append(
             f"order size ({max_proposed_qty_display:.0f} shares) would exceed "
             f"{settings.max_volume_participation:.0%} of est. daily volume "
@@ -262,6 +312,14 @@ async def run(
             f"total exposure would exceed limit "
             f"(current ${total_existing_exposure:.0f}, "
             f"max ${max_exposure_value:.0f})"
+        )
+    if not asset_class_ok:
+        class_label = "crypto" if _is_crypto else "equity"
+        current_class_exp = crypto_exposure if _is_crypto else equity_exposure
+        failed.append(
+            f"{class_label} allocation would exceed cap "
+            f"(current ${current_class_exp:.0f} + proposed ${proposed_addition:.0f} "
+            f"> cap ${asset_class_cap:.0f})"
         )
     if not volatility_ok:
         if atr_ratio is not None:
@@ -298,7 +356,7 @@ async def run(
     if approved_qty <= 0:
         return _veto(
             f"Computed qty is zero after sizing (equity=${equity:.0f}, "
-            f"max_position_pct={settings.max_position_pct:.0%})",
+            f"max_position_pct={effective_max_position_pct:.0%})",
             checks,
         )
 

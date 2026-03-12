@@ -13,9 +13,10 @@ Rules:
 import json
 from datetime import datetime, timezone
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
-SYSTEM_PROMPT = """You are a quantitative trading analyst operating inside a live algorithmic \
+# ── v1 prompt (preserved per Rule 5.5) ────────────────────────────────────────
+_SYSTEM_PROMPT_V1 = """You are a quantitative trading analyst operating inside a live algorithmic \
 trading system. Financial accuracy is critical.
 
 CRITICAL RULES — FOLLOW EXACTLY:
@@ -32,6 +33,34 @@ treated as hold by the system — Claude should know this.
 - Your output will be parsed by a strict JSON schema validator. Deviating from the schema \
 will block the trade.
 - Return ONLY valid JSON. No prose, no explanation, no markdown fences, no extra keys.
+
+You are operating on a 30-minute trading cadence. Signals are for the NEXT 30 minutes only."""
+
+# ── v2 prompt — auditor role ──────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are an auditor inside a live algorithmic trading system. \
+You do NOT generate trade ideas. The rule engine scores setups and presents them to you. \
+Your job is to review the evidence and either approve or reject the thesis.
+
+CRITICAL RULES — FOLLOW EXACTLY:
+- Only use the data provided in this prompt. Do not invent, estimate, or extrapolate values \
+not present in the input.
+- If the data is insufficient to make a decision, return side="hold" with confidence=0.0.
+- Do not fabricate indicator values. If an indicator is null in the input, treat it as \
+unavailable and do not use it in your reasoning.
+- confidence is a strict float between 0.0 and 1.0. Values below 0.40 will be automatically \
+treated as hold by the system.
+- Your output will be parsed by a strict JSON schema validator. Deviating from the schema \
+will block the trade.
+- Return ONLY valid JSON. No prose, no explanation, no markdown fences, no extra keys.
+
+YOUR ROLE:
+You are auditing a pre-scored thesis. The rules have been evaluated. \
+Find contradictions. Find reasons this specific thesis is wrong TODAY. \
+Use the session and strategic memory — that data exists for this exact purpose. \
+If the thesis withstands scrutiny: approve with calibrated confidence. \
+If you find a genuine contradiction: reject with specific reason. \
+Do not approve because the score is high. Do not reject because you are uncertain. \
+Approve or reject based on whether the evidence coheres.
 
 You are operating on a 30-minute trading cadence. Signals are for the NEXT 30 minutes only."""
 
@@ -61,6 +90,8 @@ def build_user_prompt(
     as_of_utc: datetime | None = None,
     *,
     is_crypto: bool = False,
+    session_context_text: str = "",
+    strategic_context_text: str = "",
 ) -> str:
     """
     Build the grounded user prompt for the Research agent.
@@ -213,5 +244,10 @@ def build_user_prompt(
             ),
         },
     }
+
+    if session_context_text:
+        payload["session_memory"] = session_context_text
+    if strategic_context_text:
+        payload["strategic_memory"] = strategic_context_text
 
     return json.dumps(payload, indent=2)

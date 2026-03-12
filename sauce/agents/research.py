@@ -21,9 +21,11 @@ from pydantic import ValidationError
 
 from sauce.adapters import llm, market_data
 from sauce.adapters.db import get_recent_signals, log_event
+from sauce.memory.db import get_session_context, get_strategic_context
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent, Evidence, Indicators, PriceReference, Signal
 from sauce.prompts import research as research_prompts
+from sauce.prompts.context import build_session_paragraph, build_strategic_paragraph
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,28 @@ async def run(
     except Exception as exc:  # noqa: BLE001
         logger.debug("research[%s]: signal history unavailable: %s", symbol, exc)
 
+    # ── Step 2d: Fetch memory context for Claude ──────────────────────────
+    session_context_text = ""
+    strategic_context_text = ""
+    try:
+        session_ctx = get_session_context(
+            db_path=str(settings.session_memory_db_path),
+        )
+        session_context_text = build_session_paragraph(session_ctx)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("research[%s]: session context unavailable: %s", symbol, exc)
+
+    try:
+        strategic_ctx = get_strategic_context(
+            db_path=str(settings.strategic_memory_db_path),
+            symbol=symbol,
+        )
+        strategic_context_text = build_strategic_paragraph(
+            strategic_ctx, symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("research[%s]: strategic context unavailable: %s", symbol, exc)
+
     # ── Step 3: Build prompt ──────────────────────────────────────────────────
     user_prompt = research_prompts.build_user_prompt(
         symbol=symbol,
@@ -249,6 +273,8 @@ async def run(
         prompt_version=settings.prompt_version,
         as_of_utc=as_of,
         is_crypto=market_data._is_crypto(symbol),
+        session_context_text=session_context_text,
+        strategic_context_text=strategic_context_text,
     )
 
     # ── Step 4: Call Claude ───────────────────────────────────────────────────
