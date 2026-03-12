@@ -1,0 +1,34 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# monitor.yml — Scheduled health check for Sauce
+#
+# Runs every 2 hours via cron. SSHes into the droplet, executes
+# scripts/health_check.sh, and fails the workflow (triggering a GitHub
+# notification) if the system is stale or the container is down.
+#
+# Same secrets as deploy.yml:
+#   DO_HOST, DO_USER, DO_SSH_KEY, DO_APP_PATH
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Monitor
+
+on:
+  schedule:
+    # Every 2 hours. Sauce runs every 30 min — a 2-hour check is generous.
+    - cron: "0 */2 * * *"
+  # Allow manual trigger from the Actions UI for debugging
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run health check on droplet
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            bash "${{ secrets.DO_APP_PATH }}/scripts/health_check.sh"

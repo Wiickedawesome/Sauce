@@ -66,5 +66,13 @@ fi
 echo "[$(ts)] SAUCE LOOP END (exit=${exit_code})"
 echo "----------------------------------------"
 
+# ── Heartbeat (optional) ─────────────────────────────────────────────────────
+# Set HEARTBEAT_URL in .env to ping a UptimeRobot/BetterUptime heartbeat
+# monitor after every loop run. Use a 35-minute interval on the monitor side
+# so one missed cron cycle doesn't immediately fire an alert.
+# shellcheck source=/dev/null
+[[ -f "${APP_DIR}/.env" ]] && source "${APP_DIR}/.env" || true
+[[ -n "${HEARTBEAT_URL:-}" ]] && curl -fsS --retry 3 "${HEARTBEAT_URL}" > /dev/null 2>&1 || true
+
 # Always exit 0 so cron does not treat a loop error as a cron failure.
 exit 0
