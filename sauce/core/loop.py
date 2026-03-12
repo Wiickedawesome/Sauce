@@ -240,7 +240,16 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
     # return_exceptions=True ensures one failure doesn’t cancel the others.
     if _eligible:
         _research_results = await asyncio.gather(
-            *[research.run(symbol=sym, quote=q, loop_id=loop_id) for sym, q in _eligible],
+            *[
+                research.run(
+                    symbol=sym,
+                    quote=q,
+                    loop_id=loop_id,
+                    regime=mkt_ctx.regime.regime_type,
+                    positions=positions,
+                )
+                for sym, q in _eligible
+            ],
             return_exceptions=True,
         )
         for (sym, _), result in zip(_eligible, _research_results):

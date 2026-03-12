@@ -214,6 +214,23 @@ def _mock_settings(tmp_path: Path) -> MagicMock:
     return s
 
 
+def _passing_mock_setup() -> MagicMock:
+    """Return a mock SetupResult (passed=True) for tests that need Claude called.
+
+    Added when scan_setups was integrated into research.run(): symbols not in
+    any setup (like 'AAPL') now return safe-hold before the LLM call.  Tests
+    that want to exercise the Claude path must mock scan_setups out.
+    """
+    m = MagicMock(passed=True, score=75.0)
+    m.model_dump.return_value = {
+        "setup_type": "equity_trend_pullback",
+        "passed": True,
+        "score": 75.0,
+        "evidence_narrative": "Mock passing setup for unit test.",
+    }
+    return m
+
+
 # ─── Research agent ───────────────────────────────────────────────────────────
 
 class TestResearchAgent:
@@ -284,6 +301,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.get_settings", return_value=settings),
             patch("sauce.agents.research.market_data") as md,
             patch("sauce.agents.research.llm") as mock_llm,
+            patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
         ):
             md.get_history.return_value = _make_ohlcv(60)
@@ -311,6 +329,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.get_settings", return_value=settings),
             patch("sauce.agents.research.market_data") as md,
             patch("sauce.agents.research.llm") as mock_llm,
+            patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
         ):
             md.get_history.return_value = _make_ohlcv(60)
@@ -333,6 +352,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.get_settings", return_value=settings),
             patch("sauce.agents.research.market_data") as md,
             patch("sauce.agents.research.llm") as mock_llm,
+            patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
         ):
             md.get_history.return_value = _make_ohlcv(60)
@@ -357,6 +377,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.get_settings", return_value=settings),
             patch("sauce.agents.research.market_data") as md,
             patch("sauce.agents.research.llm") as mock_llm,
+            patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
         ):
             md.get_history.return_value = _make_ohlcv(60)

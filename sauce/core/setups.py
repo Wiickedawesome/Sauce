@@ -193,6 +193,15 @@ def _build_narrative(
     return " ".join(parts)
 
 
+def _canon(s: str) -> str:
+    """Canonical symbol form — strips '/' and uppercases for position lookups.
+
+    Alpaca returns 'BTCUSD' in positions; setup symbols use 'BTC/USD'.
+    Normalise both sides so the membership check is always correct.
+    """
+    return s.replace("/", "").upper()
+
+
 # ── Setup 1: Crypto Mean Reversion ────────────────────────────────────────────
 
 
@@ -379,6 +388,7 @@ def evaluate_equity_trend_pullback(
     df: pd.DataFrame,
     regime: MarketRegime,
     *,
+    df_daily_ext: pd.DataFrame | None = None,
     as_of: datetime,
 ) -> SetupResult:
     """
@@ -386,14 +396,22 @@ def evaluate_equity_trend_pullback(
 
     Looks for pullback to rising daily SMA20 with controlled volume
     in an established uptrend on SPY or QQQ.
+
+    df_daily_ext: Optional pre-fetched daily bars (50 days of 1-day OHLCV).
+        When provided, used instead of resampling the 30-min df — critical
+        because 60 bars of 30-min data only covers ~5 trading days, which
+        is far too few for SMA50 and most H/S conditions.
     """
     hard: list[HardConditionResult] = []
     soft: list[SoftConditionResult] = []
     disqualifiers: list[Disqualification] = []
     last_close = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
 
-    # Pre-compute daily resampled data
-    df_daily = _resample_daily(df) if len(df) >= 20 else pd.DataFrame()
+    # Pre-compute daily data — prefer the externally-provided daily bars.
+    if df_daily_ext is not None and not df_daily_ext.empty:
+        df_daily = df_daily_ext
+    else:
+        df_daily = _resample_daily(df) if len(df) >= 20 else pd.DataFrame()
     daily_sma20 = float("nan")
     daily_sma50 = float("nan")
     if len(df_daily) >= 50:
@@ -830,6 +848,7 @@ def scan_setups(
     signals_today: list[SignalLogEntry] | None = None,
     strategic_win_rates: dict[SetupType, float] | None = None,
     narrative_text: str = "",
+    df_daily: pd.DataFrame | None = None,
     as_of: datetime,
 ) -> list[SetupResult]:
     """
@@ -846,6 +865,12 @@ def scan_setups(
     def _count_attempts(setup: SetupType) -> int:
         return sum(1 for s in sigs if s.symbol == symbol and s.setup_type == setup)
 
+    # Canonical form used for position membership checks.
+    # Alpaca returns 'BTCUSD' in positions but setup symbols are 'BTC/USD'.
+    # Callers may pass symbols in either format, so canonicalise both sides.
+    canon_symbol = _canon(symbol)
+    canon_open_syms = {_canon(s) for s in open_syms}
+
     # Setup 1: Crypto Mean Reversion
     if symbol in SETUP_1_SYMBOLS and regime in SETUP_1_REGIMES:
         results.append(evaluate_crypto_mean_reversion(
@@ -853,7 +878,7 @@ def scan_setups(
             indicators=indicators,
             df=df,
             regime=regime,
-            has_open_position=symbol in open_syms,
+            has_open_position=canon_symbol in canon_open_syms,
             mean_reversion_attempts_today=_count_attempts("crypto_mean_reversion"),
             strategic_win_rate=win_rates.get("crypto_mean_reversion"),
             narrative_text=narrative_text,
@@ -867,6 +892,7 @@ def scan_setups(
             indicators=indicators,
             df=df,
             regime=regime,
+            df_daily_ext=df_daily,
             as_of=as_of,
         ))
 
@@ -877,7 +903,7 @@ def scan_setups(
             indicators=indicators,
             df=df,
             regime=regime,
-            has_open_position=symbol in open_syms,
+            has_open_position=canon_symbol in canon_open_syms,
             breakout_attempts_today=_count_attempts("crypto_breakout"),
             strategic_win_rate=win_rates.get("crypto_breakout"),
             as_of=as_of,

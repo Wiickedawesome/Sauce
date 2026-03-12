@@ -92,6 +92,7 @@ def build_user_prompt(
     is_crypto: bool = False,
     session_context_text: str = "",
     strategic_context_text: str = "",
+    setup_result: dict | None = None,
 ) -> str:
     """
     Build the grounded user prompt for the Research agent.
@@ -122,8 +123,11 @@ def build_user_prompt(
 
     payload = {
         "task": (
-            "Analyze this symbol and generate a trading signal for the next 30 minutes. "
-            "Base your decision ONLY on the indicators provided."
+            "You are auditing a pre-scored setup thesis presented in 'setup_result'. "
+            "Review the rule engine's evidence and either approve or reject the trade. "
+            "If the indicators cohere with the setup thesis, return the appropriate side "
+            "with calibrated confidence. If you find a genuine contradiction in the data, "
+            "return side='hold'. Do not generate trade ideas — only audit the one presented."
         ),
         "timestamp_utc": timestamp_str,
         "prompt_version": prompt_version,
@@ -186,15 +190,15 @@ def build_user_prompt(
             ),
         },
         "asset_type": "crypto" if is_crypto else "equity",
+        "setup_result": setup_result,
         "confidence_calibration": (
-            "Confidence below 0.40 will be treated as hold by the system. "
-            "Use hold (confidence=0.0) if indicators genuinely conflict or are insufficient. "
-            "When 3+ indicators (SMAs, RSI, MACD, Stochastic, Bollinger, VWAP) align in "
-            "the same direction, confidence of 0.55-0.75 is appropriate. "
-            "When the daily trend confirms the 30-minute signal, boost confidence by ~0.10. "
-            "Do not inflate confidence, but do not default to hold when evidence is clear. "
-            "Aggressive growth mandate: the system is designed to capture opportunities, "
-            "not to sit on the sidelines. Lean toward action when the data supports it."
+            "If the setup thesis in 'setup_result' is sound and the indicators cohere "
+            "with it, approve with 0.55–0.80 confidence. A score near 100 with strong "
+            "soft bonuses warrants higher confidence (up to 0.80). If you find a genuine "
+            "contradiction (e.g., setup claims oversold but RSI is 75), reject with "
+            "side='hold'. Do not hold because you are uncertain about your role — you are "
+            "an auditor of pre-scored evidence. Values below 0.40 are treated as hold "
+            "by the system. Prefer action over inaction when the evidence is clear."
         ),
         "daily_trend_context": daily_trend_context,
         "signal_history": (

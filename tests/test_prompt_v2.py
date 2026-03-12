@@ -148,7 +148,7 @@ class TestPayloadStructure:
 
     def test_task_key(self, payload: dict) -> None:
         assert "task" in payload
-        assert "trading signal" in payload["task"].lower()
+        assert "audit" in payload["task"].lower()
 
     def test_timestamp_utc(self, payload: dict) -> None:
         assert payload["timestamp_utc"] == _NOW.isoformat()

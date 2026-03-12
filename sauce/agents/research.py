@@ -24,6 +24,7 @@ from sauce.adapters.db import get_recent_signals, log_event
 from sauce.memory.db import get_session_context, get_strategic_context
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent, Evidence, Indicators, PriceReference, Signal
+from sauce.core.setups import scan_setups
 from sauce.prompts import research as research_prompts
 from sauce.prompts.context import build_session_paragraph, build_strategic_paragraph
 
@@ -38,6 +39,9 @@ async def run(
     symbol: str,
     quote: PriceReference,
     loop_id: str,
+    *,
+    regime: str | None = None,
+    positions: list[dict] | None = None,
 ) -> Signal:
     """
     Generate a trading signal for a single symbol.
@@ -177,6 +181,7 @@ async def run(
     vwap_val = _last_float(vwap_series) if vwap_series is not None else None
 
     # ── Step 2b: Fetch daily bars for higher-timeframe trend context ──────────
+    df_daily = None  # declared here so step 2e (setup scoring) can reference it
     daily_trend: dict | None = None
     try:
         df_daily = market_data.get_history(symbol, timeframe="1Day", bars=50)
@@ -227,6 +232,8 @@ async def run(
         logger.debug("research[%s]: signal history unavailable: %s", symbol, exc)
 
     # ── Step 2d: Fetch memory context for Claude ──────────────────────────
+    session_ctx = None
+    strategic_ctx = None
     session_context_text = ""
     strategic_context_text = ""
     try:
@@ -247,6 +254,75 @@ async def run(
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("research[%s]: strategic context unavailable: %s", symbol, exc)
+
+    # ── Step 2e: Deterministic setup scoring ────────────────────────────────
+    # The v2 SYSTEM_PROMPT tells Claude it is an "auditor reviewing a pre-scored
+    # thesis" — so we MUST provide that thesis.  If no setup passes, skip the
+    # LLM call entirely: saves cost and prevents phantom buy/sell signals.
+    _open_symbols: set[str] = {
+        str(p.get("symbol", "")).replace("/", "").upper()
+        for p in (positions or [])
+    }
+    _signals_today = getattr(session_ctx, "signals_today", []) or []
+    _narrative_text = getattr(session_ctx, "narrative", "") or ""
+
+    # Build per-setup win-rate lookup from strategic memory.
+    _strategic_win_rates: dict[str, float] = {}
+    if strategic_ctx:
+        from collections import defaultdict
+        _perf_by_setup: dict[str, list[bool]] = defaultdict(list)
+        for _entry in strategic_ctx.setup_performance:
+            _perf_by_setup[str(_entry.setup_type)].append(_entry.win)
+        for _stype, _wins in _perf_by_setup.items():
+            if _wins:
+                _strategic_win_rates[_stype] = sum(_wins) / len(_wins)
+
+    indicators = Indicators(
+        sma_20=sma_20,
+        sma_50=sma_50,
+        rsi_14=rsi_14,
+        atr_14=atr_14,
+        volume_ratio=volume_ratio,
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        macd_histogram=macd_histogram,
+        bb_upper=bb_upper,
+        bb_middle=bb_middle,
+        bb_lower=bb_lower,
+        stoch_k=stoch_k,
+        stoch_d=stoch_d,
+        vwap=vwap_val,
+    )
+
+    _setup_results = []
+    try:
+        _setup_results = scan_setups(
+            symbol=symbol,
+            indicators=indicators,
+            df=df,
+            regime=regime,  # type: ignore[arg-type]
+            open_symbols=_open_symbols,
+            signals_today=_signals_today,
+            strategic_win_rates=_strategic_win_rates,  # type: ignore[arg-type]
+            narrative_text=_narrative_text,
+            df_daily=df_daily if df_daily is not None and not df_daily.empty else None,
+            as_of=as_of,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("research[%s]: setup scan failed: %s", symbol, exc)
+
+    _passed = [r for r in _setup_results if r.passed]
+    if not _passed:
+        _reg = regime or "unknown"
+        logger.info(
+            "research[%s]: no qualifying setup (regime=%s) — skipping LLM call",
+            symbol, _reg,
+        )
+        return _safe_hold(f"No qualifying setup for {symbol} (regime={_reg})")
+
+    # Best-scoring passed setup is what Claude will audit.
+    _best_setup = max(_passed, key=lambda r: r.score)
+    setup_result_dict = _best_setup.model_dump(mode="json")
 
     # ── Step 3: Build prompt ──────────────────────────────────────────────────
     user_prompt = research_prompts.build_user_prompt(
@@ -275,6 +351,7 @@ async def run(
         is_crypto=market_data._is_crypto(symbol),
         session_context_text=session_context_text,
         strategic_context_text=strategic_context_text,
+        setup_result=setup_result_dict,
     )
 
     # ── Step 4: Call Claude ───────────────────────────────────────────────────
@@ -320,23 +397,7 @@ async def run(
         return _safe_hold("LLM response parse error")
 
     # ── Step 6: Build validated Signal ───────────────────────────────────────
-    indicators = Indicators(
-        sma_20=sma_20,
-        sma_50=sma_50,
-        rsi_14=rsi_14,
-        atr_14=atr_14,
-        volume_ratio=volume_ratio,
-        volume_1d_avg=volume_1d_avg,
-        macd_line=macd_line,
-        macd_signal=macd_signal,
-        macd_histogram=macd_histogram,
-        bb_upper=bb_upper,
-        bb_middle=bb_middle,
-        bb_lower=bb_lower,
-        stoch_k=stoch_k,
-        stoch_d=stoch_d,
-        vwap=vwap_val,
-    )
+
     evidence = Evidence(
         symbol=symbol,
         price_reference=quote,
