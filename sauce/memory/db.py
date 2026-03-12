@@ -50,6 +50,13 @@ from sauce.core.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Normalize SQLite datetimes to UTC-aware datetimes."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 # ── ORM Bases (one per database) ─────────────────────────────────────────────
 
 class SessionBase(DeclarativeBase):
@@ -607,7 +614,7 @@ def get_session_context(db_path: str) -> SessionContext:
         regime_rows = session.query(RegimeLogRow).order_by(RegimeLogRow.timestamp).all()
         regime_history = [
             RegimeLogEntry(
-                timestamp=r.timestamp,
+                timestamp=_ensure_utc(r.timestamp),
                 regime_type=r.regime_type,
                 confidence=r.confidence,
                 vix_proxy=r.vix_proxy,
@@ -619,7 +626,7 @@ def get_session_context(db_path: str) -> SessionContext:
         signal_rows = session.query(SignalLogRow).order_by(SignalLogRow.timestamp).all()
         signals_today = [
             SignalLogEntry(
-                timestamp=s.timestamp,
+                timestamp=_ensure_utc(s.timestamp),
                 symbol=s.symbol,
                 setup_type=s.setup_type,
                 score=s.score,
@@ -632,7 +639,7 @@ def get_session_context(db_path: str) -> SessionContext:
         trade_rows = session.query(TradeLogRow).order_by(TradeLogRow.timestamp).all()
         trades_today = [
             TradeLogEntry(
-                timestamp=t.timestamp,
+                timestamp=_ensure_utc(t.timestamp),
                 symbol=t.symbol,
                 entry_price=t.entry_price,
                 direction=t.direction,
@@ -732,7 +739,7 @@ def get_strategic_context(
                 veto_reason=v.veto_reason,
                 setup_type=v.setup_type,
                 count=v.count,
-                last_seen=v.last_seen,
+                last_seen=_ensure_utc(v.last_seen),
             )
             for v in veto_rows
         ]

@@ -584,6 +584,9 @@ def test_get_session_context_populated(tmp_session_db: str) -> None:
     assert ctx.narrative == "SPY rallying hard"
     assert len(ctx.symbol_characters) == 1
     assert ctx.symbol_characters[0].symbol == "AAPL"
+    assert ctx.regime_history[0].timestamp.tzinfo == timezone.utc
+    assert ctx.signals_today[0].timestamp.tzinfo == timezone.utc
+    assert ctx.trades_today[0].timestamp.tzinfo == timezone.utc
 
 
 def test_get_strategic_context_empty(tmp_strategic_db: str) -> None:

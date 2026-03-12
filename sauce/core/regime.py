@@ -13,7 +13,7 @@ Priority order (first match wins):
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -343,6 +343,13 @@ def classify_regime(
 AGING_THRESHOLD: float = 0.8
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Return a UTC-aware datetime for downstream duration math."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def compute_regime_duration(
     regime_history: list[RegimeLogEntry],
     historical_transitions: list[RegimeTransitionEntry],
@@ -369,16 +376,18 @@ def compute_regime_duration(
     if not regime_history:
         return None
 
+    as_of = _ensure_utc(as_of)
+
     # Sort by timestamp to ensure correct ordering
-    sorted_history = sorted(regime_history, key=lambda r: r.timestamp)
+    sorted_history = sorted(regime_history, key=lambda r: _ensure_utc(r.timestamp))
 
     current_regime = sorted_history[-1].regime_type
 
     # Walk backward to find when this regime started
-    regime_start = sorted_history[-1].timestamp
+    regime_start = _ensure_utc(sorted_history[-1].timestamp)
     for entry in reversed(sorted_history[:-1]):
         if entry.regime_type == current_regime:
-            regime_start = entry.timestamp
+            regime_start = _ensure_utc(entry.timestamp)
         else:
             break
 

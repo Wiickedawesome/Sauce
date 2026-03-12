@@ -24,7 +24,7 @@ def set_required(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_settings_loads_with_required_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.alpaca_api_key == "test_key"
     assert s.alpaca_secret_key == "test_secret"
 
@@ -49,14 +49,14 @@ def test_alpaca_paper_defaults_to_true(monkeypatch: pytest.MonkeyPatch) -> None:
     """CRITICAL: paper must default to True. Never default to live."""
     set_required(monkeypatch)
     monkeypatch.delenv("ALPACA_PAPER", raising=False)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.alpaca_paper is True
 
 
 def test_alpaca_paper_can_be_set_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("ALPACA_PAPER", "false")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.alpaca_paper is False
 
 
@@ -64,7 +64,7 @@ def test_alpaca_paper_empty_string_defaults_to_true(monkeypatch: pytest.MonkeyPa
     """Guard: if ALPACA_PAPER is empty, default to paper (safe)."""
     set_required(monkeypatch)
     monkeypatch.setenv("ALPACA_PAPER", "")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.alpaca_paper is True
 
 
@@ -80,7 +80,7 @@ def test_llm_provider_defaults_to_github(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_llm_provider_accepts_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.llm_provider == "anthropic"
 
 
@@ -88,13 +88,13 @@ def test_llm_provider_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch) -> 
     set_required(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)
 
 
 def test_llm_provider_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "GITHUB")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.llm_provider == "github"
 
 
@@ -102,7 +102,7 @@ def test_llm_provider_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_max_position_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.max_position_pct == 0.08
 
 
@@ -110,18 +110,18 @@ def test_max_position_pct_out_of_range_raises(monkeypatch: pytest.MonkeyPatch) -
     set_required(monkeypatch)
     monkeypatch.setenv("MAX_POSITION_PCT", "1.5")
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)
 
 
 def test_max_daily_loss_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.max_daily_loss_pct == 0.03
 
 
 def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.min_confidence == 0.4
 
 
@@ -130,14 +130,14 @@ def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_equity_universe_parses_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("TRADING_UNIVERSE_EQUITIES", "AAPL,MSFT, NVDA ")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.equity_universe == ["AAPL", "MSFT", "NVDA"]
 
 
 def test_crypto_universe_parses_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("TRADING_UNIVERSE_CRYPTO", "BTC/USD,ETH/USD")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.crypto_universe == ["BTC/USD", "ETH/USD"]
 
 
@@ -145,7 +145,7 @@ def test_full_universe_combines_both(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("TRADING_UNIVERSE_EQUITIES", "AAPL")
     monkeypatch.setenv("TRADING_UNIVERSE_CRYPTO", "BTC/USD")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.full_universe == ["AAPL", "BTC/USD"]
 
 
@@ -154,14 +154,14 @@ def test_full_universe_combines_both(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_trading_pause_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.delenv("TRADING_PAUSE", raising=False)
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.trading_pause is False
 
 
 def test_trading_pause_can_be_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("TRADING_PAUSE", "true")
-    s = Settings()
+    s = Settings(_env_file=None)
     assert s.trading_pause is True
 
 

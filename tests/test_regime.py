@@ -389,3 +389,14 @@ class TestComputeRegimeDuration:
         ]
         result = compute_regime_duration(history, [], NOW)
         assert isinstance(result, RegimeDuration)
+
+    def test_mixed_naive_and_aware_timestamps_are_normalized(self) -> None:
+        naive_start = datetime(2025, 6, 15, 13, 30, 0)
+        history = [
+            RegimeLogEntry(timestamp=naive_start, regime_type="RANGING", confidence=0.7),
+        ]
+
+        result = compute_regime_duration(history, [], NOW)
+
+        assert result is not None
+        assert result.active_minutes == pytest.approx(60.0, abs=1.0)
