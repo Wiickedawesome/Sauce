@@ -124,7 +124,7 @@ def get_engine(db_path: str = "data/sauce.db") -> Engine:
         url = f"sqlite:///{db_path}"
         engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 30},
             echo=False,
         )
         Base.metadata.create_all(engine)
@@ -287,6 +287,66 @@ def upsert_daily_stats(
         print(f"[db] CRITICAL: upsert_daily_stats failed: {exc}", file=sys.stderr)
     finally:
         session.close()
+
+
+# ── Maintenance ───────────────────────────────────────────────────────────────
+
+def run_maintenance(
+    db_path: str = "data/sauce.db",
+    *,
+    retention_days: int = 90,
+    vacuum: bool = True,
+) -> dict:
+    """
+    Run periodic DB maintenance: integrity check, old audit event pruning,
+    and optional VACUUM.
+
+    Returns a summary dict with keys: integrity_ok, rows_pruned, vacuumed.
+    Non-raising — logs errors and returns partial results.
+    """
+    result: dict = {"integrity_ok": None, "rows_pruned": 0, "vacuumed": False}
+    engine = get_engine(db_path)
+
+    with engine.connect() as conn:
+        # 1. Integrity check
+        try:
+            check = conn.execute(text("PRAGMA integrity_check")).scalar()
+            result["integrity_ok"] = check == "ok"
+            if check != "ok":
+                logger.error("db maintenance: integrity_check returned: %s", check)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("db maintenance: integrity_check failed: %s", exc)
+
+        # 2. Prune old audit_events beyond retention window
+        try:
+            cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            # SQLite date arithmetic: subtract retention_days
+            r = conn.execute(
+                text(
+                    "DELETE FROM audit_events "
+                    "WHERE timestamp < datetime(:cutoff, :offset)"
+                ),
+                {"cutoff": cutoff, "offset": f"-{retention_days} days"},
+            )
+            result["rows_pruned"] = r.rowcount
+            conn.commit()
+            if result["rows_pruned"] > 0:
+                logger.info("db maintenance: pruned %d audit_events older than %d days",
+                            result["rows_pruned"], retention_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("db maintenance: audit_events pruning failed: %s", exc)
+
+    # 3. VACUUM (reclaim space after pruning) — must run outside a transaction
+    if vacuum:
+        try:
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as ac_conn:
+                ac_conn.execute(text("VACUUM"))
+            result["vacuumed"] = True
+            logger.info("db maintenance: VACUUM completed")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("db maintenance: VACUUM failed: %s", exc)
+
+    return result
 
 
 def has_recent_submitted_order(

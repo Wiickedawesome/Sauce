@@ -54,7 +54,7 @@ def compute_trailing_metrics(
         try:
             rows = session.execute(
                 __import__("sqlalchemy").text(
-                    "SELECT date, nav "
+                    "SELECT date, ending_nav_usd "
                     "FROM daily_stats "
                     "ORDER BY date DESC "
                     "LIMIT :limit"

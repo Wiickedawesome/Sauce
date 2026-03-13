@@ -25,16 +25,19 @@ ENV TZ=UTC
 # ── Project setup ─────────────────────────────────────────────────────────────
 WORKDIR /app
 
-# Copy dependency manifest first for better layer caching
-COPY pyproject.toml ./
+# Copy dependency manifests first for better layer caching
+COPY pyproject.toml requirements.lock ./
 
-# Create and populate virtual environment
+# Create and populate virtual environment using the lockfile for reproducibility
 RUN python -m venv /app/.venv \
     && /app/.venv/bin/pip install --upgrade pip --quiet \
-    && /app/.venv/bin/pip install -e . --quiet
+    && /app/.venv/bin/pip install -r requirements.lock --quiet
 
 # Copy the full project (after deps — layer cache benefit)
 COPY . .
+
+# Install the project itself (deps already satisfied by lockfile)
+RUN /app/.venv/bin/pip install -e . --no-deps --quiet
 
 # Ensure the data directories exist
 RUN mkdir -p /app/data/logs
@@ -50,10 +53,11 @@ RUN printf "*/30 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.lo
 RUN chmod +x /app/scripts/run_loop.sh
 
 # ── Health check ──────────────────────────────────────────────────────────────
-# Confirm cron is running. A deeper check would inspect the audit DB, but
-# that requires SQLite tooling. Keep this simple and observable via logs.
-HEALTHCHECK --interval=5m --timeout=10s --start-period=30s --retries=3 \
-    CMD pgrep cron > /dev/null || exit 1
+# Confirm cron is running AND that a loop has completed within the last 70
+# minutes (just over 2 cron cycles). Queries the audit DB for the most recent
+# loop_end event.
+HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \
+    CMD /app/.venv/bin/python /app/scripts/docker_healthcheck.py
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 # Run cron in foreground so Docker can manage the process lifecycle.

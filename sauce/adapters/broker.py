@@ -15,7 +15,7 @@ NOTE: Verify alpaca-py method signatures against https://alpaca.markets/docs/api
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sauce.adapters.utils import call_with_retry
@@ -304,6 +304,74 @@ def get_latest_quote(symbol: str, loop_id: str = "unset") -> PriceReference:
     except Exception as exc:
         _log_broker_error(loop_id, f"get_latest_quote({symbol})", exc)
         raise BrokerError(f"get_latest_quote failed for {symbol}: {exc}") from exc
+
+
+# ── Stale order cancellation ─────────────────────────────────────────────────
+
+def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> int:
+    """
+    Cancel any open (unfilled) orders older than max_age_minutes.
+
+    Returns the count of orders cancelled. Never raises — logs errors
+    and returns 0 on failure.
+    """
+    from alpaca.trading.enums import QueryOrderStatus  # type: ignore[import-untyped]
+    from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import-untyped]
+    from sauce.adapters.db import log_event
+
+    try:
+        client = _get_trading_client()
+        request = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        open_orders = client.get_orders(filter=request)
+
+        if not open_orders:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=max_age_minutes)
+        cancelled = 0
+
+        for order in open_orders:
+            created_at = getattr(order, "created_at", None)
+            if created_at is None:
+                continue
+            # Normalise naive timestamps to UTC
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if created_at < cutoff:
+                try:
+                    order_id = str(getattr(order, "id", ""))
+                    client.cancel_order_by_id(order_id)
+                    cancelled += 1
+                    logger.info(
+                        "Cancelled stale order %s for %s (age: %d min) [loop_id=%s]",
+                        order_id,
+                        getattr(order, "symbol", "?"),
+                        int((now - created_at).total_seconds() / 60),
+                        loop_id,
+                    )
+                    log_event(AuditEvent(
+                        loop_id=loop_id,
+                        event_type="broker_call",
+                        payload={
+                            "action": "cancel_stale_order",
+                            "order_id": order_id,
+                            "symbol": str(getattr(order, "symbol", "?")),
+                            "age_minutes": int((now - created_at).total_seconds() / 60),
+                        },
+                        timestamp=now,
+                    ))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to cancel stale order %s: %s [loop_id=%s]",
+                        getattr(order, "id", "?"), exc, loop_id,
+                    )
+
+        return cancelled
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cancel_stale_orders failed: %s [loop_id=%s]", exc, loop_id)
+        return 0
 
 
 # ── Error logging helper ──────────────────────────────────────────────────────

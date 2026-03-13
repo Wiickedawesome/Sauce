@@ -8,6 +8,7 @@ Rules:
 - pause_trading() persists to DB — survives restarts. Only resume_trading() clears it.
 - resume_trading() is manual only — it is never called automatically.
 - check_daily_loss() returns False on ANY failure (fail-safe default).
+- has_earnings_risk() returns True on API failure (fail-closed default).
 
 Market hours note:
   US equities trade 09:30–16:00 Eastern Time, Monday–Friday.
@@ -448,8 +449,8 @@ def has_earnings_risk(symbol: str, loop_id: str = "unset") -> bool:
 
     Detection strategy: query Alpaca News for the symbol over the blackout
     window and scan headlines for earnings-related keywords. If the news
-    API is unavailable, fails OPEN (returns False) so infrastructure outages
-    do not block trading.
+    API call fails at runtime, fails CLOSED (returns True) so uncertain
+    situations block the trade rather than risking an earnings surprise.
 
     Called per-symbol in the loop eligibility filter BEFORE research.run().
 
@@ -535,9 +536,9 @@ def has_earnings_risk(symbol: str, loop_id: str = "unset") -> bool:
         )
         return False
     except Exception as exc:
-        # Any infrastructure failure → fail open (don't block trading on a lookup error)
+        # Any infrastructure failure → fail closed (block trading until check succeeds)
         logger.warning(
-            "has_earnings_risk[%s]: news API error — skipping earnings check: %s [loop_id=%s]",
+            "has_earnings_risk[%s]: news API error — blocking symbol as precaution: %s [loop_id=%s]",
             symbol, exc, loop_id,
         )
-        return False
+        return True

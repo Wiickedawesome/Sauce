@@ -56,8 +56,18 @@ def test_alpaca_paper_defaults_to_true(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_alpaca_paper_can_be_set_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("ALPACA_PAPER", "false")
+    monkeypatch.setenv("CONFIRM_LIVE_TRADING", "LIVE-TRADING-CONFIRMED")
     s = Settings(_env_file=None)
     assert s.alpaca_paper is False
+
+
+def test_live_trading_requires_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting ALPACA_PAPER=false without CONFIRM_LIVE_TRADING must raise."""
+    set_required(monkeypatch)
+    monkeypatch.setenv("ALPACA_PAPER", "false")
+    monkeypatch.delenv("CONFIRM_LIVE_TRADING", raising=False)
+    with pytest.raises(ValidationError, match="LIVE-TRADING-CONFIRMED"):
+        Settings(_env_file=None)
 
 
 def test_alpaca_paper_empty_string_defaults_to_true(monkeypatch: pytest.MonkeyPatch) -> None:

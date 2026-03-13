@@ -24,8 +24,11 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
+    text,
 )
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -126,6 +129,7 @@ class SymbolCharacterRow(SessionBase):
     """Per-symbol intraday behavior profile."""
 
     __tablename__ = "symbol_character"
+    __table_args__ = (UniqueConstraint("symbol", name="uq_symbol_character"),)
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     symbol: str = Column(String(20), nullable=False, index=True)
@@ -158,6 +162,7 @@ class RegimeTransitionRow(StrategicBase):
     """Observed regime transitions and durations."""
 
     __tablename__ = "regime_transitions"
+    __table_args__ = (UniqueConstraint("from_regime", "to_regime", name="uq_regime_transition"),)
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     from_regime: str = Column(String(20), nullable=False)
@@ -170,6 +175,7 @@ class VetoPatternRow(StrategicBase):
     """Recurring veto reasons by setup type."""
 
     __tablename__ = "veto_patterns"
+    __table_args__ = (UniqueConstraint("veto_reason", "setup_type", name="uq_veto_pattern"),)
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     veto_reason: str = Column(Text, nullable=False)
@@ -182,6 +188,7 @@ class WeeklyPerformanceRow(StrategicBase):
     """Weekly aggregated performance by setup type."""
 
     __tablename__ = "weekly_performance"
+    __table_args__ = (UniqueConstraint("week", "setup_type", name="uq_weekly_performance"),)
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     week: str = Column(String(10), nullable=False, index=True)
@@ -196,6 +203,7 @@ class SymbolLearnedBehaviorRow(StrategicBase):
     """Learned indicator thresholds per symbol/setup."""
 
     __tablename__ = "symbol_learned_behavior"
+    __table_args__ = (UniqueConstraint("symbol", "setup_type", name="uq_symbol_behavior"),)
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     symbol: str = Column(String(20), nullable=False, index=True)
@@ -252,6 +260,10 @@ def get_engine(db_path: str) -> Engine:
             connect_args={"check_same_thread": False},
             echo=False,
         )
+        # Enable WAL mode for better concurrent read/write performance
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
         # Create tables for the correct base based on db_path
         if "session_memory" in db_path:
             SessionBase.metadata.create_all(engine)
@@ -261,8 +273,35 @@ def get_engine(db_path: str) -> Engine:
             # Fallback: create both
             SessionBase.metadata.create_all(engine)
             StrategicBase.metadata.create_all(engine)
+        # Ensure unique indexes exist on pre-existing databases
+        _ensure_unique_indexes(engine, db_path)
         _engines[db_path] = engine
     return _engines[db_path]
+
+
+def _ensure_unique_indexes(engine: Engine, db_path: str) -> None:
+    """Create unique indexes on existing tables that may lack them."""
+    indexes: list[str] = []
+    if "session_memory" in db_path:
+        indexes = [
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_symbol_character ON symbol_character (symbol)",
+        ]
+    elif "strategic_memory" in db_path:
+        indexes = [
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_regime_transition ON regime_transitions (from_regime, to_regime)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_veto_pattern ON veto_patterns (veto_reason, setup_type)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_weekly_performance ON weekly_performance (week, setup_type)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_symbol_behavior ON symbol_learned_behavior (symbol, setup_type)",
+        ]
+    if not indexes:
+        return
+    with engine.connect() as conn:
+        for idx_sql in indexes:
+            try:
+                conn.execute(text(idx_sql))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not create unique index (duplicates may exist): %s — %s", idx_sql, exc)
+        conn.commit()
 
 
 def get_session(db_path: str) -> Session:
@@ -333,6 +372,7 @@ def write_regime_log(entry: RegimeLogEntry, db_path: str) -> None:
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write regime_log: %s", exc)
         print(f"[memory_db] CRITICAL: regime_log write failed: {exc}", file=sys.stderr)
     finally:
@@ -354,6 +394,7 @@ def write_signal_log(entry: SignalLogEntry, db_path: str) -> None:
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write signal_log: %s", exc)
         print(f"[memory_db] CRITICAL: signal_log write failed: {exc}", file=sys.stderr)
     finally:
@@ -375,6 +416,7 @@ def write_trade_log(entry: TradeLogEntry, db_path: str) -> None:
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write trade_log: %s", exc)
         print(f"[memory_db] CRITICAL: trade_log write failed: {exc}", file=sys.stderr)
     finally:
@@ -392,6 +434,7 @@ def write_narrative(entry: IntradayNarrativeEntry, db_path: str) -> None:
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write intraday_narrative: %s", exc)
         print(f"[memory_db] CRITICAL: narrative write failed: {exc}", file=sys.stderr)
     finally:
@@ -402,25 +445,24 @@ def write_symbol_character(entry: SymbolCharacterEntry, db_path: str) -> None:
     """Upsert a symbol character profile in session memory."""
     session = get_session(db_path)
     try:
-        existing = (
-            session.query(SymbolCharacterRow)
-            .filter_by(symbol=entry.symbol)
-            .first()
+        stmt = sqlite_insert(SymbolCharacterRow).values(
+            symbol=entry.symbol,
+            signal_count_today=entry.signal_count_today,
+            direction_consistency=entry.direction_consistency,
+            last_signal_result=entry.last_signal_result,
         )
-        if existing is not None:
-            existing.signal_count_today = entry.signal_count_today
-            existing.direction_consistency = entry.direction_consistency
-            existing.last_signal_result = entry.last_signal_result
-        else:
-            row = SymbolCharacterRow(
-                symbol=entry.symbol,
-                signal_count_today=entry.signal_count_today,
-                direction_consistency=entry.direction_consistency,
-                last_signal_result=entry.last_signal_result,
-            )
-            session.add(row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["symbol"],
+            set_={
+                "signal_count_today": stmt.excluded.signal_count_today,
+                "direction_consistency": stmt.excluded.direction_consistency,
+                "last_signal_result": stmt.excluded.last_signal_result,
+            },
+        )
+        session.execute(stmt)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write symbol_character for %s: %s", entry.symbol, exc)
         print(f"[memory_db] CRITICAL: symbol_character write failed: {exc}", file=sys.stderr)
     finally:
@@ -446,6 +488,7 @@ def write_setup_performance(entry: SetupPerformanceEntry, db_path: str) -> None:
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write setup_performance: %s", exc)
         print(f"[memory_db] CRITICAL: setup_performance write failed: {exc}", file=sys.stderr)
     finally:
@@ -456,27 +499,23 @@ def write_regime_transition(entry: RegimeTransitionEntry, db_path: str) -> None:
     """Record or increment a regime transition in strategic memory."""
     session = get_session(db_path)
     try:
-        existing = (
-            session.query(RegimeTransitionRow)
-            .filter_by(
-                from_regime=entry.from_regime,
-                to_regime=entry.to_regime,
-            )
-            .first()
+        stmt = sqlite_insert(RegimeTransitionRow).values(
+            from_regime=entry.from_regime,
+            to_regime=entry.to_regime,
+            duration_minutes=entry.duration_minutes,
+            count=entry.count,
         )
-        if existing is not None:
-            existing.count += entry.count
-            existing.duration_minutes = entry.duration_minutes
-        else:
-            row = RegimeTransitionRow(
-                from_regime=entry.from_regime,
-                to_regime=entry.to_regime,
-                duration_minutes=entry.duration_minutes,
-                count=entry.count,
-            )
-            session.add(row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["from_regime", "to_regime"],
+            set_={
+                "count": RegimeTransitionRow.__table__.c.count + stmt.excluded.count,
+                "duration_minutes": stmt.excluded.duration_minutes,
+            },
+        )
+        session.execute(stmt)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write regime_transition: %s", exc)
         print(f"[memory_db] CRITICAL: regime_transition write failed: {exc}", file=sys.stderr)
     finally:
@@ -487,27 +526,23 @@ def write_veto_pattern(entry: VetoPatternEntry, db_path: str) -> None:
     """Record or increment a veto pattern in strategic memory."""
     session = get_session(db_path)
     try:
-        existing = (
-            session.query(VetoPatternRow)
-            .filter_by(
-                veto_reason=entry.veto_reason,
-                setup_type=entry.setup_type,
-            )
-            .first()
+        stmt = sqlite_insert(VetoPatternRow).values(
+            veto_reason=entry.veto_reason,
+            setup_type=entry.setup_type,
+            count=entry.count,
+            last_seen=entry.last_seen,
         )
-        if existing is not None:
-            existing.count += entry.count
-            existing.last_seen = entry.last_seen
-        else:
-            row = VetoPatternRow(
-                veto_reason=entry.veto_reason,
-                setup_type=entry.setup_type,
-                count=entry.count,
-                last_seen=entry.last_seen,
-            )
-            session.add(row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["veto_reason", "setup_type"],
+            set_={
+                "count": VetoPatternRow.__table__.c.count + stmt.excluded.count,
+                "last_seen": stmt.excluded.last_seen,
+            },
+        )
+        session.execute(stmt)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write veto_pattern: %s", exc)
         print(f"[memory_db] CRITICAL: veto_pattern write failed: {exc}", file=sys.stderr)
     finally:
@@ -518,28 +553,27 @@ def write_weekly_performance(entry: WeeklyPerformanceEntry, db_path: str) -> Non
     """Upsert weekly performance for a setup type in strategic memory."""
     session = get_session(db_path)
     try:
-        existing = (
-            session.query(WeeklyPerformanceRow)
-            .filter_by(week=entry.week, setup_type=entry.setup_type)
-            .first()
+        stmt = sqlite_insert(WeeklyPerformanceRow).values(
+            week=entry.week,
+            setup_type=entry.setup_type,
+            trades=entry.trades,
+            win_rate=entry.win_rate,
+            avg_pnl=entry.avg_pnl,
+            sharpe=entry.sharpe,
         )
-        if existing is not None:
-            existing.trades = entry.trades
-            existing.win_rate = entry.win_rate
-            existing.avg_pnl = entry.avg_pnl
-            existing.sharpe = entry.sharpe
-        else:
-            row = WeeklyPerformanceRow(
-                week=entry.week,
-                setup_type=entry.setup_type,
-                trades=entry.trades,
-                win_rate=entry.win_rate,
-                avg_pnl=entry.avg_pnl,
-                sharpe=entry.sharpe,
-            )
-            session.add(row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["week", "setup_type"],
+            set_={
+                "trades": stmt.excluded.trades,
+                "win_rate": stmt.excluded.win_rate,
+                "avg_pnl": stmt.excluded.avg_pnl,
+                "sharpe": stmt.excluded.sharpe,
+            },
+        )
+        session.execute(stmt)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write weekly_performance: %s", exc)
         print(f"[memory_db] CRITICAL: weekly_performance write failed: {exc}", file=sys.stderr)
     finally:
@@ -550,28 +584,27 @@ def write_symbol_behavior(entry: SymbolLearnedBehaviorEntry, db_path: str) -> No
     """Upsert learned symbol behavior in strategic memory."""
     session = get_session(db_path)
     try:
-        existing = (
-            session.query(SymbolLearnedBehaviorRow)
-            .filter_by(symbol=entry.symbol, setup_type=entry.setup_type)
-            .first()
+        stmt = sqlite_insert(SymbolLearnedBehaviorRow).values(
+            symbol=entry.symbol,
+            setup_type=entry.setup_type,
+            optimal_rsi_entry=entry.optimal_rsi_entry,
+            avg_reversion_depth=entry.avg_reversion_depth,
+            avg_bounce_magnitude=entry.avg_bounce_magnitude,
+            sample_size=entry.sample_size,
         )
-        if existing is not None:
-            existing.optimal_rsi_entry = entry.optimal_rsi_entry
-            existing.avg_reversion_depth = entry.avg_reversion_depth
-            existing.avg_bounce_magnitude = entry.avg_bounce_magnitude
-            existing.sample_size = entry.sample_size
-        else:
-            row = SymbolLearnedBehaviorRow(
-                symbol=entry.symbol,
-                setup_type=entry.setup_type,
-                optimal_rsi_entry=entry.optimal_rsi_entry,
-                avg_reversion_depth=entry.avg_reversion_depth,
-                avg_bounce_magnitude=entry.avg_bounce_magnitude,
-                sample_size=entry.sample_size,
-            )
-            session.add(row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["symbol", "setup_type"],
+            set_={
+                "optimal_rsi_entry": stmt.excluded.optimal_rsi_entry,
+                "avg_reversion_depth": stmt.excluded.avg_reversion_depth,
+                "avg_bounce_magnitude": stmt.excluded.avg_bounce_magnitude,
+                "sample_size": stmt.excluded.sample_size,
+            },
+        )
+        session.execute(stmt)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write symbol_behavior for %s: %s", entry.symbol, exc)
         print(f"[memory_db] CRITICAL: symbol_behavior write failed: {exc}", file=sys.stderr)
     finally:
@@ -591,6 +624,7 @@ def write_claude_calibration(entry: ClaudeCalibrationEntry, db_path: str) -> Non
         session.add(row)
         session.commit()
     except Exception as exc:  # noqa: BLE001
+        session.rollback()
         logger.critical("Failed to write claude_calibration: %s", exc)
         print(f"[memory_db] CRITICAL: claude_calibration write failed: {exc}", file=sys.stderr)
     finally:

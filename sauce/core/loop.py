@@ -28,11 +28,14 @@ Rules:
 
 import asyncio
 import logging
+import logging.handlers
+import signal
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
+from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, place_order
 from sauce.adapters.db import OrderRow, has_recent_submitted_order, log_event, log_order
 from sauce.adapters.market_data import get_universe_snapshot
 from sauce.agents import execution, market_context, ops, portfolio, research, risk, session_boot, supervisor
@@ -58,10 +61,53 @@ from sauce.core.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Graceful shutdown: set by SIGTERM/SIGINT handler, checked between pipeline stages.
+_shutdown_requested = False
+
 
 def _canonicalize_symbol(symbol: str) -> str:
     """Normalize broker and strategy symbols for reconciliation lookups."""
     return symbol.replace("/", "").upper()
+
+
+def configure_logging() -> None:
+    """Set up structured logging with rotation for the Sauce trading system.
+
+    Called once at the start of main(). Configures:
+    - Root logger at INFO level so all module loggers emit their messages.
+    - Structured format with timestamp, level, logger name, and message.
+    - Rotating file handler: 5 MB max per file, 3 backups, in data/logs/.
+    - Stream handler for stdout (captured by cron redirect).
+    """
+    log_dir = Path("data/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    )
+    formatter.converter = lambda *_: datetime.now(timezone.utc).timetuple()
+
+    root = logging.getLogger()
+    # Avoid adding duplicate handlers on repeated calls (e.g. tests)
+    if root.handlers:
+        return
+    root.setLevel(logging.INFO)
+
+    # Rotating file handler — keeps disk usage bounded
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_dir / "sauce.log",
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    # Stream handler for stdout (picked up by cron.log)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    root.addHandler(stream_handler)
 
 
 async def main() -> None:
@@ -73,6 +119,17 @@ async def main() -> None:
     """
     loop_id = str(uuid.uuid4())
     settings = get_settings()
+    configure_logging()
+
+    # Register graceful shutdown handler for SIGTERM (Docker stop) and SIGINT (Ctrl+C)
+    def _handle_shutdown(signum: int, frame: object) -> None:
+        global _shutdown_requested
+        sig_name = signal.Signals(signum).name
+        logger.warning("Received %s — will shut down after current stage [loop_id=%s]", sig_name, loop_id)
+        _shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
 
     log_event(AuditEvent(
         loop_id=loop_id,
@@ -91,7 +148,24 @@ async def main() -> None:
     logger.info("Session boot complete [loop_id=%s, suppressed=%s]", loop_id, boot_ctx.is_suppressed)
 
     try:
-        await _run_loop(loop_id=loop_id, settings=settings, boot_ctx=boot_ctx)
+        await asyncio.wait_for(
+            _run_loop(loop_id=loop_id, settings=settings, boot_ctx=boot_ctx),
+            timeout=settings.loop_timeout_seconds,
+        )
+    except TimeoutError:
+        logger.critical(
+            "Loop timed out after %ds [loop_id=%s]",
+            settings.loop_timeout_seconds, loop_id,
+        )
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="error",
+            payload={
+                "stage": "main",
+                "error": f"Loop timed out after {settings.loop_timeout_seconds}s",
+                "type": "TimeoutError",
+            },
+        ))
     except Exception as exc:
         logger.exception("Unhandled exception in loop [loop_id=%s]: %s", loop_id, exc)
         log_event(AuditEvent(
@@ -106,6 +180,12 @@ async def main() -> None:
             event_type="loop_end",
             payload={"timestamp": datetime.now(timezone.utc).isoformat()},
         ))
+        # Lightweight DB maintenance (integrity check, audit pruning, VACUUM)
+        try:
+            from sauce.adapters.db import run_maintenance
+            run_maintenance()
+        except Exception:  # noqa: BLE001
+            logger.warning("DB maintenance skipped due to error", exc_info=True)
         logger.info("Loop ended [loop_id=%s]", loop_id)
 
 
@@ -119,7 +199,37 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         logger.warning("Trading is paused — aborting loop [loop_id=%s]", loop_id)
         return
 
+    if boot_ctx.is_suppressed:
+        logger.warning(
+            "Macro-event suppression active — aborting loop before research [loop_id=%s]",
+            loop_id,
+        )
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="safety_check",
+            payload={
+                "check": "macro_suppression",
+                "result": True,
+                "reason": "major economic event suppression window active",
+            },
+        ))
+        return
+
     # ── Agent 1: Market Context ───────────────────────────────────────────────
+    # Cancel any unfilled orders from previous runs before new cycle begins
+    try:
+        stale_cancelled = await asyncio.to_thread(
+            cancel_stale_orders,
+            max_age_minutes=settings.stale_order_cancel_minutes,
+            loop_id=loop_id,
+        )
+        if stale_cancelled:
+            logger.info(
+                "Cancelled %d stale order(s) [loop_id=%s]", stale_cancelled, loop_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Stale order cancellation failed: %s [loop_id=%s]", exc, loop_id)
+
     mkt_ctx = await market_context.run(loop_id=loop_id, boot_ctx=boot_ctx)
     logger.info(
         "Market context ready [loop_id=%s, regime=%s, dead=%s]",
@@ -192,6 +302,9 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         return
 
     # ── Step 5: Research agent — one signal per symbol ────────────────────────
+    if _shutdown_requested:
+        logger.warning("Shutdown requested — exiting before research stage [loop_id=%s]", loop_id)
+        return
     signals: list[Signal] = []
 
     # First pass: synchronously filter eligible symbols (market hours + quote freshness).
@@ -343,6 +456,9 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
             ))
 
     # ── Step 7: Execution agent — build orders for approved signals ───────────
+    if _shutdown_requested:
+        logger.warning("Shutdown requested — exiting before execution stage [loop_id=%s]", loop_id)
+        return
     orders: list[Order] = []
 
     # Build a lookup: symbol → signal (needed to pass to execution agent)
@@ -390,6 +506,16 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                 loop_id=loop_id,
             )
             if order is not None:
+                # ── Attach ATR-based stop-loss / take-profit ──────────────
+                _atr = matching_signal.evidence.indicators.atr_14
+                if _atr and _atr > 0 and order.side == "buy":
+                    _ref = quote.mid
+                    order.stop_loss_price = round(
+                        _ref - _atr * settings.stop_loss_atr_multiple, 4,
+                    )
+                    order.take_profit_price = round(
+                        _ref + _atr * settings.profit_target_atr_multiple, 4,
+                    )
                 orders.append(order)
                 log_event(AuditEvent(
                     loop_id=loop_id,
@@ -460,6 +586,9 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         # decision stays as the safe abort default above
 
     # ── Step 10: Place approved orders ───────────────────────────────────────
+    if _shutdown_requested:
+        logger.warning("Shutdown requested — skipping order placement [loop_id=%s]", loop_id)
+        return
     _orders_placed_count: int = 0
     _db_path = str(settings.db_path)
     if decision.action == "execute":
@@ -535,6 +664,76 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                         "stop_price": order.stop_price,
                     },
                 ))
+
+                # ── Companion stop-loss order (P0-1) ──────────────────────
+                if order.side == "buy" and order.stop_loss_price:
+                    _sl_order = Order(
+                        symbol=order.symbol,
+                        side="sell",
+                        qty=order.qty,
+                        order_type="stop",
+                        time_in_force="gtc",
+                        stop_price=order.stop_loss_price,
+                        as_of=order.as_of,
+                        prompt_version=order.prompt_version,
+                    )
+                    try:
+                        _sl_result = await asyncio.to_thread(
+                            place_order, _sl_order, loop_id,
+                        )
+                        _sl_broker_id = str(
+                            _sl_result.get("id")
+                            or _sl_result.get("order_id")
+                            or "unknown"
+                        )
+                        log_order(
+                            OrderRow(
+                                loop_id=loop_id,
+                                symbol=_sl_order.symbol,
+                                side=_sl_order.side,
+                                qty=_sl_order.qty,
+                                order_type=_sl_order.order_type,
+                                time_in_force=_sl_order.time_in_force,
+                                limit_price=None,
+                                stop_price=_sl_order.stop_price,
+                                status="submitted",
+                                broker_order_id=_sl_broker_id,
+                                prompt_version=_sl_order.prompt_version,
+                            ),
+                            db_path=_db_path,
+                        )
+                        log_event(AuditEvent(
+                            loop_id=loop_id,
+                            event_type="order_submitted",
+                            symbol=_sl_order.symbol,
+                            payload={
+                                "broker_order_id": _sl_broker_id,
+                                "side": "sell",
+                                "qty": _sl_order.qty,
+                                "order_type": "stop",
+                                "stop_price": _sl_order.stop_price,
+                                "purpose": "stop_loss",
+                            },
+                        ))
+                        logger.info(
+                            "Stop-loss submitted for %s @ %.4f [loop_id=%s]",
+                            order.symbol, order.stop_loss_price, loop_id,
+                        )
+                    except BrokerError as sl_exc:
+                        logger.error(
+                            "Stop-loss order failed for %s [loop_id=%s]: %s",
+                            order.symbol, loop_id, sl_exc,
+                        )
+                        log_event(AuditEvent(
+                            loop_id=loop_id,
+                            event_type="error",
+                            symbol=order.symbol,
+                            payload={
+                                "stage": "stop_loss",
+                                "error": str(sl_exc),
+                                "stop_loss_price": order.stop_loss_price,
+                            },
+                        ))
             except BrokerError as exc:
                 logger.error(
                     "Order placement failed for %s [loop_id=%s]: %s",

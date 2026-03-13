@@ -310,6 +310,7 @@ def test_trading_client_paper_false_when_env_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_env(monkeypatch, paper="false")
+    monkeypatch.setenv("CONFIRM_LIVE_TRADING", "LIVE-TRADING-CONFIRMED")
 
     with patch("alpaca.trading.client.TradingClient") as mock_tc_class:
         mock_tc_class.return_value = MagicMock()

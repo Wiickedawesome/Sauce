@@ -139,6 +139,16 @@ class Order(StrictModel):
     time_in_force: Literal["day", "gtc", "ioc", "fok"] = "day"
     limit_price: float | None = Field(default=None, ge=0.0)
     stop_price: float | None = Field(default=None, ge=0.0)
+    stop_loss_price: float | None = Field(
+        default=None, ge=0.0,
+        description="Companion stop-loss price (ATR-based). Used to submit a "
+                    "protective stop order after entry fill.",
+    )
+    take_profit_price: float | None = Field(
+        default=None, ge=0.0,
+        description="Companion take-profit price (ATR-based). Informational — "
+                    "logged for audit but not automatically submitted.",
+    )
     as_of: datetime
     prompt_version: str
 

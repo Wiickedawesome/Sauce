@@ -72,6 +72,19 @@ _EVENTS: list[dict[str, str]] = [
     {"date": "2025-10-14T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
     {"date": "2025-11-12T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
     {"date": "2025-12-10T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    # ── 2026 CPI ──
+    {"date": "2026-01-13T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-02-11T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-03-11T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-04-10T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-05-12T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-06-10T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-07-14T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-08-12T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-09-11T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-10-14T12:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-11-10T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
+    {"date": "2026-12-10T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
     # ── 2024 NFP ──
     {"date": "2024-01-05T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
     {"date": "2024-02-02T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
@@ -98,6 +111,19 @@ _EVENTS: list[dict[str, str]] = [
     {"date": "2025-10-03T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
     {"date": "2025-11-07T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
     {"date": "2025-12-05T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    # ── 2026 NFP ──
+    {"date": "2026-01-09T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-02-06T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-03-06T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-04-03T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-05-08T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-06-05T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-07-02T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-08-07T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-09-04T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-10-02T12:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-11-06T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
+    {"date": "2026-12-04T13:30:00Z", "type": "NFP", "desc": "Nonfarm Payrolls"},
 ]
 
 # Pre-parsed, sorted list of EconomicEvent objects (built once at import time).

@@ -32,6 +32,8 @@ NFP_JAN05 = _utc(2024, 1, 5, 13, 30)     # NFP  2024-01-05 13:30 UTC
 CPI_JUN12 = _utc(2024, 6, 12, 12, 30)    # CPI  2024-06-12 12:30 UTC
 FOMC_JUN12 = _utc(2024, 6, 12, 18, 0)    # FOMC 2024-06-12 18:00 UTC
 CPI_MAR12 = _utc(2024, 3, 12, 12, 30)    # CPI  2024-03-12 12:30 UTC
+CPI_MAR11_2026 = _utc(2026, 3, 11, 12, 30)
+NFP_MAR06_2026 = _utc(2026, 3, 6, 13, 30)
 
 
 # ===== EVENTS list validation =====
@@ -40,7 +42,7 @@ class TestEventsListIntegrity:
     """Validate the pre-parsed EVENTS list."""
 
     def test_total_event_count(self) -> None:
-        assert len(EVENTS) == 64  # 16 FOMC + 24 CPI + 24 NFP
+        assert len(EVENTS) == 88  # 16 FOMC + 36 CPI + 36 NFP
 
     def test_fomc_count(self) -> None:
         fomc = [e for e in EVENTS if e.event_type == "FOMC"]
@@ -48,11 +50,11 @@ class TestEventsListIntegrity:
 
     def test_cpi_count(self) -> None:
         cpi = [e for e in EVENTS if e.event_type == "CPI"]
-        assert len(cpi) == 24  # 12 per year × 2 years
+        assert len(cpi) == 36  # 12 per year × 3 years
 
     def test_nfp_count(self) -> None:
         nfp = [e for e in EVENTS if e.event_type == "NFP"]
-        assert len(nfp) == 24  # 12 per year × 2 years
+        assert len(nfp) == 36  # 12 per year × 3 years
 
     def test_events_sorted_by_date(self) -> None:
         dates = [e.date for e in EVENTS]
@@ -114,6 +116,11 @@ class TestGetEventsForDate:
         # Pass a naive datetime — function should still work
         naive = datetime(2024, 1, 11, 10, 0)
         result = get_events_for_date(naive)
+        assert len(result) == 1
+        assert result[0].event_type == "CPI"
+
+    def test_2026_event_found(self) -> None:
+        result = get_events_for_date(CPI_MAR11_2026)
         assert len(result) == 1
         assert result[0].event_type == "CPI"
 
@@ -208,6 +215,10 @@ class TestIsNearMajorEvent:
         as_of = _utc(2024, 2, 15, 12, 0)
         assert is_near_major_event(as_of) is False
 
+    def test_2026_nfp_within_default_window(self) -> None:
+        as_of = NFP_MAR06_2026 - timedelta(minutes=45)
+        assert is_near_major_event(as_of) is True
+
 
 # ===== is_major_event_within_hours =====
 
@@ -278,6 +289,10 @@ class TestIsSuppressed:
     def test_no_suppression_far_from_events(self) -> None:
         as_of = _utc(2024, 2, 20, 12, 0)
         assert is_suppressed(as_of) is False
+
+    def test_2026_suppression_window(self) -> None:
+        as_of = CPI_MAR11_2026 - timedelta(minutes=90)
+        assert is_suppressed(as_of) is True
 
 
 # ===== Edge cases =====

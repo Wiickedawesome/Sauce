@@ -319,6 +319,34 @@ async def test_loop_aborts_when_trading_paused(monkeypatch):
     assert count_events_by_type("loop_end") >= 1
 
 
+@pytest.mark.asyncio
+async def test_loop_aborts_when_macro_suppressed(monkeypatch):
+    """If macro suppression is active the loop should exit before market/account work."""
+    from sauce.core.schemas import BootContext, StrategicContext
+
+    suppressed_boot_ctx = BootContext(
+        was_reset=False,
+        calendar_events=[],
+        strategic_context=StrategicContext(as_of=datetime.now(timezone.utc)),
+        is_suppressed=True,
+        as_of=datetime.now(timezone.utc),
+    )
+
+    with patch("sauce.agents.session_boot.run", new=AsyncMock(return_value=suppressed_boot_ctx)):
+        with patch("sauce.agents.market_context.run", new=AsyncMock()) as mock_market_context:
+            with patch("sauce.core.loop.get_account") as mock_account:
+                from sauce.core.loop import main
+                await main()
+
+    mock_market_context.assert_not_called()
+    mock_account.assert_not_called()
+    assert count_events_by_type("loop_start") >= 1
+    assert count_events_by_type("loop_end") >= 1
+    payload = get_latest_event_payload("safety_check")
+    assert payload["check"] == "macro_suppression"
+    assert payload["result"] is True
+
+
 # ── Stale data is skipped ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

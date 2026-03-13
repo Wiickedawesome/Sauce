@@ -7,7 +7,7 @@ vars directly in agent or adapter code.
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,15 +27,15 @@ class Settings(BaseSettings):
     )
 
     # ── Broker ────────────────────────────────────────────────────────────────
-    alpaca_api_key: str = Field(..., description="Alpaca API key")
-    alpaca_secret_key: str = Field(..., description="Alpaca secret key")
+    alpaca_api_key: str = Field(..., repr=False, description="Alpaca API key")
+    alpaca_secret_key: str = Field(..., repr=False, description="Alpaca secret key")
     alpaca_paper: bool = Field(default=True, description="True = paper trading. Default MUST be True.")
 
     # ── LLM ───────────────────────────────────────────────────────────────────
     llm_provider: str = Field(default="github", description="'github' or 'anthropic'")
-    github_token: str = Field(default="", description="GitHub token for GitHub Models API")
+    github_token: str = Field(default="", repr=False, description="GitHub token for GitHub Models API")
     llm_model: str = Field(default="claude-3-5-sonnet", description="Model name on LLM endpoint")
-    anthropic_api_key: str = Field(default="", description="Anthropic API key (fallback provider)")
+    anthropic_api_key: str = Field(default="", repr=False, description="Anthropic API key (fallback provider)")
 
     # ── Trading Universe ──────────────────────────────────────────────────────
     trading_universe_equities: str = Field(
@@ -140,6 +140,21 @@ class Settings(BaseSettings):
 
     # ── Safety ────────────────────────────────────────────────────────────────
     trading_pause: bool = Field(default=False)
+    confirm_live_trading: str = Field(
+        default="",
+        description="Must be set to 'LIVE-TRADING-CONFIRMED' when alpaca_paper=False. "
+                    "Prevents accidental live-money trading.",
+    )
+    loop_timeout_seconds: int = Field(
+        default=1500, ge=60,
+        description="Maximum seconds a single loop iteration may run before being "
+                    "cancelled. Default 1500 (25 min) for a 30-min cron cadence.",
+    )
+    stale_order_cancel_minutes: int = Field(
+        default=30, ge=1,
+        description="Cancel any open (unfilled) orders older than this many minutes "
+                    "at the start of each loop run. Default 30 (one cron cycle).",
+    )
 
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = Field(default="data/sauce.db")
@@ -149,6 +164,7 @@ class Settings(BaseSettings):
     # ── Alerting (Finding 5.2) ────────────────────────────────────────────────
     alert_webhook_url: str = Field(
         default="",
+        repr=False,
         description="Slack or generic webhook URL for critical alert notifications. "
                     "If empty, alerts are written to Python logging only.",
     )
@@ -196,6 +212,17 @@ class Settings(BaseSettings):
         if v is None or v == "":
             return True
         return v
+
+    @model_validator(mode="after")
+    def require_live_trading_confirmation(self) -> "Settings":
+        """Prevent accidental live trading without explicit confirmation."""
+        if not self.alpaca_paper and self.confirm_live_trading != "LIVE-TRADING-CONFIRMED":
+            raise ValueError(
+                "Live trading (ALPACA_PAPER=false) requires "
+                "CONFIRM_LIVE_TRADING='LIVE-TRADING-CONFIRMED' in .env. "
+                "This safeguard prevents accidental real-money execution."
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

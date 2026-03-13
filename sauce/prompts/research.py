@@ -198,7 +198,8 @@ def build_user_prompt(
             "contradiction (e.g., setup claims oversold but RSI is 75), reject with "
             "side='hold'. Do not hold because you are uncertain about your role — you are "
             "an auditor of pre-scored evidence. Values below 0.40 are treated as hold "
-            "by the system. Prefer action over inaction when the evidence is clear."
+            "by the system. Hold is a valid and expected outcome — do not inflate "
+            "confidence to cross the threshold."
         ),
         "daily_trend_context": daily_trend_context,
         "signal_history": (
