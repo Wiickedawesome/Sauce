@@ -51,6 +51,17 @@ source "${VENV}/bin/activate"
 # ── Change to project root so relative imports work ───────────────────────────
 cd "${APP_DIR}"
 
+# ── Load environment variables ────────────────────────────────────────────────
+# Cron jobs do NOT inherit Docker env vars. We must explicitly load them.
+# First try the cron env dump (written by Docker CMD), then fall back to .env.
+if [[ -f /etc/environment.sauce ]]; then
+    # shellcheck source=/dev/null
+    set -a; source /etc/environment.sauce; set +a
+elif [[ -f "${APP_DIR}/.env" ]]; then
+    # shellcheck source=/dev/null
+    set -a; source "${APP_DIR}/.env"; set +a
+fi
+
 # ── Run the loop ──────────────────────────────────────────────────────────────
 # `|| true` ensures this script exits 0 even if the loop errors out.
 # The Python process logs its own errors to the audit DB before exiting.

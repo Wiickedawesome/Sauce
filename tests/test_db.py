@@ -35,7 +35,7 @@ def tmp_db(tmp_path: Path) -> str:
     """Return a path to a fresh temp SQLite DB for each test."""
     # Reset the module-level engine so each test gets a clean DB
     import sauce.adapters.db as db_module
-    db_module._engine = None
+    db_module._engines = {}
     db_path = str(tmp_path / "test_sauce.db")
     return db_path
 
@@ -135,7 +135,7 @@ def test_log_event_stores_json_payload(tmp_db: str) -> None:
 def test_log_signal_writes_row(tmp_db: str) -> None:
     # Reset engine
     import sauce.adapters.db as db_module
-    db_module._engine = None
+    db_module._engines = {}
 
     row = SignalRow(
         loop_id="loop-001",
@@ -162,7 +162,7 @@ def test_log_signal_writes_row(tmp_db: str) -> None:
 
 def test_log_order_writes_row(tmp_db: str) -> None:
     import sauce.adapters.db as db_module
-    db_module._engine = None
+    db_module._engines = {}
 
     row = OrderRow(
         loop_id="loop-002",
@@ -190,7 +190,7 @@ def test_log_order_writes_row(tmp_db: str) -> None:
 
 def test_get_daily_stats_returns_none_for_missing_date(tmp_db: str) -> None:
     import sauce.adapters.db as db_module
-    db_module._engine = None
+    db_module._engines = {}
 
     result = get_daily_stats("2026-01-01", db_path=tmp_db)
     assert result is None

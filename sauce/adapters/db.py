@@ -25,6 +25,20 @@ from sauce.core.schemas import AuditEvent, DailyStats
 logger = logging.getLogger(__name__)
 
 
+def _default_db_path() -> str:
+    """Resolve the DB path from settings (config / env var), not a hardcoded string.
+
+    This ensures all callers — including loop.py, agents, and adapters — write
+    to the DB pointed to by the ``DB_PATH`` env var / ``get_settings().db_path``
+    without having to thread the path explicitly through every call.
+    """
+    try:
+        from sauce.core.config import get_settings
+        return str(get_settings().db_path)
+    except Exception:  # noqa: BLE001 — during early init or test isolation
+        return os.environ.get("DB_PATH", "data/sauce.db")
+
+
 # ── ORM Base ──────────────────────────────────────────────────────────────────
 
 class Base(DeclarativeBase):
@@ -110,13 +124,15 @@ class DailyStatsRow(Base):
 _engines: dict[str, Engine] = {}
 
 
-def get_engine(db_path: str = "data/sauce.db") -> Engine:
+def get_engine(db_path: str | None = None) -> Engine:
     """
     Return the cached SQLAlchemy engine for db_path, creating it on first call.
 
     Each distinct db_path gets its own engine so that test DBs are fully isolated
     from the production DB even within the same process (Finding 7.4).
     """
+    if db_path is None:
+        db_path = _default_db_path()
     global _engines
     if db_path not in _engines:
         # Ensure parent directory exists
@@ -132,7 +148,7 @@ def get_engine(db_path: str = "data/sauce.db") -> Engine:
     return _engines[db_path]
 
 
-def get_session(db_path: str = "data/sauce.db") -> Session:
+def get_session(db_path: str | None = None) -> Session:
     """Return a new SQLAlchemy session. Caller is responsible for closing it."""
     engine = get_engine(db_path)
     SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -141,7 +157,7 @@ def get_session(db_path: str = "data/sauce.db") -> Session:
 
 # ── Public Write Helpers ──────────────────────────────────────────────────────
 
-def log_event(event: AuditEvent, db_path: str = "data/sauce.db") -> None:
+def log_event(event: AuditEvent, db_path: str | None = None) -> None:
     """
     Append an AuditEvent to the audit_events table.
 
@@ -174,7 +190,7 @@ def log_event(event: AuditEvent, db_path: str = "data/sauce.db") -> None:
 
 def log_signal(
     signal_row: SignalRow,
-    db_path: str = "data/sauce.db",
+    db_path: str | None = None,
 ) -> None:
     """Append a SignalRow to the signals table."""
     session = get_session(db_path)
@@ -185,7 +201,7 @@ def log_signal(
         session.close()
 
 
-def log_order(order_row: OrderRow, db_path: str = "data/sauce.db") -> None:
+def log_order(order_row: OrderRow, db_path: str | None = None) -> None:
     """Append an OrderRow to the orders table."""
     session = get_session(db_path)
     try:
@@ -197,7 +213,7 @@ def log_order(order_row: OrderRow, db_path: str = "data/sauce.db") -> None:
 
 # ── Public Read Helpers ───────────────────────────────────────────────────────
 
-def get_daily_stats(date: str, db_path: str = "data/sauce.db") -> DailyStats | None:
+def get_daily_stats(date: str, db_path: str | None = None) -> DailyStats | None:
     """
     Return DailyStats for a given date string (YYYY-MM-DD), or None if not found.
 
@@ -223,7 +239,7 @@ def get_daily_stats(date: str, db_path: str = "data/sauce.db") -> DailyStats | N
         session.close()
 
 
-def count_orders_today(db_path: str = "data/sauce.db") -> int:
+def count_orders_today(db_path: str | None = None) -> int:
     """Return count of orders placed today. Used by Ops agent."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     session = get_session(db_path)
@@ -240,7 +256,7 @@ def count_orders_today(db_path: str = "data/sauce.db") -> int:
 
 def upsert_daily_stats(
     date: str,
-    db_path: str = "data/sauce.db",
+    db_path: str | None = None,
     **fields: object,
 ) -> None:
     """
@@ -292,7 +308,7 @@ def upsert_daily_stats(
 # ── Maintenance ───────────────────────────────────────────────────────────────
 
 def run_maintenance(
-    db_path: str = "data/sauce.db",
+    db_path: str | None = None,
     *,
     retention_days: int = 90,
     vacuum: bool = True,
@@ -353,7 +369,7 @@ def has_recent_submitted_order(
     symbol: str,
     side: str,
     minutes: int = 30,
-    db_path: str = "data/sauce.db",
+    db_path: str | None = None,
 ) -> bool:
     """
     Return True if a 'submitted' order for this symbol+side was written to the
@@ -392,7 +408,7 @@ def has_recent_submitted_order(
 def get_recent_signals(
     symbol: str,
     days: int = 7,
-    db_path: str = "data/sauce.db",
+    db_path: str | None = None,
 ) -> list[dict]:
     """
     Return recent signals for a symbol from the signals table.
@@ -432,7 +448,7 @@ def get_recent_signals(
 
 def get_supervisor_abort_rate(
     days: int = 7,
-    db_path: str = "data/sauce.db",
+    db_path: str | None = None,
 ) -> dict:
     """
     Return supervisor decision stats over the given window.

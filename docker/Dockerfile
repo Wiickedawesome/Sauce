@@ -60,6 +60,7 @@ HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \
     CMD /app/.venv/bin/python /app/scripts/docker_healthcheck.py
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
-# Run cron in foreground so Docker can manage the process lifecycle.
-# Logs flow to stdout via tail so `docker compose logs -f` works.
-CMD ["sh", "-c", "cron && tail -F /app/data/logs/cron.log"]
+# Cron does NOT inherit the container's environment variables. We dump them to
+# a file that run_loop.sh sources before running the Python process.
+# Only whitelisted variable names are exported to avoid leaking shell internals.
+CMD ["sh", "-c", "env | grep -E '^(ALPACA_|LLM_|ANTHROPIC_|GITHUB_TOKEN|DB_PATH|TRADING_|DATA_|HEARTBEAT_|WEBHOOK_|TZ=)' > /etc/environment.sauce && cron && tail -F /app/data/logs/cron.log"]
