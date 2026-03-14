@@ -8,7 +8,7 @@ Sauce is deployed as a Docker container on a VPS, running on a 30-minute cron sc
 
 - Docker and Docker Compose
 - Alpaca account (paper or live)
-- GitHub Token (for Claude via GitHub Models API) or Anthropic API key
+- Anthropic API key
 - A VPS or local machine with persistent storage
 
 ---
