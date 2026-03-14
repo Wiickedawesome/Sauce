@@ -651,22 +651,44 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
     # orders go through the same approval gate as buy orders.
     exit_orders: list[Order] = []
     if positions:
-        signal_by_sym_upper: dict[str, Signal] = {
-            s.symbol.upper(): s for s in signals
+        # Build canonicalized lookups — broker returns "BTCUSD" but
+        # universe quotes/signals use "BTC/USD".
+        canon_quotes: dict[str, PriceReference] = {
+            _canonicalize_symbol(sym): q for sym, q in quotes.items()
+        }
+        canon_signals: dict[str, Signal] = {
+            _canonicalize_symbol(s.symbol): s for s in signals
+        }
+        canon_to_universe: dict[str, str] = {
+            _canonicalize_symbol(sym): sym for sym in quotes
         }
         for pos in positions:
             pos_symbol = str(pos.get("symbol", "")).upper()
+            pos_canon = _canonicalize_symbol(pos_symbol)
             pos_qty = float(pos.get("qty") or 0.0)
             if pos_qty <= 0:
                 continue  # skip zero or short positions (no short selling yet)
 
-            pos_quote = quotes.get(pos_symbol)
+            pos_quote = canon_quotes.get(pos_canon)
             if pos_quote is None:
                 continue
 
             # Extract indicators from this run's signal if available
-            sig = signal_by_sym_upper.get(pos_symbol)
+            sig = canon_signals.get(pos_canon)
             pos_indicators = sig.evidence.indicators if sig else Indicators()
+
+            # Try to extract entry time for stale-hold check
+            entry_time = None
+            for _ts_key in ("created_at", "avg_entry_timestamp"):
+                _ts_val = pos.get(_ts_key)
+                if _ts_val is not None:
+                    try:
+                        entry_time = datetime.fromisoformat(
+                            str(_ts_val).replace("Z", "+00:00")
+                        )
+                    except (ValueError, TypeError):
+                        pass
+                    break
 
             try:
                 exit_sig: ExitSignal = await exit_research.run(
@@ -675,6 +697,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                     indicators=pos_indicators,
                     regime=mkt_ctx.regime.regime_type,
                     loop_id=loop_id,
+                    entry_time=entry_time,
                 )
             except Exception as exc:
                 logger.error(
@@ -690,9 +713,11 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                 continue
 
             if exit_sig.action == "exit":
-                # Build a market sell order for the full position
+                # Use universe symbol (BTC/USD) so broker detects crypto
+                # and auto-converts time_in_force from day→gtc.
+                universe_sym = canon_to_universe.get(pos_canon, pos_symbol)
                 _exit_order = Order(
-                    symbol=pos_symbol,
+                    symbol=universe_sym,
                     side="sell",
                     qty=pos_qty,
                     order_type="limit",
@@ -705,7 +730,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                 log_event(AuditEvent(
                     loop_id=loop_id,
                     event_type="order",
-                    symbol=pos_symbol,
+                    symbol=universe_sym,
                     payload={
                         "side": "sell",
                         "qty": pos_qty,

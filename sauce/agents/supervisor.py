@@ -108,6 +108,12 @@ async def run(
     }
     stale_symbols: list[str] = []
     for order in orders:
+        # Sell orders from exit_research bypass the research pipeline and
+        # may not have a matching signal — exempt them from this check.
+        # Their freshness was already validated using the live quote in
+        # exit_research.run().
+        if order.side == "sell":
+            continue
         sig = signal_by_symbol.get(order.symbol.upper())
         if sig is None:
             stale_symbols.append(order.symbol)

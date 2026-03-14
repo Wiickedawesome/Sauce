@@ -65,6 +65,9 @@ async def run(
     db_path = str(settings.db_path)
     as_of = datetime.now(timezone.utc)
 
+    # Mutable holder so the closure can carry real indicators once computed.
+    _hold_indicators: list[Indicators] = [Indicators()]
+
     def _safe_hold(reason: str) -> Signal:
         """Return a safe hold signal with an attached audit log entry."""
         log_event(
@@ -84,7 +87,7 @@ async def run(
             evidence=Evidence(
                 symbol=symbol,
                 price_reference=quote,
-                indicators=Indicators(),
+                indicators=_hold_indicators[0],
                 as_of=quote.as_of,
             ),
             reasoning=f"Hold (safe default): {reason}",
@@ -109,6 +112,7 @@ async def run(
     # ── Step 2: Compute indicators ────────────────────────────────────────────
     _is_crypto = market_data._is_crypto(symbol)
     indicators = compute_all(df, is_crypto=_is_crypto)
+    _hold_indicators[0] = indicators  # make available to _safe_hold closure
 
     sma_20 = indicators.sma_20
     sma_50 = indicators.sma_50

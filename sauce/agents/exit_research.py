@@ -9,6 +9,7 @@ Exit conditions evaluated (any triggers an exit):
   3. RSI overbought — RSI(14) > 72 on a long position.
   4. Stale position — held > 48 hours with < 1% unrealized gain.
   5. ATR stop-loss hit — current price breached the ATR-based stop.
+  6. Profit target hit — current price reached entry + profit_target_atr_multiple × ATR.
 
 Peak P&L tracking:
   - Each call reads the current peak from session memory.
@@ -173,6 +174,17 @@ async def run(
                 f"ATR stop hit: mid={quote.mid:.4f} <= stop={stop_price:.4f} "
                 f"(entry={avg_entry_price:.4f}, ATR={indicators.atr_14:.4f})",
                 urgency="high",
+            )
+
+    # ── Condition 6: Profit target hit ────────────────────────────────────────
+    if avg_entry_price > 0 and indicators.atr_14 is not None and indicators.atr_14 > 0:
+        target_price = avg_entry_price + settings.profit_target_atr_multiple * indicators.atr_14
+        if qty > 0 and quote.mid >= target_price:
+            return _exit(
+                f"Profit target hit: mid={quote.mid:.4f} >= target={target_price:.4f} "
+                f"(entry={avg_entry_price:.4f}, ATR={indicators.atr_14:.4f}, "
+                f"multiple={settings.profit_target_atr_multiple}x)",
+                urgency="normal",
             )
 
     return _hold()
