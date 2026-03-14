@@ -31,7 +31,7 @@ def reset_db_and_settings(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test_safety.db")
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test_secret")
-    monkeypatch.setenv("LLM_PROVIDER", "github")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("DB_PATH", db_path)
     # Do NOT set TRADING_PAUSE here — each test sets it as needed
 

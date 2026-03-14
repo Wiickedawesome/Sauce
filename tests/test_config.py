@@ -18,6 +18,7 @@ def set_required(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the minimum required env vars so Settings() can construct."""
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test_secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
 
 # ── Required field validation ─────────────────────────────────────────────────
@@ -78,34 +79,20 @@ def test_alpaca_paper_empty_string_defaults_to_true(monkeypatch: pytest.MonkeyPa
     assert s.alpaca_paper is True
 
 
-# ── LLM provider validation ───────────────────────────────────────────────────
+# ── LLM config ─────────────────────────────────────────────────────────────
 
-def test_llm_provider_defaults_to_github(monkeypatch: pytest.MonkeyPatch) -> None:
-    set_required(monkeypatch)
-    monkeypatch.delenv("LLM_PROVIDER", raising=False)
-    s = Settings(_env_file=None)  # bypass .env on disk; rely solely on monkeypatched env
-    assert s.llm_provider == "github"
-
-
-def test_llm_provider_accepts_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
-    set_required(monkeypatch)
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    s = Settings(_env_file=None)
-    assert s.llm_provider == "anthropic"
-
-
-def test_llm_provider_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    set_required(monkeypatch)
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
+def test_anthropic_api_key_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "test_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "test_secret")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
 
 
-def test_llm_provider_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_llm_model_defaults_to_claude_sonnet(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
-    monkeypatch.setenv("LLM_PROVIDER", "GITHUB")
     s = Settings(_env_file=None)
-    assert s.llm_provider == "github"
+    assert s.llm_model == "claude-sonnet-4-6"
 
 
 # ── Risk limit bounds ─────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ def set_env(monkeypatch: pytest.MonkeyPatch, paper: str = "true") -> None:
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test_secret")
     monkeypatch.setenv("ALPACA_PAPER", paper)
-    monkeypatch.setenv("LLM_PROVIDER", "github")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     from sauce.core.config import get_settings
     get_settings.cache_clear()
 

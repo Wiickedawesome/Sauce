@@ -32,10 +32,8 @@ class Settings(BaseSettings):
     alpaca_paper: bool = Field(default=True, description="True = paper trading. Default MUST be True.")
 
     # ── LLM ───────────────────────────────────────────────────────────────────
-    llm_provider: str = Field(default="github", description="'github' or 'anthropic'")
-    github_token: str = Field(default="", repr=False, description="GitHub token for GitHub Models API")
-    llm_model: str = Field(default="claude-3-5-sonnet", description="Model name on LLM endpoint")
-    anthropic_api_key: str = Field(default="", repr=False, description="Anthropic API key (fallback provider)")
+    anthropic_api_key: str = Field(..., repr=False, description="Anthropic API key")
+    llm_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model name")
     research_temperature: float = Field(default=0.3, ge=0.0, le=2.0, description="LLM temperature for research agent")
     supervisor_temperature: float = Field(default=0.2, ge=0.0, le=2.0, description="LLM temperature for supervisor agent")
 
@@ -190,14 +188,6 @@ class Settings(BaseSettings):
     def full_universe(self) -> list[str]:
         """Combined equity + crypto trading universe."""
         return self.equity_universe + self.crypto_universe
-
-    @field_validator("llm_provider")
-    @classmethod
-    def validate_llm_provider(cls, v: str) -> str:
-        allowed = {"github", "anthropic"}
-        if v.lower() not in allowed:
-            raise ValueError(f"llm_provider must be one of {allowed}, got '{v}'")
-        return v.lower()
 
     @field_validator("data_feed")
     @classmethod

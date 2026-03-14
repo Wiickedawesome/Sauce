@@ -54,10 +54,8 @@ docker/
 | `ALPACA_API_KEY` | Yes | — | Alpaca key ID |
 | `ALPACA_SECRET_KEY` | Yes | — | Alpaca secret |
 | `ALPACA_PAPER` | No | `true` | Set `false` for live trading |
-| `LLM_PROVIDER` | No | `github` | `github` or `anthropic` |
-| `GITHUB_TOKEN` | Yes* | — | Required when `LLM_PROVIDER=github` |
-| `ANTHROPIC_API_KEY` | Yes* | — | Required when `LLM_PROVIDER=anthropic` |
-| `LLM_MODEL` | No | `claude-3-5-sonnet` | Model name |
+| `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
+| `LLM_MODEL` | No | `claude-sonnet-4-6` | Anthropic model name |
 | `TRADING_PAUSE` | No | `false` | Emergency kill switch |
 | `DB_PATH` | No | `data/sauce.db` | SQLite database path |
 

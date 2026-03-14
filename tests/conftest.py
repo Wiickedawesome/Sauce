@@ -25,6 +25,7 @@ def _isolate_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", db_path)
     monkeypatch.setenv("ALPACA_API_KEY", "test-key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
     db_module._engines = {}
     memory_db_module._engines = {}

@@ -136,7 +136,7 @@ pip install -e ".[dev]"
 
 # Secrets
 cp .env.example .env
-# Fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, GITHUB_TOKEN
+# Fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, ANTHROPIC_API_KEY
 ```
 
 ---
@@ -150,10 +150,8 @@ All configuration lives in `.env`. No value is hardcoded in agent or adapter cod
 | `ALPACA_API_KEY` | — | Required. Alpaca key ID |
 | `ALPACA_SECRET_KEY` | — | Required. Alpaca secret |
 | `ALPACA_PAPER` | `true` | `false` to go live. Default is always paper |
-| `LLM_PROVIDER` | `github` | `github` or `anthropic` |
-| `GITHUB_TOKEN` | — | Bearer token for GitHub Models API |
-| `LLM_MODEL` | `claude-3-5-sonnet` | Model name on the endpoint |
-| `ANTHROPIC_API_KEY` | — | Required only when `LLM_PROVIDER=anthropic` |
+| `ANTHROPIC_API_KEY` | — | Required. Anthropic API key |
+| `LLM_MODEL` | `claude-sonnet-4-6` | Anthropic model name |
 | `TRADING_UNIVERSE_EQUITIES` | `AAPL,MSFT,GOOGL,...` | Comma-separated tickers |
 | `TRADING_UNIVERSE_CRYPTO` | `BTC/USD,ETH/USD` | Alpaca crypto pairs |
 | `MAX_POSITION_PCT` | `0.05` | Max allocation per symbol (fraction of NAV) |
@@ -249,7 +247,6 @@ No order reaches `broker.place_order()` without passing all eight layers. Every 
 - Credentials are loaded exclusively through `core/config.py` — never via `os.environ` directly in agent code
 - `.env` is in `.gitignore` and is never committed
 - `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` are masked as `***` in all log output
-- `GITHUB_TOKEN` is treated as a password — masked in every log line
 - `ALPACA_PAPER` defaults to `true` even if the env var is missing or empty
 
 ---
