@@ -12,7 +12,7 @@
 ![DB](https://img.shields.io/badge/Database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)
 ![Docker](https://img.shields.io/badge/Deploy-Docker-2496ed?style=flat-square&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPLv3-22c55e?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-856%20passed-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-861%20passed-22c55e?style=flat-square)
 ![Paper](https://img.shields.io/badge/Mode-Paper%20First-f59e0b?style=flat-square)
 
 <br/>
@@ -21,7 +21,7 @@
 
 ---
 
-Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 30-minute cron cadence. It uses Claude (via GitHub Models API) as the reasoning engine, Alpaca as the broker for US equities and crypto, and SQLite as an append-only audit database. No machine learning. No training. No external SaaS dependencies.
+Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 30-minute cron cadence. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities and crypto, and SQLite as an append-only audit database. No machine learning. No training.
 
 ---
 
@@ -35,7 +35,7 @@ Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 
 - **Backtesting engine** — vectorized bar-replay with ATR-based stop-loss and take-profit
 - **Memory & RAG** — session memory (resets daily) + strategic memory (persistent). Top-K similar past trades retrieved and injected into Claude's prompt for confidence calibration
 - **Exit management** — active position monitoring with trailing stops and regime-flip detection
-- **856 tests, zero real API calls** — full test coverage with no external dependencies
+- **861 tests, zero real API calls** — full test coverage with no external dependencies
 - **Paper-first default** — live trading requires explicit opt-in
 - **Append-only SQLite audit log** — full forensic trail of every decision
 
@@ -72,7 +72,7 @@ sauce/
   adapters/
     broker.py          Alpaca order placement + account queries
     market_data.py     Bars, quotes, snapshots via Alpaca Data API
-    llm.py             Claude via GitHub Models (+ Anthropic fallback)
+    llm.py             Claude via Anthropic API (with retry + back-off)
     db.py              SQLite engine, audit log, signal/order writers
     notify.py          Alert dispatch
   agents/
@@ -94,6 +94,11 @@ sauce/
     setups.py          Deterministic setup scanner (hard/soft scoring)
     regime.py          Market regime classifier
     capital.py         Capital tier system
+    calendar.py        Economic calendar + earnings blackout suppression
+    nav.py             NAV tracking + high-water mark
+    metrics.py         Performance metrics calculations
+    screener.py        Dynamic equity screening from full Alpaca market
+    validation.py      Input validation helpers
   indicators/
     core.py            RSI, MACD, BB, ATR, VWAP, SMA, Stochastic, vol ratio
   signals/
@@ -111,8 +116,9 @@ sauce/
     research.py        Research agent system + user prompt templates
     execution.py       Execution agent prompt templates
     supervisor.py      Supervisor agent prompt templates
+    utils.py           Shared prompt formatting utilities
 
-tests/                 856 tests, zero real API calls
+tests/                 861 tests, zero real API calls
 scripts/               Cron entry, health checks, diagnostics
 docker/                Dockerfile + docker-compose.yml
 docs/                  Architecture, features, deployment guides
@@ -154,10 +160,10 @@ All configuration lives in `.env`. No value is hardcoded in agent or adapter cod
 | `LLM_MODEL` | `claude-sonnet-4-6` | Anthropic model name |
 | `TRADING_UNIVERSE_EQUITIES` | `AAPL,MSFT,GOOGL,...` | Comma-separated tickers |
 | `TRADING_UNIVERSE_CRYPTO` | `BTC/USD,ETH/USD` | Alpaca crypto pairs |
-| `MAX_POSITION_PCT` | `0.05` | Max allocation per symbol (fraction of NAV) |
+| `MAX_POSITION_PCT` | `0.08` | Max allocation per symbol (fraction of NAV) |
 | `MAX_PORTFOLIO_EXPOSURE` | `1.0` | Max total exposure (1.0 = no leverage) |
-| `MAX_DAILY_LOSS_PCT` | `0.02` | Auto-pause threshold (2% daily drawdown) |
-| `MIN_CONFIDENCE` | `0.5` | Signals below this are treated as hold |
+| `MAX_DAILY_LOSS_PCT` | `0.03` | Auto-pause threshold (3% daily drawdown) |
+| `MIN_CONFIDENCE` | `0.40` | Signals below this are treated as hold |
 | `DATA_TTL_SECONDS` | `120` | Max age of market data before it is considered stale |
 | `MAX_PRICE_DEVIATION` | `0.01` | Execution vetoes if live quote deviates > 1% |
 | `TRADING_PAUSE` | `false` | Set `true` to halt all trading immediately |
