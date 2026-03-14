@@ -8,7 +8,7 @@ plain-English paragraphs that Claude can reason about. These paragraphs are
 injected into the research prompt as [SESSION MEMORY] and [STRATEGIC MEMORY].
 """
 
-from sauce.core.schemas import SessionContext, StrategicContext
+from sauce.core.schemas import SessionContext, SetupPerformanceEntry, StrategicContext
 
 
 def build_session_paragraph(ctx: SessionContext) -> str:
@@ -227,5 +227,37 @@ def build_strategic_paragraph(
                     "NOTE: Claude is underconfident — "
                     "actual outcomes exceed stated confidence."
                 )
+
+    return " ".join(parts)
+
+
+def build_similar_trades_paragraph(
+    trades: list[SetupPerformanceEntry],
+) -> str:
+    """
+    Format similar past trades into a concise paragraph for Claude.
+
+    Returns empty string if no trades are provided.
+    """
+    if not trades:
+        return ""
+
+    parts: list[str] = [
+        f"SIMILAR PAST TRADES ({len(trades)} most relevant):"
+    ]
+    wins = sum(1 for t in trades if t.win)
+    losses = len(trades) - wins
+    parts.append(f"Record: {wins}W / {losses}L.")
+
+    for t in trades:
+        outcome = "WIN" if t.win else "LOSS"
+        parts.append(
+            f"  {t.date} {t.symbol} {t.setup_type} "
+            f"in {t.regime_at_entry} ({t.time_of_day_bucket}): "
+            f"{outcome} {t.pnl:+.2f} held {t.hold_duration_minutes:.0f}min."
+        )
+
+    avg_pnl = sum(t.pnl for t in trades) / len(trades)
+    parts.append(f"Avg P&L: {avg_pnl:+.2f}.")
 
     return " ".join(parts)

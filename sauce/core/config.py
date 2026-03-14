@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     github_token: str = Field(default="", repr=False, description="GitHub token for GitHub Models API")
     llm_model: str = Field(default="claude-3-5-sonnet", description="Model name on LLM endpoint")
     anthropic_api_key: str = Field(default="", repr=False, description="Anthropic API key (fallback provider)")
+    research_temperature: float = Field(default=0.3, ge=0.0, le=2.0, description="LLM temperature for research agent")
+    supervisor_temperature: float = Field(default=0.2, ge=0.0, le=2.0, description="LLM temperature for supervisor agent")
 
     # ── Trading Universe ──────────────────────────────────────────────────────
     trading_universe_equities: str = Field(

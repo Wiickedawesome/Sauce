@@ -16,10 +16,10 @@ import json
 import logging
 from datetime import datetime, timezone
 
-import pandas_ta as ta  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from sauce.adapters import llm, market_data
+from sauce.indicators.core import compute_all, compute_sma, compute_rsi, _last_float
 from sauce.adapters.db import get_recent_signals, log_event
 from sauce.memory.db import get_session_context, get_strategic_context
 from sauce.core.config import get_settings
@@ -27,6 +27,8 @@ from sauce.core.schemas import AuditEvent, Evidence, Indicators, PriceReference,
 from sauce.core.setups import scan_setups
 from sauce.prompts import research as research_prompts
 from sauce.prompts.context import build_session_paragraph, build_strategic_paragraph
+from sauce.signals.confluence import compute_confluence
+from sauce.signals.timeframes import fetch_multi_timeframe
 
 logger = logging.getLogger(__name__)
 
@@ -105,80 +107,23 @@ async def run(
         return _safe_hold(f"insufficient history ({len(df)} bars)")
 
     # ── Step 2: Compute indicators ────────────────────────────────────────────
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    volume = df["volume"]
+    _is_crypto = market_data._is_crypto(symbol)
+    indicators = compute_all(df, is_crypto=_is_crypto)
 
-    def _last_float(series: object) -> float | None:
-        """Return the last non-NaN value from a pandas Series, or None."""
-        try:
-            val = series.dropna()  # type: ignore[union-attr]
-            if val.empty:  # type: ignore[union-attr]
-                return None
-            f = float(val.iloc[-1])  # type: ignore[union-attr]
-            return f if f == f else None  # NaN guard
-        except (TypeError, ValueError, AttributeError):
-            return None
-
-    sma_20 = _last_float(ta.sma(close, length=20))
-    sma_50 = _last_float(ta.sma(close, length=50))
-    rsi_14 = _last_float(ta.rsi(close, length=14))
-    atr_result = ta.atr(high, low, close, length=14)
-    atr_14 = _last_float(atr_result)
-
-    # Volume ratio: current bar volume vs 20-bar mean
-    try:
-        vol_mean = float(volume.iloc[-20:].mean())
-        volume_ratio: float | None = (
-            float(volume.iloc[-1]) / vol_mean
-            if vol_mean > 0
-            else None
-        )
-    except (TypeError, ValueError, IndexError):
-        volume_ratio = None
-
-    # Average daily volume estimate: sum all bars, divide by estimated trading days.
-    # 60 bars of 30-min data ≈ 4–5 trading days for equities (13 bars/day).
-    # Crypto trades 24/7 → 48 bars/day for 30-min timeframe.
-    _BARS_PER_DAY_EQUITY = 13
-    _BARS_PER_DAY_CRYPTO = 48
-    _bars_per_day = _BARS_PER_DAY_CRYPTO if market_data._is_crypto(symbol) else _BARS_PER_DAY_EQUITY
-    try:
-        estimated_days = max(len(df) / _bars_per_day, 1.0)
-        volume_1d_avg: float | None = float(volume.sum()) / estimated_days
-    except (TypeError, ValueError, ZeroDivisionError):
-        volume_1d_avg = None
-
-    # MACD (12, 26, 9)
-    macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-    if macd_df is not None and not macd_df.empty:
-        macd_line = _last_float(macd_df.iloc[:, 0])
-        macd_signal = _last_float(macd_df.iloc[:, 1])
-        macd_histogram = _last_float(macd_df.iloc[:, 2])
-    else:
-        macd_line = macd_signal = macd_histogram = None
-
-    # Bollinger Bands (20, 2)
-    bb_df = ta.bbands(close, length=20, std=2)
-    if bb_df is not None and not bb_df.empty:
-        bb_lower = _last_float(bb_df.iloc[:, 0])
-        bb_middle = _last_float(bb_df.iloc[:, 1])
-        bb_upper = _last_float(bb_df.iloc[:, 2])
-    else:
-        bb_upper = bb_middle = bb_lower = None
-
-    # Stochastic Oscillator (14, 3, 3)
-    stoch_df = ta.stoch(high, low, close, k=14, d=3, smooth_k=3)
-    if stoch_df is not None and not stoch_df.empty:
-        stoch_k = _last_float(stoch_df.iloc[:, 0])
-        stoch_d = _last_float(stoch_df.iloc[:, 1])
-    else:
-        stoch_k = stoch_d = None
-
-    # VWAP
-    vwap_series = ta.vwap(high, low, close, volume)
-    vwap_val = _last_float(vwap_series) if vwap_series is not None else None
+    sma_20 = indicators.sma_20
+    sma_50 = indicators.sma_50
+    rsi_14 = indicators.rsi_14
+    atr_14 = indicators.atr_14
+    volume_ratio = indicators.volume_ratio
+    macd_line = indicators.macd_line
+    macd_signal = indicators.macd_signal
+    macd_histogram = indicators.macd_histogram
+    bb_upper = indicators.bb_upper
+    bb_middle = indicators.bb_middle
+    bb_lower = indicators.bb_lower
+    stoch_k = indicators.stoch_k
+    stoch_d = indicators.stoch_d
+    vwap_val = indicators.vwap
 
     # ── Step 2b: Fetch daily bars for higher-timeframe trend context ──────────
     df_daily = None  # declared here so step 2e (setup scoring) can reference it
@@ -187,13 +132,13 @@ async def run(
         df_daily = market_data.get_history(symbol, timeframe="1Day", bars=50)
         if not df_daily.empty and len(df_daily) >= 20:
             d_close = df_daily["close"]
-            d_sma_20 = _last_float(ta.sma(d_close, length=20))
+            d_sma_20 = compute_sma(d_close, 20)
             d_sma_50 = (
-                _last_float(ta.sma(d_close, length=50))
+                compute_sma(d_close, 50)
                 if len(df_daily) >= 50
                 else None
             )
-            d_rsi_14 = _last_float(ta.rsi(d_close, length=14))
+            d_rsi_14 = compute_rsi(d_close, 14)
             d_close_price = (
                 float(d_close.iloc[-1]) if not d_close.empty else None
             )
@@ -220,6 +165,20 @@ async def run(
             }
     except market_data.MarketDataError:
         pass  # Daily data unavailable — proceed with 30min only
+
+    # ── Step 2b2: Multi-timeframe analysis + confluence scoring ───────────
+    mtf_context = None
+    confluence = None
+    try:
+        mtf_context = fetch_multi_timeframe(symbol, is_crypto=_is_crypto)
+        if mtf_context.analyses:
+            confluence = compute_confluence(mtf_context)
+            logger.info(
+                "research[%s]: multi-TF %s (score=%.2f, tier=%s)",
+                symbol, confluence.summary, confluence.score, confluence.tier.value,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("research[%s]: multi-TF analysis unavailable: %s", symbol, exc)
 
     # ── Step 2c: Fetch recent signal history for feedback loop ─────────────
     signal_history: list[dict] | None = None
@@ -255,6 +214,26 @@ async def run(
     except Exception as exc:  # noqa: BLE001
         logger.debug("research[%s]: strategic context unavailable: %s", symbol, exc)
 
+    # ── Step 2d2: Retrieve similar past trades (RAG) ──────────────────────
+    similar_trades_text = ""
+    try:
+        from sauce.memory.db import get_similar_trades
+        from sauce.prompts.context import build_similar_trades_paragraph
+
+        similar = get_similar_trades(
+            db_path=str(settings.strategic_memory_db_path),
+            symbol=symbol,
+            regime=regime,
+        )
+        if similar:
+            similar_trades_text = build_similar_trades_paragraph(similar)
+            logger.info(
+                "research[%s]: retrieved %d similar past trades",
+                symbol, len(similar),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("research[%s]: similar trades unavailable: %s", symbol, exc)
+
     # ── Step 2e: Deterministic setup scoring ────────────────────────────────
     # The v2 SYSTEM_PROMPT tells Claude it is an "auditor reviewing a pre-scored
     # thesis" — so we MUST provide that thesis.  If no setup passes, skip the
@@ -276,23 +255,6 @@ async def run(
         for _stype, _wins in _perf_by_setup.items():
             if _wins:
                 _strategic_win_rates[_stype] = sum(_wins) / len(_wins)
-
-    indicators = Indicators(
-        sma_20=sma_20,
-        sma_50=sma_50,
-        rsi_14=rsi_14,
-        atr_14=atr_14,
-        volume_ratio=volume_ratio,
-        macd_line=macd_line,
-        macd_signal=macd_signal,
-        macd_histogram=macd_histogram,
-        bb_upper=bb_upper,
-        bb_middle=bb_middle,
-        bb_lower=bb_lower,
-        stoch_k=stoch_k,
-        stoch_d=stoch_d,
-        vwap=vwap_val,
-    )
 
     _setup_results = []
     try:
@@ -320,9 +282,10 @@ async def run(
         )
         return _safe_hold(f"No qualifying setup for {symbol} (regime={_reg})")
 
-    # Best-scoring passed setup is what Claude will audit.
-    _best_setup = max(_passed, key=lambda r: r.score)
-    setup_result_dict = _best_setup.model_dump(mode="json")
+    # Send ALL passed setups to Claude so it can weigh competing theses.
+    # Sorted by score descending so the strongest thesis appears first.
+    _passed_sorted = sorted(_passed, key=lambda r: r.score, reverse=True)
+    all_setup_results = [r.model_dump(mode="json") for r in _passed_sorted]
 
     # ── Step 3: Build prompt ──────────────────────────────────────────────────
     user_prompt = research_prompts.build_user_prompt(
@@ -351,7 +314,15 @@ async def run(
         is_crypto=market_data._is_crypto(symbol),
         session_context_text=session_context_text,
         strategic_context_text=strategic_context_text,
-        setup_result=setup_result_dict,
+        setup_results=all_setup_results,
+        positions=positions,
+        multi_timeframe_context=(
+            mtf_context.to_prompt_dict() if mtf_context and mtf_context.analyses else None
+        ),
+        confluence_result=(
+            confluence.to_prompt_dict() if confluence else None
+        ),
+        similar_trades_text=similar_trades_text,
     )
 
     # ── Step 4: Call Claude ───────────────────────────────────────────────────
@@ -360,6 +331,7 @@ async def run(
             system=research_prompts.SYSTEM_PROMPT,
             user=user_prompt,
             loop_id=loop_id,
+            temperature=settings.research_temperature,
         )
     except llm.LLMError as exc:
         logger.error("research[%s]: LLM call failed: %s", symbol, exc)
@@ -374,7 +346,17 @@ async def run(
         confidence = float(data.get("confidence", 0.0))
         # Clamp to [0.0, 1.0]
         confidence = max(0.0, min(1.0, confidence))
+        # Apply multi-timeframe confluence adjustment
+        if confluence:
+            raw_conf = confidence
+            confidence = max(0.0, min(1.0, confidence + confluence.confidence_adjustment))
+            if raw_conf != confidence:
+                logger.info(
+                    "research[%s]: confidence adjusted %.2f → %.2f (tier=%s)",
+                    symbol, raw_conf, confidence, confluence.tier.value,
+                )
         reasoning = str(data.get("reasoning", ""))
+        bear_case = str(data.get("bear_case", ""))
     except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
         logger.warning(
             "research[%s]: failed to parse LLM response: %s | raw=%r",
@@ -411,6 +393,7 @@ async def run(
             confidence=confidence,
             evidence=evidence,
             reasoning=reasoning,
+            bear_case=bear_case,
             as_of=as_of,
             prompt_version=settings.prompt_version,
         )
@@ -454,6 +437,7 @@ async def run(
                     "stoch_d": stoch_d,
                     "vwap": vwap_val,
                 },
+                "confluence": confluence.to_prompt_dict() if confluence else None,
             },
             prompt_version=settings.prompt_version,
         ),

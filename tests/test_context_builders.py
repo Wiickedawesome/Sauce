@@ -24,7 +24,11 @@ from sauce.core.schemas import (
     VetoPatternEntry,
     WeeklyPerformanceEntry,
 )
-from sauce.prompts.context import build_session_paragraph, build_strategic_paragraph
+from sauce.prompts.context import (
+    build_session_paragraph,
+    build_similar_trades_paragraph,
+    build_strategic_paragraph,
+)
 
 _NOW = datetime(2024, 6, 10, 14, 30, 0, tzinfo=timezone.utc)
 
@@ -641,3 +645,65 @@ class TestBuildStrategicParagraph:
         assert "Regime transition patterns:" in result
         assert "WARNING:" in result
         assert "Recent week (2024-W23):" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# build_similar_trades_paragraph
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildSimilarTradesParagraph:
+    def test_empty_returns_empty(self):
+        assert build_similar_trades_paragraph([]) == ""
+
+    def test_single_win(self):
+        trades = [
+            SetupPerformanceEntry(
+                setup_type="equity_trend_pullback",
+                symbol="SPY",
+                regime_at_entry="TRENDING_UP",
+                time_of_day_bucket="09:30-12:00",
+                win=True,
+                pnl=50.0,
+                hold_duration_minutes=30.0,
+                date="2025-06-01",
+            ),
+        ]
+        result = build_similar_trades_paragraph(trades)
+        assert "SIMILAR PAST TRADES (1 most relevant)" in result
+        assert "1W / 0L" in result
+        assert "WIN +50.00" in result
+        assert "SPY" in result
+        assert "equity_trend_pullback" in result
+
+    def test_mixed_outcomes(self):
+        trades = [
+            SetupPerformanceEntry(
+                setup_type="equity_trend_pullback", symbol="SPY",
+                regime_at_entry="TRENDING_UP", time_of_day_bucket="09:30-12:00",
+                win=True, pnl=50.0, hold_duration_minutes=30.0, date="2025-06-01",
+            ),
+            SetupPerformanceEntry(
+                setup_type="equity_trend_pullback", symbol="SPY",
+                regime_at_entry="VOLATILE", time_of_day_bucket="12:00-14:00",
+                win=False, pnl=-30.0, hold_duration_minutes=45.0, date="2025-06-02",
+            ),
+        ]
+        result = build_similar_trades_paragraph(trades)
+        assert "1W / 1L" in result
+        assert "WIN +50.00" in result
+        assert "LOSS -30.00" in result
+        assert "Avg P&L: +10.00" in result
+
+    def test_includes_regime_and_bucket(self):
+        trades = [
+            SetupPerformanceEntry(
+                setup_type="crypto_mean_reversion", symbol="BTC/USD",
+                regime_at_entry="VOLATILE", time_of_day_bucket="14:00-16:00",
+                win=True, pnl=200.0, hold_duration_minutes=60.0, date="2025-06-05",
+            ),
+        ]
+        result = build_similar_trades_paragraph(trades)
+        assert "VOLATILE" in result
+        assert "14:00-16:00" in result
+        assert "BTC/USD" in result

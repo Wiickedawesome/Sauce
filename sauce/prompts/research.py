@@ -92,7 +92,11 @@ def build_user_prompt(
     is_crypto: bool = False,
     session_context_text: str = "",
     strategic_context_text: str = "",
-    setup_result: dict | None = None,
+    setup_results: list[dict] | None = None,
+    positions: list[dict] | None = None,
+    multi_timeframe_context: dict | None = None,
+    confluence_result: dict | None = None,
+    similar_trades_text: str = "",
 ) -> str:
     """
     Build the grounded user prompt for the Research agent.
@@ -123,11 +127,12 @@ def build_user_prompt(
 
     payload = {
         "task": (
-            "You are auditing a pre-scored setup thesis presented in 'setup_result'. "
-            "Review the rule engine's evidence and either approve or reject the trade. "
-            "If the indicators cohere with the setup thesis, return the appropriate side "
+            "You are auditing one or more pre-scored setup theses presented in 'setup_results'. "
+            "Review the rule engine's evidence for each setup and decide which (if any) to approve. "
+            "If multiple setups passed, compare them — the strongest thesis should drive your decision. "
+            "If the indicators cohere with the thesis, return the appropriate side "
             "with calibrated confidence. If you find a genuine contradiction in the data, "
-            "return side='hold'. Do not generate trade ideas — only audit the one presented."
+            "return side='hold'. Do not generate trade ideas — only audit the ones presented."
         ),
         "timestamp_utc": timestamp_str,
         "prompt_version": prompt_version,
@@ -190,11 +195,26 @@ def build_user_prompt(
             ),
         },
         "asset_type": "crypto" if is_crypto else "equity",
-        "setup_result": setup_result,
+        "setup_results": setup_results,
+        "current_positions": (
+            {
+                "description": (
+                    "Open positions the system currently holds. Consider existing "
+                    "exposure when auditing: avoid recommending a buy if already long "
+                    "the same symbol, and factor unrealized P&L into conviction — "
+                    "a losing position may warrant caution while a winning one "
+                    "suggests the thesis is playing out."
+                ),
+                "positions": positions,
+            }
+            if positions
+            else None
+        ),
         "confidence_calibration": (
-            "If the setup thesis in 'setup_result' is sound and the indicators cohere "
-            "with it, approve with 0.55–0.80 confidence. A score near 100 with strong "
-            "soft bonuses warrants higher confidence (up to 0.80). If you find a genuine "
+            "If the strongest setup thesis in 'setup_results' is sound and the indicators "
+            "cohere with it, approve with 0.55–0.80 confidence. A score near 100 with strong "
+            "soft bonuses warrants higher confidence (up to 0.80). If multiple setups passed, "
+            "use the comparison to increase or decrease conviction. If you find a genuine "
             "contradiction (e.g., setup claims oversold but RSI is 75), reject with "
             "side='hold'. Do not hold because you are uncertain about your role — you are "
             "an auditor of pre-scored evidence. Values below 0.40 are treated as hold "
@@ -247,12 +267,54 @@ def build_user_prompt(
                 "Base ONLY on the indicators provided above. "
                 "Do not reference any external data."
             ),
+            "bear_case": (
+                "REQUIRED — 1 to 2 sentences. The strongest argument AGAINST this trade. "
+                "Play devil's advocate: what could go wrong? What contradicts the thesis? "
+                "If side='hold', state why the thesis failed. "
+                "This field combats confirmation bias in the auditor role."
+            ),
         },
+        "multi_timeframe_analysis": (
+            {
+                "description": (
+                    "Indicators computed across multiple timeframes (5m to 1d). "
+                    "Use this to validate the 30-min thesis: if higher timeframes "
+                    "agree, the signal is stronger. If they conflict, reduce confidence."
+                ),
+                **multi_timeframe_context,
+            }
+            if multi_timeframe_context
+            else None
+        ),
+        "confluence_scoring": (
+            {
+                "description": (
+                    "Weighted confluence score across all available timeframes. "
+                    "The signal tier (S1=strongest, S4=conflicting) reflects how well "
+                    "different timeframes agree.  Use this as a meta-signal: "
+                    "S1/S2 agreement should increase your conviction; "
+                    "S4 conflict should decrease it or push you toward hold."
+                ),
+                **confluence_result,
+            }
+            if confluence_result
+            else None
+        ),
     }
 
     if session_context_text:
         payload["session_memory"] = session_context_text
     if strategic_context_text:
         payload["strategic_memory"] = strategic_context_text
+    if similar_trades_text:
+        payload["past_trade_memory"] = {
+            "description": (
+                "The most similar past trades from strategic memory, ranked by "
+                "relevance (same symbol, regime, setup type). Use these outcomes "
+                "to calibrate your confidence: if similar setups consistently lost, "
+                "lower confidence; if they consistently won, the thesis has precedent."
+            ),
+            "similar_trades": similar_trades_text,
+        }
 
     return json.dumps(payload, indent=2)

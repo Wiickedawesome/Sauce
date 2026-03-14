@@ -153,6 +153,19 @@ async def run(
     except Exception as exc:  # noqa: BLE001
         logger.warning("ops[%s]: circuit-breaker check failed: %s", loop_id, exc)
 
+    # Anomaly 6: setup-level consecutive loss streak (Gap 7)
+    # Query strategic memory for per-setup-type loss streaks.
+    try:
+        _setup_loss_alerts = _check_setup_loss_streaks(
+            strategic_db_path=str(settings.strategic_memory_db_path),
+            max_consecutive_losses=5,
+        )
+        for alert_msg in _setup_loss_alerts:
+            anomalies.append(alert_msg)
+            logger.warning("ops[%s]: %s", loop_id, alert_msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ops[%s]: setup loss streak check failed: %s", loop_id, exc)
+
     # Send alert for any high-severity anomalies found this run.
     if anomalies:
         send_alert(
@@ -404,3 +417,38 @@ def _count_recent_loop_errors(
     except Exception as exc:  # noqa: BLE001
         logger.warning("ops: _count_recent_loop_errors failed: %s", exc)
         return 0
+
+
+def _check_setup_loss_streaks(
+    strategic_db_path: str,
+    max_consecutive_losses: int = 5,
+) -> list[str]:
+    """
+    Query strategic memory for per-setup-type consecutive loss streaks.
+
+    Returns a list of anomaly strings for any setup type with a loss streak
+    >= max_consecutive_losses.
+    """
+    from sauce.memory.db import SetupPerformanceRow, get_session as get_strategic_session
+
+    alerts: list[str] = []
+    session = get_strategic_session(strategic_db_path)
+    try:
+        # Get distinct setup types that have records
+        setup_types = session.query(SetupPerformanceRow.setup_type).distinct().all()
+        for (setup_type,) in setup_types:
+            rows = (
+                session.query(SetupPerformanceRow)
+                .filter(SetupPerformanceRow.setup_type == setup_type)
+                .order_by(SetupPerformanceRow.id.desc())
+                .limit(max_consecutive_losses)
+                .all()
+            )
+            if len(rows) >= max_consecutive_losses and all(not r.win for r in rows):
+                alerts.append(
+                    f"setup_loss_streak:{setup_type}:{max_consecutive_losses}"
+                )
+    finally:
+        session.close()
+
+    return alerts

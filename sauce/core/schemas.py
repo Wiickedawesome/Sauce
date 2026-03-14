@@ -81,6 +81,7 @@ class Signal(StrictModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
     evidence: Evidence
     reasoning: str = Field(default="", description="Claude's reasoning (for audit purposes)")
+    bear_case: str = Field(default="", description="Devil's advocate argument against the trade")
     as_of: datetime
     prompt_version: str
 
@@ -227,6 +228,7 @@ class AuditEvent(StrictModel):
         "validation_daily_check",
         "validation_passed",
         "validation_degradation",
+        "exit_signal_generated",
     ]
     symbol: str | None = None
     payload: dict = Field(default_factory=dict)  # serialised model or error detail
@@ -257,6 +259,27 @@ class PortfolioReview(StrictModel):
     uncovered_symbols: list[str] = Field(default_factory=list)
     as_of: datetime
     prompt_version: str
+
+
+# ── Exit Research Agent ───────────────────────────────────────────────────────
+
+class ExitSignal(StrictModel):
+    """Output of the exit research agent for a single open position."""
+
+    symbol: str
+    action: Literal["hold", "exit"]
+    reason: str
+    urgency: Literal["normal", "high"] = "normal"
+    as_of: datetime
+    prompt_version: str
+
+
+class PositionPeakPnL(StrictModel):
+    """Tracks the high-water mark of unrealized P&L for trailing stop logic."""
+
+    symbol: str
+    peak_unrealized_pnl: float
+    peak_at: datetime
 
 
 # ── Daily Stats ───────────────────────────────────────────────────────────────

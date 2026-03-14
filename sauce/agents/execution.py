@@ -1,36 +1,36 @@
 """
 agents/execution.py — Execution agent: translates an approved signal into an Order.
 
-Phase 5 IMPLEMENTATION.
+Phase 5 IMPLEMENTATION — Deterministic Engine (no LLM call).
 
 Sequence:
   1. Pre-condition checks: veto flag, qty > 0, side in {buy, sell}.
   2. Freshness re-check: quote must not be stale at this point.
   3. Price deviation check: if quote moved > max_price_deviation vs. evidence → abort.
-  4. Ask Claude for order-type and limit-price recommendation.
-  5. Sanity-check the returned limit price against the live bid/ask.
-  6. Construct and return a validated Order, or None on any failure.
+  4. Deterministic limit-price calculation from bid/ask spread.
+  5. Construct and return a validated Order, or None on any failure.
 
 Notes:
-  - NEVER places market orders. limit or stop_limit only.
+  - NEVER places market orders. limit only.
   - On ANY failure, logs a veto AuditEvent and returns None.
   - Returns None (not an exception) so the loop can continue with other symbols.
 """
 
-import json
 import logging
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
-from sauce.adapters import llm
 from sauce.adapters.db import log_event
 from sauce.core.config import get_settings
 from sauce.core.safety import is_data_fresh
 from sauce.core.schemas import AuditEvent, Order, PriceReference, RiskCheckResult, Signal
-from sauce.prompts import execution as execution_prompts
 
 logger = logging.getLogger(__name__)
+
+# Slight premium/discount from the top-of-book to improve fill probability
+# while keeping execution close to the market.
+_LIMIT_PRICE_OFFSET = 0.0005
 
 
 async def run(
@@ -40,7 +40,7 @@ async def run(
     loop_id: str,
 ) -> Order | None:
     """
-    Translate an approved signal into an Order.
+    Translate an approved signal into an Order using deterministic logic.
 
     Returns an Order if all checks pass, or None if any check fails.
 
@@ -96,99 +96,36 @@ async def run(
                 f"max_allowed={settings.max_price_deviation:.2%})"
             )
 
-    # ── Step 3: Ask Claude for order parameters ─────────────────────────────────
-    atr_14 = signal.evidence.indicators.atr_14
-    user_prompt = execution_prompts.build_user_prompt(
-        symbol=signal.symbol,
-        side=signal.side,
-        qty=risk_result.qty,
-        bid=quote.bid,
-        ask=quote.ask,
-        mid=quote.mid,
-        atr_14=atr_14,
-        signal_reasoning=signal.reasoning,
-        prompt_version=settings.prompt_version,
-        as_of_utc=as_of,
-    )
-
-    try:
-        raw_response = await llm.call_claude(
-            system=execution_prompts.SYSTEM_PROMPT,
-            user=user_prompt,
-            loop_id=loop_id,
-        )
-    except llm.LLMError as exc:
-        logger.error("execution[%s]: LLM call failed: %s", signal.symbol, exc)
-        return _abort(f"LLM error: {exc}")
-
-    # ── Step 4: Parse LLM response ─────────────────────────────────────────────
-    try:
-        data = json.loads(raw_response.strip())
-        order_type = str(data.get("order_type", "limit")).lower()
-        time_in_force = str(data.get("time_in_force", "day")).lower()
-        raw_limit_price: float | None = (
-            float(data["limit_price"]) if data.get("limit_price") is not None else None
-        )
-        raw_stop_price: float | None = (
-            float(data["stop_price"]) if data.get("stop_price") is not None else None
-        )
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
-        logger.warning(
-            "execution[%s]: failed to parse LLM response: %s | raw=%r",
-            signal.symbol, exc, raw_response[:200],
-        )
-        log_event(
-            AuditEvent(
-                loop_id=loop_id,
-                event_type="error",
-                symbol=signal.symbol,
-                payload={
-                    "agent": "execution",
-                    "error": f"JSON parse failed: {exc}",
-                    "raw_response_preview": raw_response[:200],
-                },
-                prompt_version=settings.prompt_version,
-            ),
-            db_path=db_path,
-        )
-        return _abort("LLM response parse error")
-
-    # ── Step 5: Sanity-check price ───────────────────────────────────────────────
-    # Limit price must stay within ±max_limit_price_premium of bid/ask (Finding 1.9).
-    # Default 0.1% keeps prices from straying far from the market while still
-    # tolerating tiny floating-point rounding in Claude's output.
-    limit_price = raw_limit_price
-    if limit_price is not None:
-        premium = settings.max_limit_price_premium
-        lo_bound = quote.bid * (1.0 - premium)
-        hi_bound = quote.ask * (1.0 + premium)
-        if not (lo_bound <= limit_price <= hi_bound):
-            logger.warning(
-                "execution[%s]: Claude limit_price %.4f out of sane range [%.4f, %.4f]; "
-                "falling back to bid/ask.",
-                signal.symbol, limit_price, lo_bound, hi_bound,
-            )
-            limit_price = quote.ask if signal.side == "buy" else quote.bid
+    # ── Step 3: Deterministic limit-price calculation ─────────────────────────
+    # Buy: slightly above ask to improve fill probability.
+    # Sell: slightly below bid for the same reason.
+    if signal.side == "buy":
+        limit_price = round(quote.ask * (1.0 + _LIMIT_PRICE_OFFSET), 4)
     else:
-        # Claude returned null — use ask for buys, bid for sells
+        limit_price = round(quote.bid * (1.0 - _LIMIT_PRICE_OFFSET), 4)
+
+    # Sanity-check: clamp within configurable premium band around bid/ask
+    premium = settings.max_limit_price_premium
+    lo_bound = quote.bid * (1.0 - premium)
+    hi_bound = quote.ask * (1.0 + premium)
+    if not (lo_bound <= limit_price <= hi_bound):
+        logger.warning(
+            "execution[%s]: calculated limit_price %.4f out of range [%.4f, %.4f]; "
+            "falling back to bid/ask.",
+            signal.symbol, limit_price, lo_bound, hi_bound,
+        )
         limit_price = quote.ask if signal.side == "buy" else quote.bid
 
-    # Validate order_type; only allow limit and stop_limit
-    if order_type not in ("limit", "stop_limit"):
-        order_type = "limit"
-    if time_in_force not in ("day", "gtc", "ioc", "fok"):
-        time_in_force = "day"
-
-    # ── Step 6: Construct validated Order ───────────────────────────────────────
+    # ── Step 4: Construct validated Order ───────────────────────────────────────
     try:
         order = Order(
             symbol=signal.symbol,
             side=signal.side,  # type: ignore[arg-type]
             qty=risk_result.qty,
-            order_type=order_type,  # type: ignore[arg-type]
-            time_in_force=time_in_force,  # type: ignore[arg-type]
+            order_type="limit",
+            time_in_force="day",
             limit_price=limit_price,
-            stop_price=raw_stop_price,
+            stop_price=None,
             as_of=as_of,
             prompt_version=settings.prompt_version,
         )
@@ -213,12 +150,11 @@ async def run(
             symbol=signal.symbol,
             payload={
                 "agent": "execution",
-                "order_type": order_type,
+                "order_type": "limit",
                 "side": signal.side,
                 "qty": risk_result.qty,
                 "limit_price": limit_price,
-                "stop_price": raw_stop_price,
-                "time_in_force": time_in_force,
+                "time_in_force": "day",
             },
             prompt_version=settings.prompt_version,
         ),

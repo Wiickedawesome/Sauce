@@ -88,6 +88,7 @@ async def _call_github_models(
     model: str,
     token: str,
     loop_id: str,
+    temperature: float = 0.3,
 ) -> str:
     """
     POST to the GitHub Models inference endpoint and return the response content.
@@ -107,7 +108,7 @@ async def _call_github_models(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.1,  # low temperature for consistent structured output
+        "temperature": temperature,
         "response_format": {"type": "json_object"},  # force valid JSON output
     }
 
@@ -201,6 +202,7 @@ async def _call_anthropic(
     model: str,
     api_key: str,
     loop_id: str,
+    temperature: float = 0.3,
 ) -> str:
     """
     Call Anthropic API using the official anthropic SDK.
@@ -235,6 +237,7 @@ async def _call_anthropic(
                 max_tokens=2048,
                 system=system,
                 messages=[{"role": "user", "content": user}],
+                temperature=temperature,
             )
             content = _strip_fences(message.content[0].text)  # type: ignore[index]
 
@@ -289,6 +292,7 @@ async def call_claude(
     user: str,
     loop_id: str = "unset",
     model: str | None = None,
+    temperature: float = 0.3,
 ) -> str:
     """
     Call Claude with a system + user prompt and return the raw string response.
@@ -324,6 +328,7 @@ async def call_claude(
             model=effective_model,
             token=settings.github_token,
             loop_id=loop_id,
+            temperature=temperature,
         )
 
     if settings.llm_provider == "anthropic":
@@ -335,6 +340,7 @@ async def call_claude(
             model=effective_model,
             api_key=settings.anthropic_api_key,
             loop_id=loop_id,
+            temperature=temperature,
         )
 
     raise LLMError(f"Unknown LLM_PROVIDER: {settings.llm_provider!r}")

@@ -24,6 +24,7 @@ from sauce.memory.db import (
     get_engine,
     get_session,
     get_session_context,
+    get_similar_trades,
     get_strategic_context,
     reset_session_memory_if_new_day,
     write_claude_calibration,
@@ -668,3 +669,105 @@ def test_get_strategic_context_regime_filter(tmp_strategic_db: str) -> None:
     ctx = get_strategic_context(tmp_strategic_db, regime="VOLATILE")
     assert len(ctx.setup_performance) == 1
     assert ctx.setup_performance[0].regime_at_entry == "VOLATILE"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIMILAR TRADES RETRIEVAL (RAG)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _write_perf(db: str, **overrides) -> None:
+    """Helper to write a SetupPerformanceEntry with defaults."""
+    defaults = dict(
+        setup_type="equity_trend_pullback",
+        symbol="SPY",
+        regime_at_entry="TRENDING_UP",
+        time_of_day_bucket="09:30-12:00",
+        win=True,
+        pnl=50.0,
+        hold_duration_minutes=30.0,
+        date="2025-06-01",
+    )
+    defaults.update(overrides)
+    write_setup_performance(SetupPerformanceEntry(**defaults), db)
+
+
+def test_get_similar_trades_empty_db(tmp_strategic_db: str) -> None:
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY")
+    assert result == []
+
+
+def test_get_similar_trades_exact_symbol(tmp_strategic_db: str) -> None:
+    _write_perf(tmp_strategic_db, symbol="SPY", date="2025-06-01")
+    _write_perf(tmp_strategic_db, symbol="AAPL", date="2025-06-02")
+
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY")
+    assert len(result) == 1
+    assert result[0].symbol == "SPY"
+
+
+def test_get_similar_trades_regime_widens_pool(tmp_strategic_db: str) -> None:
+    _write_perf(tmp_strategic_db, symbol="AAPL", regime_at_entry="VOLATILE", date="2025-06-01")
+    _write_perf(tmp_strategic_db, symbol="MSFT", regime_at_entry="TRENDING_UP", date="2025-06-02")
+
+    # Without regime, only exact symbol matches
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY")
+    assert len(result) == 0
+
+    # With regime, picks up AAPL which shares VOLATILE
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY", regime="VOLATILE")
+    assert len(result) == 1
+    assert result[0].symbol == "AAPL"
+
+
+def test_get_similar_trades_scores_correctly(tmp_strategic_db: str) -> None:
+    """Same symbol + same regime should rank higher than regime-only match."""
+    _write_perf(tmp_strategic_db, symbol="SPY", regime_at_entry="VOLATILE", date="2025-06-01")
+    _write_perf(tmp_strategic_db, symbol="AAPL", regime_at_entry="VOLATILE", date="2025-06-02")
+
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY", regime="VOLATILE")
+    assert len(result) == 2
+    # SPY match (score=3+2=5) ranks above AAPL match (score=0+2=2)
+    assert result[0].symbol == "SPY"
+    assert result[1].symbol == "AAPL"
+
+
+def test_get_similar_trades_setup_type_bonus(tmp_strategic_db: str) -> None:
+    _write_perf(tmp_strategic_db, symbol="SPY", setup_type="equity_trend_pullback", date="2025-06-01")
+    _write_perf(tmp_strategic_db, symbol="SPY", setup_type="crypto_mean_reversion", date="2025-06-02")
+
+    result = get_similar_trades(
+        tmp_strategic_db, symbol="SPY", setup_type="equity_trend_pullback",
+    )
+    assert len(result) == 2
+    # Both have symbol match (3), but first also has setup_type match (+1)
+    assert result[0].setup_type == "equity_trend_pullback"
+
+
+def test_get_similar_trades_top_k(tmp_strategic_db: str) -> None:
+    for i in range(10):
+        _write_perf(tmp_strategic_db, symbol="SPY", date=f"2025-06-{i+1:02d}")
+
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY", top_k=3)
+    assert len(result) == 3
+
+
+def test_get_similar_trades_recency_tiebreaker(tmp_strategic_db: str) -> None:
+    _write_perf(tmp_strategic_db, symbol="SPY", date="2025-06-01")
+    _write_perf(tmp_strategic_db, symbol="SPY", date="2025-06-10")
+
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY", top_k=2)
+    assert len(result) == 2
+    # Same score, so more recent date comes first
+    assert result[0].date == "2025-06-10"
+    assert result[1].date == "2025-06-01"
+
+
+def test_get_similar_trades_returns_pydantic_models(tmp_strategic_db: str) -> None:
+    _write_perf(tmp_strategic_db, symbol="SPY", pnl=42.5, win=True)
+
+    result = get_similar_trades(tmp_strategic_db, symbol="SPY")
+    assert len(result) == 1
+    assert isinstance(result[0], SetupPerformanceEntry)
+    assert result[0].pnl == 42.5
+    assert result[0].win is True

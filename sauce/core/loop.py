@@ -38,7 +38,8 @@ from typing import Any
 from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, place_order
 from sauce.adapters.db import OrderRow, has_recent_submitted_order, log_event, log_order
 from sauce.adapters.market_data import get_universe_snapshot
-from sauce.agents import execution, market_context, ops, portfolio, research, risk, session_boot, supervisor
+from sauce.agents import execution, exit_research, market_context, ops, portfolio, research, risk, session_boot, supervisor
+from sauce.agents.debate import run_debate
 from sauce.core.capital import detect_tier_transition, get_tier_parameters
 from sauce.core.config import get_settings
 from sauce.core.safety import (
@@ -51,6 +52,8 @@ from sauce.core.safety import (
 from sauce.core.schemas import (
     AuditEvent,
     BootContext,
+    ExitSignal,
+    Indicators,
     MarketContext,
     Order,
     PortfolioReview,
@@ -58,11 +61,60 @@ from sauce.core.schemas import (
     Signal,
     SupervisorDecision,
 )
+from sauce.memory.learning import record_trade_outcome
 
 logger = logging.getLogger(__name__)
 
 # Graceful shutdown: set by SIGTERM/SIGINT handler, checked between pipeline stages.
 _shutdown_requested = False
+
+# Track open positions across loop iterations to detect closures.
+# Maps normalized symbol → last-seen position dict snapshot.
+_previous_positions: dict[str, dict[str, Any]] = {}
+
+
+def _detect_closed_positions(
+    current_positions: list[dict[str, Any]],
+    loop_id: str,
+    regime: str,
+    db_path: str,
+) -> None:
+    """Compare current positions with previous snapshot and record outcomes for closures."""
+    global _previous_positions  # noqa: PLW0603
+    from sauce.core.schemas import SetupPerformanceEntry
+
+    current_symbols = {
+        _canonicalize_symbol(str(p.get("symbol", ""))): p
+        for p in current_positions
+    }
+
+    for sym, prev in _previous_positions.items():
+        if sym not in current_symbols:
+            # Position was closed since last loop
+            pnl = float(prev.get("unrealized_pl", 0.0))
+            try:
+                entry = SetupPerformanceEntry(
+                    setup_type="equity_trend_pullback",  # best-effort default
+                    symbol=sym,
+                    regime_at_entry=regime or "unknown",  # type: ignore[arg-type]
+                    time_of_day_bucket=datetime.now(timezone.utc).strftime("%H:00"),
+                    win=pnl > 0,
+                    pnl=round(pnl, 2),
+                    hold_duration_minutes=0.0,  # unknown from position data alone
+                    date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                )
+                record_trade_outcome(entry, db_path)
+                logger.info(
+                    "Recorded closed position outcome: %s pnl=%.2f win=%s [loop_id=%s]",
+                    sym, pnl, pnl > 0, loop_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to record trade outcome for %s: %s [loop_id=%s]",
+                    sym, exc, loop_id,
+                )
+
+    _previous_positions = current_symbols
 
 
 def _canonicalize_symbol(symbol: str) -> str:
@@ -289,6 +341,14 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         ))
         return
 
+    # Detect positions closed since last loop and record trade outcomes (Gap 4).
+    _detect_closed_positions(
+        positions,
+        loop_id=loop_id,
+        regime=mkt_ctx.regime.regime_type,
+        db_path=str(settings.db_path),
+    )
+
     # ── Step 4: Universe quote snapshot ──────────────────────────────────────
     try:
         quotes = await asyncio.to_thread(get_universe_snapshot, settings.full_universe)
@@ -387,6 +447,31 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                         "reasoning": signal.reasoning[:200],  # truncate for DB
                     },
                 ))
+
+    # ── Step 5b: Bull/Bear debate — deterministic opposing analysis ───────────
+    debate_results: dict[str, object] = {}  # symbol → DebateResult
+    for signal in signals:
+        if signal.side == "hold":
+            continue
+        if signal.confidence < settings.min_confidence:
+            continue
+        try:
+            debate = run_debate(signal)
+            debate_results[signal.symbol] = debate
+            log_event(AuditEvent(
+                loop_id=loop_id,
+                event_type="debate",
+                symbol=signal.symbol,
+                payload={
+                    "verdict": debate.verdict,
+                    "bull_score": debate.bull_score,
+                    "bear_score": debate.bear_score,
+                    "confidence_adjustment": debate.confidence_adjustment,
+                    "summary": debate.summary()[:300],
+                },
+            ))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Debate failed for %s [loop_id=%s]: %s", signal.symbol, loop_id, exc)
 
     # ── Step 6: Risk agent — checks per actionable signal ────────────────────
     risk_results: list[RiskCheckResult] = []
@@ -561,6 +646,80 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
             payload={"stage": "portfolio", "error": str(exc)},
         ))
 
+    # ── Step 8b: Exit research — evaluate open positions for exits ──────────
+    # Runs after portfolio review so we have context, before supervisor so exit
+    # orders go through the same approval gate as buy orders.
+    exit_orders: list[Order] = []
+    if positions:
+        signal_by_sym_upper: dict[str, Signal] = {
+            s.symbol.upper(): s for s in signals
+        }
+        for pos in positions:
+            pos_symbol = str(pos.get("symbol", "")).upper()
+            pos_qty = float(pos.get("qty") or 0.0)
+            if pos_qty <= 0:
+                continue  # skip zero or short positions (no short selling yet)
+
+            pos_quote = quotes.get(pos_symbol)
+            if pos_quote is None:
+                continue
+
+            # Extract indicators from this run's signal if available
+            sig = signal_by_sym_upper.get(pos_symbol)
+            pos_indicators = sig.evidence.indicators if sig else Indicators()
+
+            try:
+                exit_sig: ExitSignal = await exit_research.run(
+                    position=pos,
+                    quote=pos_quote,
+                    indicators=pos_indicators,
+                    regime=mkt_ctx.regime.regime_type,
+                    loop_id=loop_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Exit research failed for %s [loop_id=%s]: %s",
+                    pos_symbol, loop_id, exc,
+                )
+                log_event(AuditEvent(
+                    loop_id=loop_id,
+                    event_type="error",
+                    symbol=pos_symbol,
+                    payload={"stage": "exit_research", "error": str(exc)},
+                ))
+                continue
+
+            if exit_sig.action == "exit":
+                # Build a market sell order for the full position
+                _exit_order = Order(
+                    symbol=pos_symbol,
+                    side="sell",
+                    qty=pos_qty,
+                    order_type="limit",
+                    time_in_force="day",
+                    limit_price=pos_quote.bid,
+                    as_of=exit_sig.as_of,
+                    prompt_version=exit_sig.prompt_version,
+                )
+                exit_orders.append(_exit_order)
+                log_event(AuditEvent(
+                    loop_id=loop_id,
+                    event_type="order",
+                    symbol=pos_symbol,
+                    payload={
+                        "side": "sell",
+                        "qty": pos_qty,
+                        "order_type": "limit",
+                        "limit_price": pos_quote.bid,
+                        "source": "exit_research",
+                        "exit_reason": exit_sig.reason,
+                        "exit_urgency": exit_sig.urgency,
+                    },
+                ))
+
+    # Merge exit orders into the main orders list for supervisor approval
+    orders.extend(exit_orders)
+
     # ── Step 9: Supervisor — final arbitration ────────────────────────────────
     decision: SupervisorDecision = _make_abort_decision(
         reason="Supervisor not yet called",
@@ -575,6 +734,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
             account=account,
             loop_id=loop_id,
             portfolio_review=portfolio_review,
+            debate_results=debate_results,
         )
     except Exception as exc:
         logger.error("Supervisor failed [loop_id=%s]: %s", loop_id, exc)

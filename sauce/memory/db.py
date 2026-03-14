@@ -36,6 +36,7 @@ from sauce.core.schemas import (
     ClaudeCalibrationEntry,
     IntradayNarrativeEntry,
     MarketRegime,
+    PositionPeakPnL,
     RegimeLogEntry,
     RegimeTransitionEntry,
     SessionContext,
@@ -136,6 +137,18 @@ class SymbolCharacterRow(SessionBase):
     signal_count_today: int = Column(Integer, nullable=False, default=0)
     direction_consistency: float = Column(Float, nullable=False, default=0.0)
     last_signal_result: str = Column(String(10), nullable=False, default="none")
+
+
+class PositionPeakPnLRow(SessionBase):
+    """High-water mark of unrealized P&L per symbol for trailing stop logic."""
+
+    __tablename__ = "position_peak_pnl"
+    __table_args__ = (UniqueConstraint("symbol", name="uq_position_peak_pnl"),)
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    symbol: str = Column(String(20), nullable=False, index=True)
+    peak_unrealized_pnl: float = Column(Float, nullable=False, default=0.0)
+    peak_at: datetime = Column(DateTime, nullable=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -285,6 +298,7 @@ def _ensure_unique_indexes(engine: Engine, db_path: str) -> None:
     if "session_memory" in db_path:
         indexes = [
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_symbol_character ON symbol_character (symbol)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_position_peak_pnl ON position_peak_pnl (symbol)",
         ]
     elif "strategic_memory" in db_path:
         indexes = [
@@ -337,6 +351,7 @@ def reset_session_memory_if_new_day(db_path: str) -> bool:
             TradeLogRow,
             IntradayNarrativeRow,
             SymbolCharacterRow,
+            PositionPeakPnLRow,
         ]:
             session.query(table_cls).delete()
         session.commit()
@@ -465,6 +480,56 @@ def write_symbol_character(entry: SymbolCharacterEntry, db_path: str) -> None:
         session.rollback()
         logger.critical("Failed to write symbol_character for %s: %s", entry.symbol, exc)
         print(f"[memory_db] CRITICAL: symbol_character write failed: {exc}", file=sys.stderr)
+    finally:
+        session.close()
+
+
+def write_peak_pnl(entry: PositionPeakPnL, db_path: str) -> None:
+    """Upsert the high-water mark of unrealized P&L for a symbol."""
+    session = get_session(db_path)
+    try:
+        stmt = sqlite_insert(PositionPeakPnLRow).values(
+            symbol=entry.symbol,
+            peak_unrealized_pnl=entry.peak_unrealized_pnl,
+            peak_at=entry.peak_at,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["symbol"],
+            set_={
+                "peak_unrealized_pnl": stmt.excluded.peak_unrealized_pnl,
+                "peak_at": stmt.excluded.peak_at,
+            },
+        )
+        session.execute(stmt)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.critical("Failed to write peak_pnl for %s: %s", entry.symbol, exc)
+        print(f"[memory_db] CRITICAL: peak_pnl write failed: {exc}", file=sys.stderr)
+    finally:
+        session.close()
+
+
+def get_peak_pnl(symbol: str, db_path: str) -> PositionPeakPnL | None:
+    """Read the peak P&L record for a symbol, or None if not tracked yet."""
+    session = get_session(db_path)
+    try:
+        row = (
+            session.query(PositionPeakPnLRow)
+            .filter(PositionPeakPnLRow.symbol == symbol)
+            .first()
+        )
+        if row is None:
+            return None
+        return PositionPeakPnL(
+            symbol=row.symbol,
+            peak_unrealized_pnl=row.peak_unrealized_pnl,
+            peak_at=_ensure_utc(row.peak_at),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.critical("Failed to read peak_pnl for %s: %s", symbol, exc)
+        print(f"[memory_db] CRITICAL: peak_pnl read failed: {exc}", file=sys.stderr)
+        return None
     finally:
         session.close()
 
@@ -839,5 +904,78 @@ def get_strategic_context(
             claude_calibration=claude_calibration,
             as_of=now,
         )
+    finally:
+        session.close()
+
+
+def get_similar_trades(
+    db_path: str,
+    symbol: str,
+    regime: str | None = None,
+    setup_type: str | None = None,
+    top_k: int = 5,
+) -> list[SetupPerformanceEntry]:
+    """
+    Retrieve the most relevant past trades for RAG-style context injection.
+
+    Scoring heuristic (higher = more relevant):
+      - Same symbol:     +3
+      - Same regime:     +2
+      - Same setup_type: +1
+
+    Returns at most *top_k* entries, sorted by relevance then recency.
+    """
+    session = get_session(db_path)
+    try:
+        # Fetch candidates: same symbol OR same regime (at least one must match)
+        query = session.query(SetupPerformanceRow)
+        if regime is not None:
+            query = query.filter(
+                (SetupPerformanceRow.symbol == symbol)
+                | (SetupPerformanceRow.regime_at_entry == regime)
+            )
+        else:
+            query = query.filter(SetupPerformanceRow.symbol == symbol)
+
+        # Limit to a reasonable candidate pool before scoring
+        rows = query.order_by(SetupPerformanceRow.date.desc()).limit(200).all()
+
+        if not rows:
+            return []
+
+        # Score and sort
+        scored: list[tuple[int, str, SetupPerformanceRow]] = []
+        for row in rows:
+            score = 0
+            if row.symbol == symbol:
+                score += 3
+            if regime is not None and row.regime_at_entry == regime:
+                score += 2
+            if setup_type is not None and row.setup_type == setup_type:
+                score += 1
+            scored.append((score, row.date, row))
+
+        # Sort by score desc, then date desc
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+        results: list[SetupPerformanceEntry] = []
+        for _, _, row in scored[:top_k]:
+            results.append(
+                SetupPerformanceEntry(
+                    setup_type=row.setup_type,
+                    symbol=row.symbol,
+                    regime_at_entry=row.regime_at_entry,
+                    time_of_day_bucket=row.time_of_day_bucket,
+                    win=row.win,
+                    pnl=row.pnl,
+                    hold_duration_minutes=row.hold_duration_minutes,
+                    date=row.date,
+                )
+            )
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.critical("Failed to get_similar_trades for %s: %s", symbol, exc)
+        print(f"[memory_db] CRITICAL: get_similar_trades failed: {exc}", file=sys.stderr)
+        return []
     finally:
         session.close()

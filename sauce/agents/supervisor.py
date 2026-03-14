@@ -42,6 +42,7 @@ async def run(
     account: dict,
     loop_id: str,
     portfolio_review: PortfolioReview | None = None,
+    debate_results: dict[str, object] | None = None,
 ) -> SupervisorDecision:
     """
     Perform pre-flight checks then ask Claude for a final execute/abort decision.
@@ -124,11 +125,14 @@ async def run(
         )
 
     # ── Pre-flight 4: Risk approval for each order ─────────────────────────────
+    # Sell orders from exit_research bypass the research→risk pipeline, so they
+    # don't require a matching RiskCheckResult. Only buy orders must have one.
     approved_risk: dict[str, RiskCheckResult] = {
         r.symbol.upper(): r for r in risk_results if not r.veto
     }
     unapproved: list[str] = [
-        o.symbol for o in orders if o.symbol.upper() not in approved_risk
+        o.symbol for o in orders
+        if o.side == "buy" and o.symbol.upper() not in approved_risk
     ]
     if unapproved:
         return _abort(
@@ -173,6 +177,14 @@ async def run(
         for s in signals
         if s.side != "hold"
     ]
+    # Build debate summaries for symbols that had a debate
+    debate_summaries: dict[str, str] | None = None
+    if debate_results:
+        debate_summaries = {}
+        for sym, debate in debate_results.items():
+            if hasattr(debate, "summary"):
+                debate_summaries[sym] = debate.summary()
+
     user_prompt = supervisor_prompts.build_user_prompt(
         orders=orders_dicts,
         signals_summary=signals_summary,
@@ -180,6 +192,7 @@ async def run(
         prompt_version=settings.prompt_version,
         as_of_utc=as_of,
         portfolio_review=portfolio_review.model_dump(mode="json") if portfolio_review else None,
+        debate_summaries=debate_summaries,
     )
 
     try:
@@ -187,6 +200,7 @@ async def run(
             system=supervisor_prompts.SYSTEM_PROMPT,
             user=user_prompt,
             loop_id=loop_id,
+            temperature=settings.supervisor_temperature,
         )
     except llm.LLMError as exc:
         logger.error("supervisor: LLM call failed: %s", exc)

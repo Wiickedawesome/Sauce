@@ -66,6 +66,7 @@ def build_user_prompt(
     prompt_version: str,
     as_of_utc: datetime,
     portfolio_review: dict | None = None,
+    debate_summaries: dict[str, str] | None = None,
 ) -> str:
     """
     Build the grounded user prompt for the Supervisor agent.
@@ -109,6 +110,9 @@ def build_user_prompt(
         },
         "proposed_orders": orders,
         "signals_context": signals_summary,
+        "bull_bear_debate": (
+            debate_summaries if debate_summaries else None
+        ),
         "portfolio_review_summary": (
             {
                 "total_exposure_pct": portfolio_review.get("total_exposure_pct"),
@@ -123,12 +127,14 @@ def build_user_prompt(
             else None
         ),
         "approval_criteria": [
-            "Every order has a matching approved signal with confidence >= 0.40.",
+            "Every BUY order has a matching approved signal with confidence >= 0.40.",
+            "SELL orders from exit research do not need a matching signal — they are rule-based exits.",
             "Total buy value of all orders is below buying_power.",
             "No order has a limit price deviating more than 5% from the signal's mid price.",
             "No order is for side='hold' (those should not reach the Supervisor).",
             "The account equity is healthy (not near the daily loss limit).",
             "Do NOT reject orders based on disagreement with the trading strategy.",
+            "Do NOT reject sell orders that are closing existing positions.",
         ],
         "output_schema": {
             "description": "Return ONLY this JSON object. No other text.",

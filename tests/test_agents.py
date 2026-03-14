@@ -13,6 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from sauce.signals.timeframes import MultiTimeframeContext
+
+# Patch target for fetch_multi_timeframe returning no analyses (no confidence adjustment).
+_PATCH_NO_MTF = patch(
+    "sauce.agents.research.fetch_multi_timeframe",
+    return_value=MultiTimeframeContext(symbol="X"),
+)
+
 import pandas as pd
 import pytest
 
@@ -303,6 +311,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.llm") as mock_llm,
             patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
+            _PATCH_NO_MTF,
         ):
             md.get_history.return_value = _make_ohlcv(60)
             mock_llm.call_claude = AsyncMock(return_value=claude_response)
@@ -331,6 +340,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.llm") as mock_llm,
             patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
+            _PATCH_NO_MTF,
         ):
             md.get_history.return_value = _make_ohlcv(60)
             mock_llm.LLMError = _FakeLLMError
@@ -354,6 +364,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.llm") as mock_llm,
             patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
+            _PATCH_NO_MTF,
         ):
             md.get_history.return_value = _make_ohlcv(60)
             mock_llm.LLMError = Exception
@@ -379,6 +390,7 @@ class TestResearchAgent:
             patch("sauce.agents.research.llm") as mock_llm,
             patch("sauce.agents.research.scan_setups", return_value=[_passing_mock_setup()]),
             patch("sauce.agents.research.log_event"),
+            _PATCH_NO_MTF,
         ):
             md.get_history.return_value = _make_ohlcv(60)
             mock_llm.LLMError = Exception
@@ -577,8 +589,8 @@ class TestExecutionAgent:
 
         assert result is None
 
-    def test_calls_claude_returns_order(self, tmp_path: Path) -> None:
-        """Full flow: checks pass + Claude returns valid params → Order."""
+    def test_deterministic_buy_order(self, tmp_path: Path) -> None:
+        """Full flow: all checks pass → deterministic limit order for buy."""
         from sauce.agents import execution
 
         settings = _mock_settings(tmp_path)
@@ -586,22 +598,11 @@ class TestExecutionAgent:
         risk_r = _approved_risk(qty=5.0)
         live_quote = _fresh_quote(bid=99.5, ask=100.5, mid=100.0)
 
-        claude_response = json.dumps(
-            {
-                "order_type": "limit",
-                "time_in_force": "day",
-                "limit_price": 100.0,
-                "stop_price": None,
-            }
-        )
         with (
             patch("sauce.agents.execution.get_settings", return_value=settings),
             patch("sauce.agents.execution.log_event"),
             patch("sauce.agents.execution.is_data_fresh", return_value=True),
-            patch("sauce.agents.execution.llm") as mock_llm,
         ):
-            mock_llm.LLMError = Exception
-            mock_llm.call_claude = AsyncMock(return_value=claude_response)
             result = asyncio.run(
                 execution.run(sig, risk_r, live_quote, loop_id="test-loop")
             )
@@ -610,63 +611,36 @@ class TestExecutionAgent:
         assert isinstance(result, Order)
         assert result.order_type == "limit"
         assert result.qty == pytest.approx(5.0)
+        # buy limit = ask * (1 + 0.0005)
+        expected_limit = round(100.5 * 1.0005, 4)
+        assert result.limit_price == pytest.approx(expected_limit)
+        assert result.time_in_force == "day"
+        assert result.stop_price is None
 
-    def test_returns_none_on_llm_error(self, tmp_path: Path) -> None:
+    def test_deterministic_sell_order(self, tmp_path: Path) -> None:
+        """Sell side → limit price slightly below bid."""
         from sauce.agents import execution
 
-        class _FakeLLMError(Exception):
-            pass
-
         settings = _mock_settings(tmp_path)
-        sig = _buy_signal(quote=_fresh_quote(mid=100.0))
-        risk_r = _approved_risk()
-        live_quote = _fresh_quote(mid=100.0)
+        sig = _buy_signal(confidence=0.8, quote=_fresh_quote(mid=100.0))
+        sig = sig.model_copy(update={"side": "sell"})
+        risk_r = _approved_risk(qty=3.0)
+        live_quote = _fresh_quote(bid=99.5, ask=100.5, mid=100.0)
 
         with (
             patch("sauce.agents.execution.get_settings", return_value=settings),
             patch("sauce.agents.execution.log_event"),
             patch("sauce.agents.execution.is_data_fresh", return_value=True),
-            patch("sauce.agents.execution.llm") as mock_llm,
         ):
-            mock_llm.LLMError = _FakeLLMError
-            mock_llm.call_claude = AsyncMock(side_effect=_FakeLLMError("timeout"))
-            result = asyncio.run(
-                execution.run(sig, risk_r, live_quote, loop_id="test-loop")
-            )
-
-        assert result is None
-
-    def test_limit_price_fallback_on_out_of_range(self, tmp_path: Path) -> None:
-        """Claude limit price wildly out of range → falls back to ask (buy)."""
-        from sauce.agents import execution
-
-        settings = _mock_settings(tmp_path)
-        sig = _buy_signal(quote=_fresh_quote(mid=100.0))
-        risk_r = _approved_risk()
-        live_quote = _fresh_quote(bid=99.0, ask=101.0, mid=100.0)
-
-        claude_response = json.dumps(
-            {
-                "order_type": "limit",
-                "time_in_force": "day",
-                "limit_price": 500.0,  # out of range
-                "stop_price": None,
-            }
-        )
-        with (
-            patch("sauce.agents.execution.get_settings", return_value=settings),
-            patch("sauce.agents.execution.log_event"),
-            patch("sauce.agents.execution.is_data_fresh", return_value=True),
-            patch("sauce.agents.execution.llm") as mock_llm,
-        ):
-            mock_llm.LLMError = Exception
-            mock_llm.call_claude = AsyncMock(return_value=claude_response)
             result = asyncio.run(
                 execution.run(sig, risk_r, live_quote, loop_id="test-loop")
             )
 
         assert result is not None
-        assert result.limit_price == pytest.approx(101.0)  # fallback to ask
+        assert result.side == "sell"
+        # sell limit = bid * (1 - 0.0005)
+        expected_limit = round(99.5 * (1.0 - 0.0005), 4)
+        assert result.limit_price == pytest.approx(expected_limit)
 
 
 # ─── Supervisor agent ─────────────────────────────────────────────────────────
