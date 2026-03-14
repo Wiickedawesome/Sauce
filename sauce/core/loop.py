@@ -687,8 +687,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                             str(_ts_val).replace("Z", "+00:00")
                         )
                     except (ValueError, TypeError):
-                        pass
-                    break
+                        pass  # Unparseable timestamp — entry_time stays None; exit_research handles it
 
             try:
                 exit_sig: ExitSignal = await exit_research.run(
