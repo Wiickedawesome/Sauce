@@ -67,7 +67,12 @@ class ConfluenceResult:
 
 
 def _vote(trend: str, momentum: str) -> float:
-    """Convert trend+momentum into a directional vote: +1, -1, or 0."""
+    """Convert trend+momentum into a directional vote: +1, -1, or 0.
+
+    Any string that is not "bullish" or "bearish" (including "neutral" and
+    "unknown") maps to 0.0. This is intentional: unknown/neutral signals
+    contribute no directional bias, keeping the weighted score conservative.
+    """
     t_score = {"bullish": 1.0, "bearish": -1.0}.get(trend, 0.0)
     m_score = {"bullish": 1.0, "bearish": -1.0}.get(momentum, 0.0)
     # Average of trend and momentum

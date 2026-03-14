@@ -182,8 +182,6 @@ def log_event(event: AuditEvent, db_path: str | None = None) -> None:
             "DB write FAILED for AuditEvent [loop_id=%s event_type=%s]: %s",
             event.loop_id, event.event_type, exc,
         )
-        import sys
-        print(f"[db] CRITICAL: failed to write AuditEvent: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -299,8 +297,7 @@ def upsert_daily_stats(
         row.updated_at = datetime.now(timezone.utc)
         session.commit()
     except Exception as exc:  # noqa: BLE001
-        import sys
-        print(f"[db] CRITICAL: upsert_daily_stats failed: {exc}", file=sys.stderr)
+        logger.critical("upsert_daily_stats failed: %s", exc)
     finally:
         session.close()
 
@@ -481,7 +478,7 @@ def get_supervisor_abort_rate(
                 elif action == "execute":
                     executes += 1
             except (json.JSONDecodeError, AttributeError):
-                pass
+                pass  # Malformed payload row — skip and continue counting
         return {
             "total_decisions": total,
             "aborts": aborts,

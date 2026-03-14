@@ -215,7 +215,7 @@ async def run(
             else:
                 total_existing_exposure += abs(market_value)
         except (TypeError, ValueError):
-            pass
+            pass  # Unparseable position value — skip this position in exposure sum (conservative)
 
     max_exposure_value = equity * settings.max_portfolio_exposure
     proposed_addition = min(remaining_capacity, equity * effective_max_position_pct)

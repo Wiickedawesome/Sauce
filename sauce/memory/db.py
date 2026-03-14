@@ -10,7 +10,6 @@ Rules:
 """
 
 import logging
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -361,7 +360,6 @@ def reset_session_memory_if_new_day(db_path: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to reset session memory: %s", exc)
-        print(f"[memory_db] CRITICAL: session reset failed: {exc}", file=sys.stderr)
         return False
     finally:
         session.close()
@@ -389,7 +387,6 @@ def write_regime_log(entry: RegimeLogEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write regime_log: %s", exc)
-        print(f"[memory_db] CRITICAL: regime_log write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -411,7 +408,6 @@ def write_signal_log(entry: SignalLogEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write signal_log: %s", exc)
-        print(f"[memory_db] CRITICAL: signal_log write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -433,7 +429,6 @@ def write_trade_log(entry: TradeLogEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write trade_log: %s", exc)
-        print(f"[memory_db] CRITICAL: trade_log write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -451,7 +446,6 @@ def write_narrative(entry: IntradayNarrativeEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write intraday_narrative: %s", exc)
-        print(f"[memory_db] CRITICAL: narrative write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -479,7 +473,6 @@ def write_symbol_character(entry: SymbolCharacterEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write symbol_character for %s: %s", entry.symbol, exc)
-        print(f"[memory_db] CRITICAL: symbol_character write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -505,7 +498,6 @@ def write_peak_pnl(entry: PositionPeakPnL, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write peak_pnl for %s: %s", entry.symbol, exc)
-        print(f"[memory_db] CRITICAL: peak_pnl write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -528,7 +520,6 @@ def get_peak_pnl(symbol: str, db_path: str) -> PositionPeakPnL | None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.critical("Failed to read peak_pnl for %s: %s", symbol, exc)
-        print(f"[memory_db] CRITICAL: peak_pnl read failed: {exc}", file=sys.stderr)
         return None
     finally:
         session.close()
@@ -555,7 +546,6 @@ def write_setup_performance(entry: SetupPerformanceEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write setup_performance: %s", exc)
-        print(f"[memory_db] CRITICAL: setup_performance write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -582,7 +572,6 @@ def write_regime_transition(entry: RegimeTransitionEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write regime_transition: %s", exc)
-        print(f"[memory_db] CRITICAL: regime_transition write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -609,7 +598,6 @@ def write_veto_pattern(entry: VetoPatternEntry, db_path: str) -> None:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write veto_pattern: %s", exc)
-        print(f"[memory_db] CRITICAL: veto_pattern write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -640,7 +628,6 @@ def write_weekly_performance(entry: WeeklyPerformanceEntry, db_path: str) -> Non
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write weekly_performance: %s", exc)
-        print(f"[memory_db] CRITICAL: weekly_performance write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -671,7 +658,6 @@ def write_symbol_behavior(entry: SymbolLearnedBehaviorEntry, db_path: str) -> No
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write symbol_behavior for %s: %s", entry.symbol, exc)
-        print(f"[memory_db] CRITICAL: symbol_behavior write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -691,7 +677,6 @@ def write_claude_calibration(entry: ClaudeCalibrationEntry, db_path: str) -> Non
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.critical("Failed to write claude_calibration: %s", exc)
-        print(f"[memory_db] CRITICAL: claude_calibration write failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -975,7 +960,6 @@ def get_similar_trades(
         return results
     except Exception as exc:  # noqa: BLE001
         logger.critical("Failed to get_similar_trades for %s: %s", symbol, exc)
-        print(f"[memory_db] CRITICAL: get_similar_trades failed: {exc}", file=sys.stderr)
         return []
     finally:
         session.close()

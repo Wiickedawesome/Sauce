@@ -17,7 +17,6 @@ Write helpers NEVER raise — on DB error, log critical + print to stderr.
 
 import logging
 import math
-import sys
 from datetime import datetime, timezone
 
 from sqlalchemy import func
@@ -301,7 +300,6 @@ def _save_validation_result(
         session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.critical("Failed to save validation result: %s", exc)
-        print(f"[validation] CRITICAL: save failed: {exc}", file=sys.stderr)
     finally:
         session.close()
 
@@ -331,7 +329,6 @@ def run_validation(
         results["calibration"] = check_claude_calibration(strategic_db_path)
     except Exception as exc:  # noqa: BLE001
         logger.critical("Validation criteria evaluation failed: %s", exc)
-        print(f"[validation] CRITICAL: criteria eval failed: {exc}", file=sys.stderr)
         return {"error": str(exc), "all_passed": False, "consecutive_days": 0}
 
     all_passed = all(passed for passed, _ in results.values())

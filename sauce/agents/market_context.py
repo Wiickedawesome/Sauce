@@ -80,17 +80,13 @@ def _compute_spy_indicators(spy_df: pd.DataFrame) -> Indicators:
         if vol_mean > 0:
             volume_ratio = float(volume.iloc[-1]) / vol_mean
     except (TypeError, ValueError, IndexError):
-        pass
-
-    # Volume 1-day average
+        pass  # Insufficient volume data — leave volume_ratio as None
     estimated_days = max(len(spy_df) / _BARS_PER_DAY_EQUITY, 1.0)
     volume_1d_avg: float | None = None
     try:
         volume_1d_avg = float(volume.sum()) / estimated_days
     except (TypeError, ValueError):
-        pass
-
-    # MACD
+        pass  # Empty or non-numeric volume series — leave volume_1d_avg as None
     macd_line: float | None = None
     macd_signal: float | None = None
     macd_histogram: float | None = None
