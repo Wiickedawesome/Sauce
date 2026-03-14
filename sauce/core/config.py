@@ -175,6 +175,30 @@ class Settings(BaseSettings):
                     "at the start of each loop run. Default 30 (one cron cycle).",
     )
 
+    # ── Screener ──────────────────────────────────────────────────────────────
+    screener_enabled: bool = Field(
+        default=False,
+        description="Enable dynamic equity screening from the full Alpaca market. "
+                    "When True, the screener runs at the start of each loop to find "
+                    "the top-N equity candidates. Crypto uses the .env list as-is.",
+    )
+    screener_max_candidates: int = Field(
+        default=30, ge=1,
+        description="Maximum number of equity symbols the screener passes to research.",
+    )
+    screener_min_dollar_volume: float = Field(
+        default=5_000_000.0, ge=0.0,
+        description="Minimum estimated daily dollar volume to qualify for screening.",
+    )
+    screener_price_min: float = Field(
+        default=5.0, ge=0.0,
+        description="Minimum last-trade price for screener eligibility.",
+    )
+    screener_price_max: float = Field(
+        default=5000.0, ge=0.0,
+        description="Maximum last-trade price for screener eligibility.",
+    )
+
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = Field(default="data/sauce.db")
     session_memory_db_path: str = Field(default="data/session_memory.db")

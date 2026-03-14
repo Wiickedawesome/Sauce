@@ -268,6 +268,84 @@ def _crypto_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     return result
 
 
+def get_active_equity_assets() -> list[dict[str, Any]]:
+    """
+    Fetch all active, tradeable US equity assets from Alpaca.
+
+    Returns a list of dicts with keys: symbol, name, exchange, status, tradable.
+    Uses the TradingClient (1 API call).
+    """
+    from alpaca.trading.client import TradingClient  # type: ignore[import-untyped]
+    from alpaca.trading.requests import GetAssetsRequest  # type: ignore[import-untyped]
+    from alpaca.trading.enums import AssetClass, AssetStatus  # type: ignore[import-untyped]
+
+    s = get_settings()
+    client = TradingClient(
+        api_key=s.alpaca_api_key,
+        secret_key=s.alpaca_secret_key,
+        paper=s.alpaca_paper,
+    )
+    request = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
+    assets = call_with_retry(client.get_all_assets, request)
+    return [
+        {
+            "symbol": str(a.symbol),
+            "name": str(getattr(a, "name", "")),
+            "exchange": str(getattr(a, "exchange", "")),
+            "tradable": bool(getattr(a, "tradable", False)),
+        }
+        for a in assets
+        if getattr(a, "tradable", False)
+    ]
+
+
+def get_bulk_equity_bars(
+    symbols: list[str],
+    timeframe: str = "1Day",
+    bars: int = 5,
+) -> dict[str, pd.DataFrame]:
+    """
+    Fetch OHLCV bars for multiple equity symbols in a single API call.
+
+    Returns a dict mapping symbol → DataFrame (same format as get_history).
+    Symbols without data are silently omitted.
+    """
+    from alpaca.data.requests import StockBarsRequest  # type: ignore[import-untyped]
+
+    if not symbols:
+        return {}
+
+    tf = _parse_timeframe(timeframe)
+    start = datetime.now(timezone.utc) - timedelta(days=_days_back_for_bars(timeframe, bars))
+
+    s = get_settings()
+    client = _get_stock_client()
+    request = StockBarsRequest(
+        symbol_or_symbols=symbols,
+        timeframe=tf,
+        start=start,
+        limit=bars,
+        adjustment="raw",
+        feed=s.data_feed,
+    )
+    bars_response = call_with_retry(client.get_stock_bars, request)
+    df = bars_response.df
+
+    if df.empty:
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    if isinstance(df.index, pd.MultiIndex):
+        for sym in df.index.get_level_values(0).unique():
+            result[sym] = _normalise_bars_df(df, sym)
+    else:
+        # Single symbol returned without MultiIndex
+        if symbols:
+            result[symbols[0]] = _normalise_bars_df(df, symbols[0])
+
+    return result
+
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _parse_timestamp(ts: Any) -> datetime:

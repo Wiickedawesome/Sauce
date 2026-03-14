@@ -37,11 +37,13 @@ from typing import Any
 
 from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, place_order
 from sauce.adapters.db import OrderRow, has_recent_submitted_order, log_event, log_order
-from sauce.adapters.market_data import get_universe_snapshot
+from sauce.adapters.market_data import get_universe_snapshot, _is_crypto
 from sauce.agents import execution, exit_research, market_context, ops, portfolio, research, risk, session_boot, supervisor
 from sauce.agents.debate import run_debate
 from sauce.core.capital import detect_tier_transition, get_tier_parameters
 from sauce.core.config import get_settings
+from sauce.core.screener import screen_equities
+from sauce.core.setups import SETUP_2_REGIMES
 from sauce.core.safety import (
     check_daily_loss,
     check_market_hours,
@@ -356,9 +358,31 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         db_path=str(settings.db_path),
     )
 
-    # ── Step 4: Universe quote snapshot ──────────────────────────────────────
+    # ── Step 4: Build universe (screener or static .env list) ──────────────
+    _open_syms = {str(p.get("symbol", "")).replace("/", "").upper() for p in positions}
+
+    if settings.screener_enabled:
+        try:
+            screened_equities = await asyncio.to_thread(
+                screen_equities,
+                regime=mkt_ctx.regime.regime_type,
+                open_symbols=_open_syms,
+            )
+        except Exception as exc:
+            logger.error("Screener failed — falling back to .env list [loop_id=%s]: %s", loop_id, exc)
+            screened_equities = settings.equity_universe
+        universe = screened_equities + settings.crypto_universe
+    else:
+        universe = settings.full_universe
+
+    logger.info(
+        "Universe: %d symbols (%s) [loop_id=%s]",
+        len(universe), "screener" if settings.screener_enabled else "static", loop_id,
+    )
+
+    # ── Step 4b: Universe quote snapshot ─────────────────────────────────────
     try:
-        quotes = await asyncio.to_thread(get_universe_snapshot, settings.full_universe)
+        quotes = await asyncio.to_thread(get_universe_snapshot, universe)
     except Exception as exc:
         logger.error("Cannot fetch universe snapshot — aborting [loop_id=%s]: %s", loop_id, exc)
         log_event(AuditEvent(
@@ -376,7 +400,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
 
     # First pass: synchronously filter eligible symbols (market hours + quote freshness).
     _eligible: list[tuple[str, Any]] = []
-    for symbol in settings.full_universe:
+    for symbol in universe:
 
         # Skip if market is closed for this symbol
         if not check_market_hours(symbol=symbol, loop_id=loop_id):
@@ -412,6 +436,16 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         # Skip symbols within the earnings blackout window (Finding 2.6).
         if has_earnings_risk(symbol, loop_id=loop_id):
             logger.info("Earnings proximity detected for %s — skipping this run", symbol)
+            continue
+
+        # Regime pre-filter: skip equities if regime doesn't support equity setups.
+        # Equities only qualify in SETUP_2_REGIMES (TRENDING_UP).
+        # Crypto is always passed through — its setups cover RANGING + TRENDING_UP.
+        if not _is_crypto(symbol) and mkt_ctx.regime.regime_type not in SETUP_2_REGIMES:
+            logger.debug(
+                "Regime %s ineligible for equity %s — skipping",
+                mkt_ctx.regime.regime_type, symbol,
+            )
             continue
 
         _eligible.append((symbol, quote))

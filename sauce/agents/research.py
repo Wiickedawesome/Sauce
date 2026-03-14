@@ -170,20 +170,6 @@ async def run(
     except market_data.MarketDataError:
         pass  # Daily data unavailable — proceed with 30min only
 
-    # ── Step 2b2: Multi-timeframe analysis + confluence scoring ───────────
-    mtf_context = None
-    confluence = None
-    try:
-        mtf_context = fetch_multi_timeframe(symbol, is_crypto=_is_crypto)
-        if mtf_context.analyses:
-            confluence = compute_confluence(mtf_context)
-            logger.info(
-                "research[%s]: multi-TF %s (score=%.2f, tier=%s)",
-                symbol, confluence.summary, confluence.score, confluence.tier.value,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("research[%s]: multi-TF analysis unavailable: %s", symbol, exc)
-
     # ── Step 2c: Fetch recent signal history for feedback loop ─────────────
     signal_history: list[dict] | None = None
     try:
@@ -290,6 +276,22 @@ async def run(
     # Sorted by score descending so the strongest thesis appears first.
     _passed_sorted = sorted(_passed, key=lambda r: r.score, reverse=True)
     all_setup_results = [r.model_dump(mode="json") for r in _passed_sorted]
+
+    # ── Step 2f: Multi-timeframe analysis + confluence scoring ────────────
+    # Runs AFTER the setup gate so we only spend 5 API calls on symbols that
+    # actually passed a setup (saves ~400 calls/loop for symbols that hold).
+    mtf_context = None
+    confluence = None
+    try:
+        mtf_context = fetch_multi_timeframe(symbol, is_crypto=_is_crypto)
+        if mtf_context.analyses:
+            confluence = compute_confluence(mtf_context)
+            logger.info(
+                "research[%s]: multi-TF %s (score=%.2f, tier=%s)",
+                symbol, confluence.summary, confluence.score, confluence.tier.value,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("research[%s]: multi-TF analysis unavailable: %s", symbol, exc)
 
     # ── Step 3: Build prompt ──────────────────────────────────────────────────
     user_prompt = research_prompts.build_user_prompt(
