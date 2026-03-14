@@ -109,7 +109,7 @@ def check_max_drawdown(
             .all()
         )
         if not rows:
-            return True, 0.0
+            return False, 0.0
 
         navs = [r.ending_nav_usd for r in rows]
         peak = navs[0]
@@ -162,6 +162,8 @@ def check_sharpe_ratio(
             return False, 0.0
 
         sharpe = (mean_r / std_r) * math.sqrt(252)
+        if not math.isfinite(sharpe):
+            return False, 0.0
         return sharpe >= min_sharpe, round(sharpe, 4)
     finally:
         session.close()
@@ -185,7 +187,7 @@ def check_max_single_day_loss(
             .all()
         )
         if not rows:
-            return True, 0.0
+            return False, 0.0
 
         worst = 0.0
         for r in rows:
@@ -236,16 +238,18 @@ def check_claude_calibration(
 def _count_consecutive_pass_days(
     strategic_db_path: str,
     today: str,
+    *,
+    exclude_today: bool = False,
 ) -> int:
-    """Count contiguous days ending at *today* where all_passed=True."""
+    """Count contiguous days ending at or before *today* where all_passed=True."""
     session = strategic_get_session(strategic_db_path)
     try:
-        rows = (
-            session.query(ValidationResultRow.date, ValidationResultRow.all_passed)
-            .filter(ValidationResultRow.date <= today)
-            .order_by(ValidationResultRow.date.desc())
-            .all()
-        )
+        query = session.query(ValidationResultRow.date, ValidationResultRow.all_passed)
+        if exclude_today:
+            query = query.filter(ValidationResultRow.date < today)
+        else:
+            query = query.filter(ValidationResultRow.date <= today)
+        rows = query.order_by(ValidationResultRow.date.desc()).all()
         count = 0
         for r in rows:
             if r.all_passed:
@@ -333,18 +337,11 @@ def run_validation(
 
     all_passed = all(passed for passed, _ in results.values())
 
-    # Persist first so the consecutive-day query includes today.
-    _save_validation_result(
-        strategic_db_path=strategic_db_path,
-        date=today,
-        results=results,
-        all_passed=all_passed,
-        consecutive_days=0,  # placeholder, updated below
-    )
+    # Compute consecutive days count before saving so we only write once.
+    # Exclude today from the streak query to avoid double-counting on re-runs.
+    prior_streak = _count_consecutive_pass_days(strategic_db_path, today, exclude_today=True)
+    consecutive_days = (prior_streak + 1) if all_passed else 0
 
-    consecutive_days = _count_consecutive_pass_days(strategic_db_path, today)
-
-    # Update with correct count.
     _save_validation_result(
         strategic_db_path=strategic_db_path,
         date=today,

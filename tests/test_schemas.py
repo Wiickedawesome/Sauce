@@ -145,14 +145,19 @@ def test_signal_invalid_side_rejected() -> None:
         make_signal(side="short")  # type: ignore[arg-type]
 
 
-def test_signal_confidence_above_1_rejected() -> None:
-    with pytest.raises(ValidationError):
-        make_signal(confidence=1.1)
+def test_signal_confidence_above_1_clamped() -> None:
+    s = make_signal(confidence=1.1)
+    assert s.confidence == 1.0
 
 
-def test_signal_confidence_below_0_rejected() -> None:
-    with pytest.raises(ValidationError):
-        make_signal(confidence=-0.1)
+def test_signal_confidence_below_0_clamped() -> None:
+    s = make_signal(confidence=-0.1)
+    assert s.confidence == 0.0
+
+
+def test_signal_confidence_nan_becomes_zero() -> None:
+    s = make_signal(confidence=float("nan"))
+    assert s.confidence == 0.0
 
 
 def test_signal_missing_prompt_version_rejected() -> None:

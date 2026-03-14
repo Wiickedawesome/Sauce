@@ -9,6 +9,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -184,6 +185,45 @@ def test_log_order_writes_row(tmp_db: str) -> None:
     assert result is not None
     assert result.qty == 10.0
     assert result.side == "buy"
+
+
+def test_log_signal_swallows_db_error(tmp_db: str) -> None:
+    """log_signal must never raise — DB errors are logged, not propagated."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    row = SignalRow(
+        loop_id="loop-err",
+        symbol="FAIL",
+        side="buy",
+        confidence=0.5,
+        reasoning="crash test",
+        vetoed=False,
+        as_of=NOW,
+        prompt_version="v1",
+    )
+    with patch.object(db_module, "get_session", side_effect=RuntimeError("boom")):
+        log_signal(row, db_path=tmp_db)  # must not raise
+
+
+def test_log_order_swallows_db_error(tmp_db: str) -> None:
+    """log_order must never raise — DB errors are logged, not propagated."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    row = OrderRow(
+        loop_id="loop-err",
+        symbol="FAIL",
+        side="sell",
+        qty=1.0,
+        order_type="market",
+        time_in_force="day",
+        limit_price=None,
+        status="pending",
+        prompt_version="v1",
+    )
+    with patch.object(db_module, "get_session", side_effect=RuntimeError("boom")):
+        log_order(row, db_path=tmp_db)  # must not raise
 
 
 # ── get_daily_stats ───────────────────────────────────────────────────────────

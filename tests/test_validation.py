@@ -241,7 +241,7 @@ class TestCheckExpectancy:
 class TestCheckMaxDrawdown:
     def test_empty_db(self, audit_db):
         passed, dd = check_max_drawdown(audit_db)
-        assert passed is True
+        assert passed is False
         assert dd == 0.0
 
     def test_no_drawdown(self, audit_db):
@@ -377,7 +377,7 @@ class TestCheckSharpeRatio:
 class TestCheckMaxSingleDayLoss:
     def test_empty_db(self, audit_db):
         passed, loss = check_max_single_day_loss(audit_db)
-        assert passed is True
+        assert passed is False
         assert loss == 0.0
 
     def test_no_loss_days(self, audit_db):

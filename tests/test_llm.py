@@ -126,6 +126,43 @@ async def test_call_claude_raises_after_all_retries(
 
 # ── Missing credentials ───────────────────────────────────────────────────────
 
+
+@pytest.mark.asyncio
+async def test_call_claude_retries_on_connection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """APIConnectionError should be retried (network blip), not immediately fatal."""
+    set_env(monkeypatch)
+    from sauce.core.config import get_settings
+    get_settings.cache_clear()
+
+    import anthropic as anthropic_mod
+
+    call_count = 0
+    success_message = MagicMock()
+    success_message.content = [MagicMock(text='{"side": "hold"}')]
+    success_message.stop_reason = "end_turn"
+
+    async def mock_create(**kwargs: object) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise anthropic_mod.APIConnectionError(request=MagicMock())
+        return success_message
+
+    mock_client = AsyncMock()
+    mock_client.messages.create = mock_create
+
+    with patch("anthropic.AsyncAnthropic", return_value=mock_client):
+        with patch("sauce.adapters.db.log_event"):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                result = await call_claude(system="sys", user="usr", loop_id="loop-conn")
+
+    assert result == '{"side": "hold"}'
+    assert call_count == 2
+    get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_call_claude_no_api_key_raises(
     monkeypatch: pytest.MonkeyPatch,
@@ -133,10 +170,11 @@ async def test_call_claude_no_api_key_raises(
     monkeypatch.setenv("ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    from pydantic import ValidationError
     from sauce.core.config import get_settings
     get_settings.cache_clear()
 
-    with pytest.raises(LLMError, match="ANTHROPIC_API_KEY"):
-        await call_claude(system="sys", user="usr")
+    with pytest.raises(ValidationError, match="API key must not be empty"):
+        get_settings()
 
     get_settings.cache_clear()

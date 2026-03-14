@@ -8,6 +8,7 @@ Rules:
 - ValidationError anywhere in the pipeline = abort signal, log AuditEvent, continue.
 """
 
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
@@ -85,11 +86,17 @@ class Signal(StrictModel):
     as_of: datetime
     prompt_version: str
 
-    @field_validator("confidence")
+    @field_validator("confidence", mode="before")
     @classmethod
-    def clamp_hold_on_low_confidence(cls, v: float) -> float:
-        """Confidence below 0.5 is valid but the system will treat it as hold."""
-        return v
+    def clamp_confidence(cls, v: object) -> float:
+        """Clamp confidence to [0.0, 1.0]. LLM may return out-of-range values."""
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(f) or math.isinf(f):
+            return 0.0
+        return max(0.0, min(1.0, f))
 
 
 # ── Risk Agent ────────────────────────────────────────────────────────────────
@@ -171,12 +178,6 @@ class SupervisorDecision(StrictModel):
     reason: str
     as_of: datetime
     prompt_version: str
-
-    @field_validator("final_orders")
-    @classmethod
-    def orders_empty_on_abort(cls, v: list[Order], info: object) -> list[Order]:
-        # Validated post-init in model_post_init for cross-field checks
-        return v
 
     def model_post_init(self, __context: object) -> None:
         if self.action == "abort" and self.final_orders:

@@ -138,6 +138,15 @@ async def _call_anthropic(
                 last_exc = LLMError(f"Anthropic API error {exc.status_code}: {exc.message}")
                 break
 
+        except anthropic.APIConnectionError as exc:
+            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning(
+                "Anthropic connection error (attempt %d/%d). Retrying in %.1fs: %s",
+                attempt, MAX_RETRIES, delay, exc,
+            )
+            await asyncio.sleep(delay)
+            last_exc = LLMError(f"Anthropic connection error: {exc}")
+
     error_msg = str(last_exc) if last_exc else "Unknown Anthropic error"
     log_event(AuditEvent(
         loop_id=loop_id,

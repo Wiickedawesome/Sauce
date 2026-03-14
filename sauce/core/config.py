@@ -189,6 +189,14 @@ class Settings(BaseSettings):
         """Combined equity + crypto trading universe."""
         return self.equity_universe + self.crypto_universe
 
+    @field_validator("alpaca_api_key", "alpaca_secret_key", "anthropic_api_key")
+    @classmethod
+    def reject_blank_api_keys(cls, v: str) -> str:
+        """Reject API keys that are empty or whitespace-only."""
+        if not v or not v.strip():
+            raise ValueError("API key must not be empty or whitespace-only")
+        return v
+
     @field_validator("data_feed")
     @classmethod
     def validate_data_feed(cls, v: str) -> str:

@@ -190,23 +190,40 @@ def log_signal(
     signal_row: SignalRow,
     db_path: str | None = None,
 ) -> None:
-    """Append a SignalRow to the signals table."""
-    session = get_session(db_path)
+    """Append a SignalRow to the signals table. Never raises."""
     try:
-        session.add(signal_row)
-        session.commit()
-    finally:
-        session.close()
+        session = get_session(db_path)
+        try:
+            session.add(signal_row)
+            session.commit()
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.critical(
+            "DB write FAILED for SignalRow [symbol=%s side=%s]: %s",
+            getattr(signal_row, "symbol", "?"),
+            getattr(signal_row, "side", "?"),
+            exc,
+        )
 
 
 def log_order(order_row: OrderRow, db_path: str | None = None) -> None:
-    """Append an OrderRow to the orders table."""
-    session = get_session(db_path)
+    """Append an OrderRow to the orders table. Never raises."""
     try:
-        session.add(order_row)
-        session.commit()
-    finally:
-        session.close()
+        session = get_session(db_path)
+        try:
+            session.add(order_row)
+            session.commit()
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.critical(
+            "DB write FAILED for OrderRow [symbol=%s side=%s qty=%s]: %s",
+            getattr(order_row, "symbol", "?"),
+            getattr(order_row, "side", "?"),
+            getattr(order_row, "qty", "?"),
+            exc,
+        )
 
 
 # ── Public Read Helpers ───────────────────────────────────────────────────────

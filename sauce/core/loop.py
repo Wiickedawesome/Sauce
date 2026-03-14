@@ -218,6 +218,13 @@ async def main() -> None:
                 "type": "TimeoutError",
             },
         ))
+    except asyncio.CancelledError:
+        logger.warning("Loop cancelled [loop_id=%s]", loop_id)
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="error",
+            payload={"stage": "main", "error": "Loop was cancelled", "type": "CancelledError"},
+        ))
     except Exception as exc:
         logger.exception("Unhandled exception in loop [loop_id=%s]: %s", loop_id, exc)
         log_event(AuditEvent(
@@ -745,6 +752,9 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
     orders.extend(exit_orders)
 
     # ── Step 9: Supervisor — final arbitration ────────────────────────────────
+    if _shutdown_requested:
+        logger.warning("Shutdown requested — exiting before supervisor stage [loop_id=%s]", loop_id)
+        return
     decision: SupervisorDecision = _make_abort_decision(
         reason="Supervisor not yet called",
         settings=settings,
@@ -773,6 +783,13 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
     if _shutdown_requested:
         logger.warning("Shutdown requested — skipping order placement [loop_id=%s]", loop_id)
         return
+
+    # Re-check pause state before placing orders — another stage may have
+    # triggered a pause (e.g. check_daily_loss called during risk checks).
+    if is_trading_paused(loop_id=loop_id):
+        logger.warning("Trading paused mid-loop — skipping order placement [loop_id=%s]", loop_id)
+        return
+
     _orders_placed_count: int = 0
     _db_path = str(settings.db_path)
     if decision.action == "execute":
