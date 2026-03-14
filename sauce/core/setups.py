@@ -31,11 +31,11 @@ from sauce.core.schemas import (
     SoftConditionResult,
 )
 
-# ── Eligible symbols per setup ────────────────────────────────────────────────
+# ── Asset-class routing ────────────────────────────────────────────────────────
 
-SETUP_1_SYMBOLS: frozenset[str] = frozenset({"BTC/USD", "ETH/USD"})
-SETUP_2_SYMBOLS: frozenset[str] = frozenset({"SPY", "QQQ"})
-SETUP_3_SYMBOLS: frozenset[str] = frozenset({"BTC/USD", "ETH/USD"})
+def _is_crypto(symbol: str) -> bool:
+    """Return True for Alpaca crypto pairs (e.g. 'BTC/USD')."""
+    return "/" in symbol
 
 # ── Eligible regimes ─────────────────────────────────────────────────────────
 
@@ -872,7 +872,7 @@ def scan_setups(
     canon_open_syms = {_canon(s) for s in open_syms}
 
     # Setup 1: Crypto Mean Reversion
-    if symbol in SETUP_1_SYMBOLS and regime in SETUP_1_REGIMES:
+    if _is_crypto(symbol) and regime in SETUP_1_REGIMES:
         results.append(evaluate_crypto_mean_reversion(
             symbol=symbol,
             indicators=indicators,
@@ -886,7 +886,7 @@ def scan_setups(
         ))
 
     # Setup 2: Equity Trend Pullback
-    if symbol in SETUP_2_SYMBOLS and regime in SETUP_2_REGIMES:
+    if not _is_crypto(symbol) and regime in SETUP_2_REGIMES:
         results.append(evaluate_equity_trend_pullback(
             symbol=symbol,
             indicators=indicators,
@@ -897,7 +897,7 @@ def scan_setups(
         ))
 
     # Setup 3: Crypto Breakout
-    if symbol in SETUP_3_SYMBOLS and regime in SETUP_3_REGIMES:
+    if _is_crypto(symbol) and regime in SETUP_3_REGIMES:
         results.append(evaluate_crypto_breakout(
             symbol=symbol,
             indicators=indicators,

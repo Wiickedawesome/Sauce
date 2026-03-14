@@ -39,11 +39,30 @@ class Settings(BaseSettings):
 
     # ── Trading Universe ──────────────────────────────────────────────────────
     trading_universe_equities: str = Field(
-        default="AAPL,MSFT,GOOGL,AMZN,NVDA,SPY,QQQ",
+        default=(
+            # Mega-cap tech
+            "AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,AVGO,CRM,ORCL,ADBE,AMD,INTC,QCOM,CSCO,"
+            # Financials
+            "JPM,BAC,GS,MS,V,MA,AXP,BLK,SCHW,C,"
+            # Healthcare
+            "UNH,JNJ,LLY,PFE,ABBV,MRK,TMO,ABT,BMY,AMGN,"
+            # Consumer / Retail
+            "WMT,COST,HD,MCD,NKE,SBUX,TGT,LOW,PG,KO,PEP,"
+            # Energy / Industrials
+            "XOM,CVX,COP,NEE,CAT,DE,HON,UNP,BA,GE,"
+            # ETFs
+            "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,ARKK,GLD,SLV,TLT"
+        ),
         description="Comma-separated equity tickers",
     )
     trading_universe_crypto: str = Field(
-        default="BTC/USD,ETH/USD",
+        default=(
+            "BTC/USD,ETH/USD,SOL/USD,LINK/USD,AVAX/USD,DOGE/USD,XRP/USD,"
+            "ADA/USD,DOT/USD,MATIC/USD,UNI/USD,AAVE/USD,SHIB/USD,LTC/USD,"
+            "BCH/USD,ALGO/USD,ATOM/USD,FIL/USD,NEAR/USD,APT/USD,"
+            "ARB/USD,OP/USD,MKR/USD,GRT/USD,RENDER/USD,INJ/USD,SUI/USD,"
+            "SEI/USD,PEPE/USD,FET/USD"
+        ),
         description="Comma-separated Alpaca crypto pairs",
     )
 

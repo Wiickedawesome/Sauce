@@ -20,13 +20,10 @@ from sauce.core.schemas import (
 from sauce.core.setups import (
     SETUP_1_MIN_SCORE,
     SETUP_1_REGIMES,
-    SETUP_1_SYMBOLS,
     SETUP_2_MIN_SCORE,
     SETUP_2_REGIMES,
-    SETUP_2_SYMBOLS,
     SETUP_3_MIN_SCORE,
     SETUP_3_REGIMES,
-    SETUP_3_SYMBOLS,
     MIN_BARS_SETUP_1,
     MIN_BARS_SETUP_2,
     MIN_BARS_SETUP_3,
@@ -52,6 +49,7 @@ from sauce.core.setups import (
     S3_PRE_BREAKOUT_VOL_RATIO,
     S3_MAX_ATTEMPTS,
     SELLING_PRESSURE_KEYWORDS,
+    _is_crypto,
     _compute_macd_histogram,
     _compute_rsi,
     _compute_score,
@@ -239,14 +237,15 @@ class TestBuildNarrative:
 
 
 class TestConstants:
-    def test_setup_1_symbols(self):
-        assert SETUP_1_SYMBOLS == frozenset({"BTC/USD", "ETH/USD"})
+    def test_is_crypto_detects_slash_pairs(self):
+        assert _is_crypto("BTC/USD") is True
+        assert _is_crypto("ETH/USD") is True
+        assert _is_crypto("SOL/USD") is True
 
-    def test_setup_2_symbols(self):
-        assert SETUP_2_SYMBOLS == frozenset({"SPY", "QQQ"})
-
-    def test_setup_3_symbols(self):
-        assert SETUP_3_SYMBOLS == frozenset({"BTC/USD", "ETH/USD"})
+    def test_is_crypto_rejects_equities(self):
+        assert _is_crypto("AAPL") is False
+        assert _is_crypto("SPY") is False
+        assert _is_crypto("QQQ") is False
 
     def test_setup_1_regimes(self):
         assert SETUP_1_REGIMES == frozenset({"RANGING", "TRENDING_UP"})
@@ -834,10 +833,19 @@ class TestScanSetups:
         assert "crypto_mean_reversion" not in types
         assert "crypto_breakout" not in types
 
-    def test_ineligible_symbol(self):
-        df = _make_df(250, close=100.0)
-        ind = _make_indicators()
+    def test_equity_symbol_gets_setup_2(self):
+        df = _make_df(2800, close=150.0)
+        ind = _make_indicators(rsi_14=42.0)
         results = scan_setups("AAPL", ind, df, "TRENDING_UP", as_of=_NOW)
+        types = [r.setup_type for r in results]
+        assert "equity_trend_pullback" in types
+        assert "crypto_mean_reversion" not in types
+        assert "crypto_breakout" not in types
+
+    def test_equity_wrong_regime_empty(self):
+        df = _make_df(2800, close=150.0)
+        ind = _make_indicators()
+        results = scan_setups("AAPL", ind, df, "RANGING", as_of=_NOW)
         assert results == []
 
     def test_ineligible_regime_for_setup_2(self):
