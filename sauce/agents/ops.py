@@ -360,22 +360,25 @@ def _count_recent_loop_errors(
     Returns the count of such loop IDs found in the last threshold*2 loop_end
     events.  Used by the circuit breaker (Finding 4.3).
     """
+    _STAGE_ERROR_KINDS = frozenset({
+        "get_account", "get_positions", "get_universe_snapshot",
+        "supervisor", "portfolio", "ops", "main",
+    })
+
     try:
-        from sqlalchemy import text
-        from sauce.adapters.db import get_session
+        import json as _json
+        from sauce.adapters.db import AuditEventRow, get_session
 
         session = get_session(db_path)
         try:
             # Fetch the most recent (threshold * 2) loop IDs from loop_end events.
-            loop_rows = session.execute(
-                text(
-                    "SELECT loop_id FROM audit_events "
-                    "WHERE event_type = 'loop_end' "
-                    "ORDER BY timestamp DESC "
-                    "LIMIT :limit"
-                ),
-                {"limit": threshold * 2},
-            ).fetchall()
+            loop_rows = (
+                session.query(AuditEventRow.loop_id)
+                .filter(AuditEventRow.event_type == "loop_end")
+                .order_by(AuditEventRow.timestamp.desc())
+                .limit(threshold * 2)
+                .all()
+            )
 
             if not loop_rows:
                 return 0
@@ -383,24 +386,24 @@ def _count_recent_loop_errors(
             recent_loop_ids = [str(r[0]) for r in loop_rows]
 
             # For each loop ID, check if it has a stage-level error event.
-            # Stage-level errors: stage in (get_account, get_positions,
-            # get_universe_snapshot, supervisor, portfolio, ops, main).
             error_loop_ids: set[str] = set()
             for lid in recent_loop_ids:
-                count = session.execute(
-                    text(
-                        "SELECT COUNT(*) FROM audit_events "
-                        "WHERE loop_id = :lid "
-                        "AND event_type = 'error' "
-                        "AND json_extract(payload, '$.stage') IN ("
-                        "  'get_account', 'get_positions', 'get_universe_snapshot',"
-                        "  'supervisor', 'portfolio', 'ops', 'main'"
-                        ")"
-                    ),
-                    {"lid": lid},
-                ).scalar()
-                if count and count > 0:
-                    error_loop_ids.add(lid)
+                error_rows = (
+                    session.query(AuditEventRow.payload)
+                    .filter(
+                        AuditEventRow.loop_id == lid,
+                        AuditEventRow.event_type == "error",
+                    )
+                    .all()
+                )
+                for (payload_str,) in error_rows:
+                    try:
+                        payload = _json.loads(payload_str) if payload_str else {}
+                    except (ValueError, TypeError):
+                        continue
+                    if payload.get("stage") in _STAGE_ERROR_KINDS:
+                        error_loop_ids.add(lid)
+                        break
         finally:
             session.close()
 

@@ -68,10 +68,7 @@ async def run(
     # Detect asset class early — needed to choose correct bar count.
     _is_crypto = market_data.is_crypto(symbol)
 
-    # Mutable holder so the closure can carry real indicators once computed.
-    _hold_indicators: list[Indicators] = [Indicators()]
-
-    def _safe_hold(reason: str) -> Signal:
+    def _safe_hold(reason: str, indicators: Indicators | None = None) -> Signal:
         """Return a safe hold signal with an attached audit log entry."""
         log_event(
             AuditEvent(
@@ -90,7 +87,7 @@ async def run(
             evidence=Evidence(
                 symbol=symbol,
                 price_reference=quote,
-                indicators=_hold_indicators[0],
+                indicators=indicators or Indicators(),
                 as_of=quote.as_of,
             ),
             reasoning=f"Hold (safe default): {reason}",
@@ -117,7 +114,6 @@ async def run(
 
     # ── Step 2: Compute indicators ────────────────────────────────────────────
     indicators = compute_all(df, is_crypto=_is_crypto)
-    _hold_indicators[0] = indicators  # make available to _safe_hold closure
 
     sma_20 = indicators.sma_20
     sma_50 = indicators.sma_50
@@ -275,7 +271,7 @@ async def run(
             "research[%s]: no qualifying setup (regime=%s) — skipping LLM call",
             symbol, _reg,
         )
-        return _safe_hold(f"No qualifying setup for {symbol} (regime={_reg})")
+        return _safe_hold(f"No qualifying setup for {symbol} (regime={_reg})", indicators)
 
     # Send ALL passed setups to Claude so it can weigh competing theses.
     # Sorted by score descending so the strongest thesis appears first.
@@ -346,7 +342,7 @@ async def run(
         )
     except llm.LLMError as exc:
         logger.error("research[%s]: LLM call failed: %s", symbol, exc)
-        return _safe_hold(f"LLM error: {exc}")
+        return _safe_hold(f"LLM error: {exc}", indicators)
 
     # ── Step 5: Parse response ────────────────────────────────────────────────
     try:
@@ -387,7 +383,7 @@ async def run(
             ),
             db_path=db_path,
         )
-        return _safe_hold("LLM response parse error")
+        return _safe_hold("LLM response parse error", indicators)
 
     # ── Step 6: Build validated Signal ───────────────────────────────────────
 
@@ -420,7 +416,7 @@ async def run(
             ),
             db_path=db_path,
         )
-        return _safe_hold("Signal schema validation error")
+        return _safe_hold("Signal schema validation error", indicators)
 
     log_event(
         AuditEvent(

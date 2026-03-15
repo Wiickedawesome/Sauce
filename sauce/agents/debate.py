@@ -5,6 +5,12 @@ Deterministic (no LLM calls). Both sides receive the same signal + indicators
 and produce structured arguments for/against the trade. The debate transcript
 is forwarded to the Supervisor for final arbitration.
 
+Design note — intentional bearish bias:
+  The bear side can generate up to 9 arguments vs the bull's 8, and the
+  confidence adjustment range is asymmetric: [-0.10, +0.05].  This is
+  deliberate: the system should lean conservative when evidence is balanced.
+  A trade must convincingly clear the bear case to survive.
+
 Inspired by: QuantDinger (7-agent Bull vs Bear debate) + NOFX (AI competition).
 """
 

@@ -263,7 +263,7 @@ def get_daily_stats(date: str, db_path: str | None = None) -> DailyStats | None:
 
 def count_orders_today(db_path: str | None = None) -> int:
     """Return count of orders placed today. Used by Ops agent."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     session = get_session(db_path)
     try:
         count = (

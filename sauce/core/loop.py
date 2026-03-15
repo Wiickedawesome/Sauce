@@ -63,7 +63,7 @@ from sauce.core.schemas import (
     SupervisorDecision,
 )
 from sauce.memory.learning import record_trade_outcome
-from sauce.memory.db import get_latest_setup_type, get_trade_entry_time
+from sauce.memory.db import delete_peak_pnl, get_latest_setup_type, get_trade_entry_time
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +100,11 @@ def _detect_closed_positions(
             pnl = float(prev.get("unrealized_pl", 0.0))
 
             # Resolve setup_type from session memory signal_log.
-            # Equities only have one setup; crypto needs lookup.
+            resolved = get_latest_setup_type(sym, session_db_path)
             if _is_crypto(sym):
-                resolved = get_latest_setup_type(sym, session_db_path)
                 setup_type = resolved or "crypto_mean_reversion"
             else:
-                setup_type = "equity_trend_pullback"
+                setup_type = resolved or "equity_trend_pullback"
 
             # Compute hold duration from trade_log entry time when available.
             now = datetime.now(timezone.utc)
@@ -133,6 +132,7 @@ def _detect_closed_positions(
                     "Failed to record trade outcome for %s: %s [loop_id=%s]",
                     sym, exc, loop_id,
                 )
+            delete_peak_pnl(sym, session_db_path)
 
     _previous_positions = current_symbols
 

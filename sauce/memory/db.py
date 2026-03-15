@@ -358,7 +358,9 @@ def reset_session_memory_if_new_day(db_path: str) -> bool:
             TradeLogRow,
             IntradayNarrativeRow,
             SymbolCharacterRow,
-            PositionPeakPnLRow,
+            # PositionPeakPnLRow intentionally excluded — peak PnL must
+            # survive overnight for multi-day positions (e.g. crypto).
+            # Stale entries are cleaned up in _detect_closed_positions.
         ]:
             session.query(table_cls).delete()
         session.commit()
@@ -577,6 +579,21 @@ def get_peak_pnl(symbol: str, db_path: str) -> PositionPeakPnL | None:
     except Exception as exc:  # noqa: BLE001
         logger.critical("Failed to read peak_pnl for %s: %s", symbol, exc)
         return None
+    finally:
+        session.close()
+
+
+def delete_peak_pnl(symbol: str, db_path: str) -> None:
+    """Remove the peak PnL record for a symbol (called when position closes)."""
+    session = get_session(db_path)
+    try:
+        session.query(PositionPeakPnLRow).filter(
+            PositionPeakPnLRow.symbol == symbol,
+        ).delete()
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.critical("Failed to delete peak_pnl for %s: %s", symbol, exc)
     finally:
         session.close()
 

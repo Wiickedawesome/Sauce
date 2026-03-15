@@ -384,6 +384,7 @@ def evaluate_equity_trend_pullback(
     df: pd.DataFrame,
     regime: MarketRegime,
     *,
+    has_open_position: bool = False,
     df_daily_ext: pd.DataFrame | None = None,
     as_of: datetime,
 ) -> SetupResult:
@@ -557,6 +558,9 @@ def evaluate_equity_trend_pullback(
 
     if regime in ("RANGING", "VOLATILE"):
         disqualifiers.append(Disqualification(reason=f"Regime is {regime}"))
+
+    if has_open_position:
+        disqualifiers.append(Disqualification(reason="Position already open for this symbol"))
 
     # Bearish RSI divergence: price rising but daily RSI falling over 5 bars
     if len(df_daily) >= 20:
@@ -888,6 +892,7 @@ def scan_setups(
             indicators=indicators,
             df=df,
             regime=regime,
+            has_open_position=canon_symbol in canon_open_syms,
             df_daily_ext=df_daily,
             as_of=as_of,
         ))
