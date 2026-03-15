@@ -147,7 +147,7 @@ def place_order(order: Order, loop_id: str = "unset") -> dict[str, Any]:
     Returns a dict with Alpaca's order response (id, status, filled_qty, etc.).
     On any error: raises BrokerError — never retries automatically.
     """
-    from alpaca.trading.enums import OrderSide, OrderType, TimeInForce  # type: ignore[import-untyped]
+    from alpaca.trading.enums import OrderSide, TimeInForce  # type: ignore[import-untyped]
     from alpaca.trading.requests import (  # type: ignore[import-untyped]
         LimitOrderRequest,
         MarketOrderRequest,

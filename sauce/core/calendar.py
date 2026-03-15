@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sauce.core.schemas import EconomicEvent, EconomicEventType
+from sauce.core.schemas import EconomicEvent
 
 logger = logging.getLogger(__name__)
 

@@ -141,34 +141,6 @@ def _run(coro):
 # Tests — helper functions
 # ===========================================================================
 
-class TestLastFloat:
-    """Verify _last_float extracts last non-NaN float."""
-
-    def test_normal_series(self):
-        from sauce.agents.market_context import _last_float
-
-        series = pd.Series([1.0, 2.0, 3.0])
-        assert _last_float(series) == 3.0
-
-    def test_series_with_trailing_nan(self):
-        from sauce.agents.market_context import _last_float
-
-        series = pd.Series([1.0, 2.0, float("nan")])
-        assert _last_float(series) == 2.0
-
-    def test_empty_series_returns_none(self):
-        from sauce.agents.market_context import _last_float
-
-        series = pd.Series([], dtype=float)
-        assert _last_float(series) is None
-
-    def test_all_nan_returns_none(self):
-        from sauce.agents.market_context import _last_float
-
-        series = pd.Series([float("nan"), float("nan")])
-        assert _last_float(series) is None
-
-
 class TestDegradedContext:
     """Verify _degraded_context returns correct structure."""
 

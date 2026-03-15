@@ -11,6 +11,8 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from sqlalchemy import text
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +55,7 @@ def compute_trailing_metrics(
         session = get_session(db_path)
         try:
             rows = session.execute(
-                __import__("sqlalchemy").text(
+                text(
                     "SELECT date, ending_nav_usd "
                     "FROM daily_stats "
                     "ORDER BY date DESC "

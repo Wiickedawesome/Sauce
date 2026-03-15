@@ -107,12 +107,18 @@ async def run(
         s.symbol.upper(): s for s in signals
     }
     stale_symbols: list[str] = []
+    _SELL_SOURCES = {"exit_research", "stop_loss"}
     for order in orders:
-        # Sell orders from exit_research bypass the research pipeline and
-        # may not have a matching signal — exempt them from this check.
-        # Their freshness was already validated using the live quote in
-        # exit_research.run().
+        # Sell orders from exit_research/stop_loss bypass the research pipeline
+        # and may not have a matching signal — exempt them from freshness, but
+        # verify they carry a recognized provenance tag.
         if order.side == "sell":
+            if order.source not in _SELL_SOURCES:
+                return _abort(
+                    f"Sell order for {order.symbol} has unrecognized source "
+                    f"'{order.source}' — expected one of {_SELL_SOURCES}.",
+                    vetoes=[order.symbol],
+                )
             continue
         sig = signal_by_symbol.get(order.symbol.upper())
         if sig is None:

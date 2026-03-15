@@ -10,7 +10,7 @@ trade outcomes, account P&L, and notable observations.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pandas as pd
 

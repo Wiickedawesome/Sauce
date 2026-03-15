@@ -26,6 +26,7 @@ import logging
 from datetime import datetime, timezone
 
 from sauce.adapters.db import log_event
+from sauce.adapters.market_data import is_crypto
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent, RiskCheckResult, RiskChecks, Signal
 
@@ -177,7 +178,7 @@ async def run(
     # with far deeper books). The check remains active for equities.
     volume_too_low = False
     volume_1d_avg = signal.evidence.indicators.volume_1d_avg
-    _is_crypto = "/" in signal.symbol
+    _is_crypto = is_crypto(signal.symbol)
     if not _is_crypto and volume_1d_avg is not None and volume_1d_avg > 0 and mid_price > 0:
         # Conservative upper-bound estimate: full remaining position capacity.
         max_proposed_qty = (equity * effective_max_position_pct) / mid_price

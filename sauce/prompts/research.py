@@ -106,7 +106,7 @@ def build_user_prompt(
     """
     if as_of_utc is None:
         as_of_utc = datetime.now(timezone.utc)
-    timestamp_str = as_of_utc.replace(tzinfo=timezone.utc).isoformat()
+    timestamp_str = as_of_utc.astimezone(timezone.utc).isoformat()
 
     indicators = {
         "sma_20": round(sma_20, 4) if sma_20 is not None else None,

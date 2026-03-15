@@ -28,6 +28,7 @@ from sauce.backtest.models import (
     ExitReason,
     TradeDirection,
 )
+from sauce.adapters.market_data import is_crypto as _is_crypto
 from sauce.indicators.core import compute_all
 
 logger = logging.getLogger(__name__)
@@ -35,10 +36,6 @@ logger = logging.getLogger(__name__)
 _VALID_REGIMES = frozenset({
     "TRENDING_UP", "TRENDING_DOWN", "RANGING", "VOLATILE", "DEAD",
 })
-
-
-def _is_crypto(symbol: str) -> bool:
-    return "/" in symbol
 
 
 def _compute_metrics(result: BacktestResult) -> None:
@@ -148,12 +145,14 @@ def _close_position(
     config: BacktestConfig,
 ) -> BacktestTrade:
     """Close a position and return a BacktestTrade record."""
-    slipped_exit = _apply_slippage(
-        exit_price,
-        # Exit direction is opposite of entry direction
-        TradeDirection.SHORT if pos.direction == TradeDirection.LONG else TradeDirection.LONG,
-        config.slippage_pct,
+    # Slippage on exit is adverse: selling a LONG fills lower, covering a
+    # SHORT fills higher.  We pass the *exit* trade direction (opposite of the
+    # position direction) so _apply_slippage applies the correct penalty.
+    exit_direction = (
+        TradeDirection.SHORT if pos.direction == TradeDirection.LONG
+        else TradeDirection.LONG
     )
+    slipped_exit = _apply_slippage(exit_price, exit_direction, config.slippage_pct)
     notional = pos.entry_price * pos.qty
     if pos.direction == TradeDirection.LONG:
         raw_pnl = (slipped_exit - pos.entry_price) * pos.qty
@@ -331,7 +330,9 @@ def run_backtest(
 
         position = _Position(
             symbol=symbol,
-            direction=TradeDirection.LONG,  # setups currently only produce long signals
+            # Short-selling P&L math exists in _close_position but is
+            # unreachable until setups emit short signals.
+            direction=TradeDirection.LONG,
             setup_type=best.setup_type,
             entry_time=bar_time,
             entry_price=slipped_entry,

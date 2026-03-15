@@ -11,9 +11,9 @@ Inspired by: QuantDinger (7-agent Bull vs Bear debate) + NOFX (AI competition).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from sauce.core.schemas import Evidence, Indicators, Signal
+from sauce.core.schemas import Indicators, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +276,9 @@ def _confidence_adjustment(verdict: str, bull_score: float, bear_score: float) -
 def run_debate(signal: Signal) -> DebateResult:
     """
     Run a deterministic bull/bear debate for a signal.
+
+    Deliberately synchronous: this is pure computation with no I/O,
+    so ``async def`` would add coroutine overhead for zero benefit.
 
     Parameters
     ----------

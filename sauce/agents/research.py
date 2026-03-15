@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from sauce.adapters import llm, market_data
-from sauce.indicators.core import compute_all, compute_sma, compute_rsi, _last_float
+from sauce.indicators.core import compute_all, compute_sma, compute_rsi
 from sauce.adapters.db import get_recent_signals, log_event
 from sauce.memory.db import get_session_context, get_strategic_context
 from sauce.core.config import get_settings
@@ -65,6 +65,9 @@ async def run(
     db_path = str(settings.db_path)
     as_of = datetime.now(timezone.utc)
 
+    # Detect asset class early — needed to choose correct bar count.
+    _is_crypto = market_data.is_crypto(symbol)
+
     # Mutable holder so the closure can carry real indicators once computed.
     _hold_indicators: list[Indicators] = [Indicators()]
 
@@ -96,8 +99,11 @@ async def run(
         )
 
     # ── Step 1: Fetch OHLCV history ───────────────────────────────────────────
+    # Crypto needs 500 bars so Setup 1 H3 (4hr SMA50) can compute:
+    # 500 / 8 = ~62 4hr bars, clearing the 50-bar threshold.
+    _bars = 500 if _is_crypto else 60
     try:
-        df = market_data.get_history(symbol, timeframe="30Min", bars=60)
+        df = market_data.get_history(symbol, timeframe="30Min", bars=_bars)
     except market_data.MarketDataError as exc:
         logger.warning("research[%s]: get_history failed: %s", symbol, exc)
         return _safe_hold(f"market data unavailable: {exc}")
@@ -110,7 +116,6 @@ async def run(
         return _safe_hold(f"insufficient history ({len(df)} bars)")
 
     # ── Step 2: Compute indicators ────────────────────────────────────────────
-    _is_crypto = market_data._is_crypto(symbol)
     indicators = compute_all(df, is_crypto=_is_crypto)
     _hold_indicators[0] = indicators  # make available to _safe_hold closure
 
@@ -317,7 +322,7 @@ async def run(
         signal_history=signal_history,
         prompt_version=settings.prompt_version,
         as_of_utc=as_of,
-        is_crypto=market_data._is_crypto(symbol),
+        is_crypto=market_data.is_crypto(symbol),
         session_context_text=session_context_text,
         strategic_context_text=strategic_context_text,
         setup_results=all_setup_results,

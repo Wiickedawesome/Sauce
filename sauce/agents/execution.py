@@ -128,6 +128,7 @@ async def run(
             stop_price=None,
             as_of=as_of,
             prompt_version=settings.prompt_version,
+            source="execution",
         )
     except ValidationError as exc:
         logger.error("execution[%s]: Order validation failed: %s", signal.symbol, exc)

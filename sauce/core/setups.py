@@ -31,11 +31,7 @@ from sauce.core.schemas import (
     SoftConditionResult,
 )
 
-# ── Asset-class routing ────────────────────────────────────────────────────────
-
-def _is_crypto(symbol: str) -> bool:
-    """Return True for Alpaca crypto pairs (e.g. 'BTC/USD')."""
-    return "/" in symbol
+from sauce.adapters.market_data import is_crypto as _is_crypto
 
 # ── Eligible regimes ─────────────────────────────────────────────────────────
 

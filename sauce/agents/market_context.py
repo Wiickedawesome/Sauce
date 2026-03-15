@@ -13,11 +13,9 @@ No LLM calls, no broker calls — pure data assembly.
 import logging
 from datetime import datetime, timezone
 
-import pandas as pd
-import pandas_ta as ta  # type: ignore[import-untyped]
-
 from sauce.adapters import market_data
 from sauce.adapters.db import log_event
+from sauce.indicators.core import compute_all
 from sauce.memory.db import (
     get_session_context,
     write_narrative,
@@ -40,101 +38,11 @@ from sauce.core.schemas import (
 logger = logging.getLogger(__name__)
 
 _MIN_BARS_REQUIRED = 10
-_BARS_PER_DAY_EQUITY = 13  # ~6.5 hours / 30-min bars
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _last_float(series: pd.Series) -> float | None:  # type: ignore[type-arg]
-    """Return the last non-NaN float from *series*, or None."""
-    try:
-        cleaned = series.dropna()
-        if cleaned.empty:
-            return None
-        val = float(cleaned.iloc[-1])
-        if val != val:  # NaN guard  # noqa: PLR0124
-            return None
-        return val
-    except (TypeError, ValueError, AttributeError):
-        return None
-
-
-def _compute_spy_indicators(spy_df: pd.DataFrame) -> Indicators:
-    """Compute the full indicator set for SPY, mirroring research.py logic."""
-    close = spy_df["close"]
-    high = spy_df["high"]
-    low = spy_df["low"]
-    volume = spy_df["volume"]
-
-    sma_20 = _last_float(ta.sma(close, length=20))
-    sma_50 = _last_float(ta.sma(close, length=50))
-    rsi_14 = _last_float(ta.rsi(close, length=14))
-    atr_14 = _last_float(ta.atr(high, low, close, length=14))
-
-    # Volume ratio: current bar vs 20-bar average
-    volume_ratio: float | None = None
-    try:
-        vol_mean = float(volume.iloc[-20:].mean())
-        if vol_mean > 0:
-            volume_ratio = float(volume.iloc[-1]) / vol_mean
-    except (TypeError, ValueError, IndexError):
-        pass  # Insufficient volume data — leave volume_ratio as None
-    estimated_days = max(len(spy_df) / _BARS_PER_DAY_EQUITY, 1.0)
-    volume_1d_avg: float | None = None
-    try:
-        volume_1d_avg = float(volume.sum()) / estimated_days
-    except (TypeError, ValueError):
-        pass  # Empty or non-numeric volume series — leave volume_1d_avg as None
-    macd_line: float | None = None
-    macd_signal: float | None = None
-    macd_histogram: float | None = None
-    macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-    if macd_df is not None and not macd_df.empty:
-        macd_line = _last_float(macd_df.iloc[:, 0])
-        macd_signal = _last_float(macd_df.iloc[:, 1])
-        macd_histogram = _last_float(macd_df.iloc[:, 2])
-
-    # Bollinger Bands
-    bb_lower: float | None = None
-    bb_middle: float | None = None
-    bb_upper: float | None = None
-    bb_df = ta.bbands(close, length=20, std=2)
-    if bb_df is not None and not bb_df.empty:
-        bb_lower = _last_float(bb_df.iloc[:, 0])
-        bb_middle = _last_float(bb_df.iloc[:, 1])
-        bb_upper = _last_float(bb_df.iloc[:, 2])
-
-    # Stochastic
-    stoch_k: float | None = None
-    stoch_d: float | None = None
-    stoch_df = ta.stoch(high, low, close, k=14, d=3, smooth_k=3)
-    if stoch_df is not None and not stoch_df.empty:
-        stoch_k = _last_float(stoch_df.iloc[:, 0])
-        stoch_d = _last_float(stoch_df.iloc[:, 1])
-
-    # VWAP
-    vwap_series = ta.vwap(high, low, close, volume)
-    vwap_val = _last_float(vwap_series) if vwap_series is not None else None
-
-    return Indicators(
-        sma_20=sma_20,
-        sma_50=sma_50,
-        rsi_14=rsi_14,
-        atr_14=atr_14,
-        volume_ratio=volume_ratio,
-        volume_1d_avg=volume_1d_avg,
-        macd_line=macd_line,
-        macd_signal=macd_signal,
-        macd_histogram=macd_histogram,
-        bb_upper=bb_upper,
-        bb_middle=bb_middle,
-        bb_lower=bb_lower,
-        stoch_k=stoch_k,
-        stoch_d=stoch_d,
-        vwap=vwap_val,
-    )
+def _compute_spy_indicators(spy_df: "pd.DataFrame") -> Indicators:
+    """Compute the full indicator set for SPY via the canonical library."""
+    return compute_all(spy_df, is_crypto=False)
 
 
 # ---------------------------------------------------------------------------

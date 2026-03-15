@@ -155,6 +155,13 @@ def get_session(db_path: str | None = None) -> Session:
     return SessionLocal()
 
 
+def cleanup_engines() -> None:
+    """Dispose all cached engines and clear the cache."""
+    for engine in _engines.values():
+        engine.dispose()
+    _engines.clear()
+
+
 # ── Public Write Helpers ──────────────────────────────────────────────────────
 
 def log_event(event: AuditEvent, db_path: str | None = None) -> None:

@@ -48,8 +48,13 @@ def _get_crypto_client() -> Any:
     return CryptoHistoricalDataClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key)
 
 
-def _is_crypto(symbol: str) -> bool:
+def is_crypto(symbol: str) -> bool:
+    """Return True for Alpaca crypto pairs (e.g. 'BTC/USD')."""
     return "/" in symbol
+
+
+# Backward-compatible alias for any external callers.
+_is_crypto = is_crypto
 
 
 # ── get_quote ─────────────────────────────────────────────────────────────────
@@ -147,7 +152,7 @@ def get_history(
 
 def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     from alpaca.data.requests import StockBarsRequest  # type: ignore[import-untyped]
-    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit  # type: ignore[import-untyped]
+    from alpaca.data.timeframe import TimeFrame  # type: ignore[import-untyped]
 
     tf = _parse_timeframe(timeframe)
     start = datetime.now(timezone.utc) - timedelta(days=_days_back_for_bars(timeframe, bars))

@@ -16,11 +16,10 @@ Crypto is NOT screened — it uses the .env list as-is (user confirmed).
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sauce.adapters.market_data import (
-    MarketDataError,
-    _is_crypto,
+    is_crypto as _is_crypto,
     get_active_equity_assets,
     get_bulk_equity_bars,
     get_universe_snapshot,

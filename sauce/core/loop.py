@@ -37,7 +37,7 @@ from typing import Any
 
 from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, place_order
 from sauce.adapters.db import OrderRow, has_recent_submitted_order, log_event, log_order
-from sauce.adapters.market_data import get_universe_snapshot, _is_crypto
+from sauce.adapters.market_data import get_universe_snapshot, is_crypto as _is_crypto
 from sauce.agents import execution, exit_research, market_context, ops, portfolio, research, risk, session_boot, supervisor
 from sauce.agents.debate import run_debate
 from sauce.core.capital import detect_tier_transition, get_tier_parameters
@@ -56,7 +56,6 @@ from sauce.core.schemas import (
     BootContext,
     ExitSignal,
     Indicators,
-    MarketContext,
     Order,
     PortfolioReview,
     RiskCheckResult,
@@ -64,6 +63,7 @@ from sauce.core.schemas import (
     SupervisorDecision,
 )
 from sauce.memory.learning import record_trade_outcome
+from sauce.memory.db import get_latest_setup_type, get_trade_entry_time
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +74,16 @@ _shutdown_requested = False
 # Maps normalized symbol → last-seen position dict snapshot.
 _previous_positions: dict[str, dict[str, Any]] = {}
 
+# Track the last-known capital tier to detect transitions between loops.
+_previous_tier: str | None = None
+
 
 def _detect_closed_positions(
     current_positions: list[dict[str, Any]],
     loop_id: str,
     regime: str,
     db_path: str,
+    session_db_path: str,
 ) -> None:
     """Compare current positions with previous snapshot and record outcomes for closures."""
     global _previous_positions  # noqa: PLW0603
@@ -94,21 +98,35 @@ def _detect_closed_positions(
         if sym not in current_symbols:
             # Position was closed since last loop
             pnl = float(prev.get("unrealized_pl", 0.0))
+
+            # Resolve setup_type from session memory signal_log.
+            # Equities only have one setup; crypto needs lookup.
+            if _is_crypto(sym):
+                resolved = get_latest_setup_type(sym, session_db_path)
+                setup_type = resolved or "crypto_mean_reversion"
+            else:
+                setup_type = "equity_trend_pullback"
+
+            # Compute hold duration from trade_log entry time when available.
+            now = datetime.now(timezone.utc)
+            entry_time = get_trade_entry_time(sym, session_db_path)
+            hold_mins = (now - entry_time).total_seconds() / 60.0 if entry_time else 0.0
+
             try:
                 entry = SetupPerformanceEntry(
-                    setup_type="equity_trend_pullback",  # best-effort default
+                    setup_type=setup_type,  # type: ignore[arg-type]
                     symbol=sym,
                     regime_at_entry=regime or "unknown",  # type: ignore[arg-type]
-                    time_of_day_bucket=datetime.now(timezone.utc).strftime("%H:00"),
+                    time_of_day_bucket=now.strftime("%H:00"),
                     win=pnl > 0,
                     pnl=round(pnl, 2),
-                    hold_duration_minutes=0.0,  # unknown from position data alone
-                    date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    hold_duration_minutes=round(hold_mins, 1),
+                    date=now.strftime("%Y-%m-%d"),
                 )
                 record_trade_outcome(entry, db_path)
                 logger.info(
-                    "Recorded closed position outcome: %s pnl=%.2f win=%s [loop_id=%s]",
-                    sym, pnl, pnl > 0, loop_id,
+                    "Recorded closed position outcome: %s pnl=%.2f win=%s setup=%s hold=%.1fm [loop_id=%s]",
+                    sym, pnl, pnl > 0, setup_type, hold_mins, loop_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -247,6 +265,14 @@ async def main() -> None:
             run_maintenance()
         except Exception:  # noqa: BLE001
             logger.warning("DB maintenance skipped due to error", exc_info=True)
+        # Dispose cached SQLAlchemy engines to release connections
+        try:
+            from sauce.adapters.db import cleanup_engines as _cleanup_audit
+            from sauce.memory.db import cleanup_engines as _cleanup_memory
+            _cleanup_audit()
+            _cleanup_memory()
+        except Exception:  # noqa: BLE001
+            logger.warning("Engine cleanup skipped due to error", exc_info=True)
         logger.info("Loop ended [loop_id=%s]", loop_id)
 
 
@@ -319,7 +345,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
 
     log_event(AuditEvent(
         loop_id=loop_id,
-        event_type="tier_transition",
+        event_type="tier_check",
         payload={
             "tier": tier_params.tier,
             "equity": _equity,
@@ -328,6 +354,23 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
             "max_positions": tier_params.max_positions,
         },
     ))
+
+    # Detect tier transitions between loop runs
+    global _previous_tier  # noqa: PLW0603
+    if _previous_tier is not None:
+        transition = detect_tier_transition(_previous_tier, _equity)
+        if transition:
+            logger.warning(
+                "Capital tier TRANSITION: %s → %s (equity=$%.2f) [loop_id=%s]",
+                transition["from_tier"], transition["to_tier"], _equity, loop_id,
+            )
+            log_event(AuditEvent(
+                loop_id=loop_id,
+                event_type="tier_transition",
+                payload=transition,
+            ))
+    _previous_tier = tier_params.tier
+
     logger.info(
         "Capital tier: %s (equity=$%.2f, max_pos=%.1f%%, max_loss=%.1f%%)",
         tier_params.tier, _equity,
@@ -355,7 +398,8 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         positions,
         loop_id=loop_id,
         regime=mkt_ctx.regime.regime_type,
-        db_path=str(settings.db_path),
+        db_path=str(settings.strategic_memory_db_path),
+        session_db_path=str(settings.session_memory_db_path),
     )
 
     # ── Step 4: Build universe (screener or static .env list) ──────────────
@@ -765,6 +809,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                     limit_price=pos_quote.bid,
                     as_of=exit_sig.as_of,
                     prompt_version=exit_sig.prompt_version,
+                    source="exit_research",
                 )
                 exit_orders.append(_exit_order)
                 log_event(AuditEvent(
@@ -911,6 +956,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
                         stop_price=order.stop_loss_price,
                         as_of=order.as_of,
                         prompt_version=order.prompt_version,
+                        source="stop_loss",
                     )
                     try:
                         _sl_result = await asyncio.to_thread(

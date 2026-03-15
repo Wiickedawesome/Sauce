@@ -159,7 +159,10 @@ class Order(StrictModel):
     )
     as_of: datetime
     prompt_version: str
-
+    source: Literal["execution", "exit_research", "stop_loss"] | None = Field(
+        default=None,
+        description="Provenance tag: which agent/stage created this order.",
+    )
 
 # ── Supervisor Agent ──────────────────────────────────────────────────────────
 
@@ -220,8 +223,10 @@ class AuditEvent(StrictModel):
         "reconciliation",
         "session_boot",
         "market_context",
+        "debate",
         "regime_transition",
         "tier_transition",
+        "tier_check",
         "learning_drift_detected",
         "learning_weekly_report",
         "learning_calibration_analysis",

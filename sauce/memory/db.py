@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    case,
     create_engine,
     text,
 )
@@ -291,6 +292,13 @@ def get_engine(db_path: str) -> Engine:
     return _engines[db_path]
 
 
+def cleanup_engines() -> None:
+    """Dispose all cached engines and clear the cache."""
+    for engine in _engines.values():
+        engine.dispose()
+    _engines.clear()
+
+
 def _ensure_unique_indexes(engine: Engine, db_path: str) -> None:
     """Create unique indexes on existing tables that may lack them."""
     indexes: list[str] = []
@@ -412,6 +420,40 @@ def write_signal_log(entry: SignalLogEntry, db_path: str) -> None:
         session.close()
 
 
+def get_latest_setup_type(symbol: str, db_path: str) -> str | None:
+    """Return the most recent setup_type for *symbol* from today's signal_log, or None."""
+    session = get_session(db_path)
+    try:
+        row = (
+            session.query(SignalLogRow.setup_type)
+            .filter(SignalLogRow.symbol == symbol)
+            .order_by(SignalLogRow.timestamp.desc())
+            .first()
+        )
+        return str(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        session.close()
+
+
+def get_trade_entry_time(symbol: str, db_path: str) -> datetime | None:
+    """Return the earliest buy timestamp for *symbol* from today's trade_log, or None."""
+    session = get_session(db_path)
+    try:
+        row = (
+            session.query(TradeLogRow.timestamp)
+            .filter(TradeLogRow.symbol == symbol, TradeLogRow.direction == "buy")
+            .order_by(TradeLogRow.timestamp.asc())
+            .first()
+        )
+        return _ensure_utc(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        session.close()
+
+
 def write_trade_log(entry: TradeLogEntry, db_path: str) -> None:
     """Append a trade record to session memory."""
     session = get_session(db_path)
@@ -489,8 +531,22 @@ def write_peak_pnl(entry: PositionPeakPnL, db_path: str) -> None:
         stmt = stmt.on_conflict_do_update(
             index_elements=["symbol"],
             set_={
-                "peak_unrealized_pnl": stmt.excluded.peak_unrealized_pnl,
-                "peak_at": stmt.excluded.peak_at,
+                "peak_unrealized_pnl": case(
+                    (
+                        stmt.excluded.peak_unrealized_pnl
+                        > PositionPeakPnLRow.peak_unrealized_pnl,
+                        stmt.excluded.peak_unrealized_pnl,
+                    ),
+                    else_=PositionPeakPnLRow.peak_unrealized_pnl,
+                ),
+                "peak_at": case(
+                    (
+                        stmt.excluded.peak_unrealized_pnl
+                        > PositionPeakPnLRow.peak_unrealized_pnl,
+                        stmt.excluded.peak_at,
+                    ),
+                    else_=PositionPeakPnLRow.peak_at,
+                ),
             },
         )
         session.execute(stmt)
@@ -940,7 +996,8 @@ def get_similar_trades(
                 score += 1
             scored.append((score, row.date, row))
 
-        # Sort by score desc, then date desc
+        # Sort by score desc, then date desc.
+        # row.date is ISO-8601 (YYYY-MM-DD) so lexicographic order == chronological.
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
         results: list[SetupPerformanceEntry] = []

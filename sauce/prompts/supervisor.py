@@ -12,8 +12,6 @@ Invariant: the Supervisor can override approve → abort, but never abort → ap
 import json
 from datetime import datetime, timezone
 
-from sauce.prompts.utils import sanitize_llm_text
-
 PROMPT_VERSION = "v1"
 
 SYSTEM_PROMPT = """You are the final safety supervisor of a live algorithmic trading system.
@@ -77,7 +75,7 @@ def build_user_prompt(
     portfolio_review: Optional portfolio review summary (Finding 2.2). When present,
                       the Supervisor can see current exposure and concentration flags.
     """
-    timestamp_str = as_of_utc.replace(tzinfo=timezone.utc).isoformat()
+    timestamp_str = as_of_utc.astimezone(timezone.utc).isoformat()
 
     try:
         equity = float(account.get("equity") or 0.0)

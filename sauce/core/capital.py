@@ -18,8 +18,6 @@ Tier boundaries:
 
 from __future__ import annotations
 
-from pydantic import Field
-
 from sauce.core.schemas import CapitalTier, SetupType, StrictModel
 
 
