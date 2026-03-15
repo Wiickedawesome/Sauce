@@ -35,8 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, place_order
-from sauce.adapters.db import OrderRow, has_recent_submitted_order, log_event, log_order
+from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, get_recent_orders, place_order
+from sauce.adapters.db import OrderRow, SignalRow, check_test_contamination, get_latest_signal_confidence, has_recent_submitted_order, log_event, log_order, log_signal
 from sauce.adapters.market_data import get_universe_snapshot, is_crypto as _is_crypto
 from sauce.agents import execution, exit_research, market_context, ops, portfolio, research, risk, session_boot, supervisor
 from sauce.agents.debate import run_debate
@@ -54,6 +54,7 @@ from sauce.core.safety import (
 from sauce.core.schemas import (
     AuditEvent,
     BootContext,
+    ClaudeCalibrationEntry,
     ExitSignal,
     Indicators,
     Order,
@@ -61,9 +62,10 @@ from sauce.core.schemas import (
     RiskCheckResult,
     Signal,
     SupervisorDecision,
+    VetoPatternEntry,
 )
 from sauce.memory.learning import record_trade_outcome
-from sauce.memory.db import canonicalize_symbol, delete_peak_pnl, get_latest_setup_type, get_trade_entry_time
+from sauce.memory.db import canonicalize_symbol, delete_peak_pnl, get_latest_setup_type, get_trade_entry_time, write_veto_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,11 @@ _previous_positions: dict[str, dict[str, Any]] = {}
 # Track the last-known capital tier to detect transitions between loops.
 _previous_tier: str | None = None
 
+# Track whether ops.run() was called in the current loop iteration.
+# Reset at start of each loop run; checked in main() finally block so the ops
+# agent always executes — even on early abort or exception (Finding F-14).
+_ops_ran = False
+
 
 def _detect_closed_positions(
     current_positions: list[dict[str, Any]],
@@ -84,6 +91,7 @@ def _detect_closed_positions(
     regime: str,
     db_path: str,
     session_db_path: str,
+    audit_db_path: str | None = None,
 ) -> None:
     """Compare current positions with previous snapshot and record outcomes for closures."""
     global _previous_positions  # noqa: PLW0603
@@ -112,20 +120,39 @@ def _detect_closed_positions(
             hold_mins = (now - entry_time).total_seconds() / 60.0 if entry_time else 0.0
 
             try:
+                # Use entry time for the bucket so performance is attributed to
+                # the hour the trade was opened, not the hour it was closed (F-05).
+                _bucket_time = entry_time if entry_time else now
+                # Use the regime recorded when the position was first seen,
+                # falling back to the current regime if unavailable (F-04).
+                _entry_regime = prev.get("_entry_regime", regime) or "unknown"
                 entry = SetupPerformanceEntry(
                     setup_type=setup_type,  # type: ignore[arg-type]
                     symbol=sym,
-                    regime_at_entry=regime or "unknown",  # type: ignore[arg-type]
-                    time_of_day_bucket=now.strftime("%H:00"),
+                    regime_at_entry=_entry_regime,  # type: ignore[arg-type]
+                    time_of_day_bucket=_bucket_time.strftime("%H:00"),
                     win=pnl > 0,
                     pnl=round(pnl, 2),
                     hold_duration_minutes=round(hold_mins, 1),
                     date=now.strftime("%Y-%m-%d"),
                 )
-                record_trade_outcome(entry, db_path)
+
+                # Construct calibration entry from original signal confidence (F-01 fix).
+                cal_entry: ClaudeCalibrationEntry | None = None
+                if audit_db_path:
+                    sig_data = get_latest_signal_confidence(sym, audit_db_path)
+                    if sig_data is not None:
+                        cal_entry = ClaudeCalibrationEntry(
+                            date=now.strftime("%Y-%m-%d"),
+                            confidence_stated=sig_data[0],
+                            outcome="win" if pnl > 0 else "loss",
+                            setup_type=setup_type,  # type: ignore[arg-type]
+                        )
+
+                record_trade_outcome(entry, db_path, calibration_entry=cal_entry)
                 logger.info(
-                    "Recorded closed position outcome: %s pnl=%.2f win=%s setup=%s hold=%.1fm [loop_id=%s]",
-                    sym, pnl, pnl > 0, setup_type, hold_mins, loop_id,
+                    "Recorded closed position outcome: %s pnl=%.2f win=%s setup=%s hold=%.1fm calibrated=%s [loop_id=%s]",
+                    sym, pnl, pnl > 0, setup_type, hold_mins, cal_entry is not None, loop_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -133,6 +160,15 @@ def _detect_closed_positions(
                     sym, exc, loop_id,
                 )
             delete_peak_pnl(sym, session_db_path)
+
+    # Tag new positions with entry regime; carry forward for existing (F-04).
+    for sym, pos_data in current_symbols.items():
+        if sym not in _previous_positions:
+            pos_data["_entry_regime"] = regime
+        else:
+            prev_regime = _previous_positions[sym].get("_entry_regime")
+            if prev_regime:
+                pos_data["_entry_regime"] = prev_regime
 
     _previous_positions = current_symbols
 
@@ -210,6 +246,25 @@ async def main() -> None:
 
     logger.info("Loop started [loop_id=%s]", loop_id)
 
+    # ── Test data sentinel check (IMP-04) ─────────────────────────────────
+    _contamination = check_test_contamination()
+    if _contamination:
+        for _finding in _contamination:
+            logger.warning(
+                "Test data sentinel detected: %s.%s = %r (%d rows) [loop_id=%s]",
+                _finding["table"], _finding["column"],
+                _finding["value"], _finding["count"], loop_id,
+            )
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="safety_check",
+            payload={
+                "check": "test_contamination",
+                "result": False,
+                "findings": _contamination,
+            },
+        ))
+
     # ── Agent 0: Session Boot ─────────────────────────────────────────────
     boot_ctx = await session_boot.run(loop_id=loop_id)
     logger.info("Session boot complete [loop_id=%s, suppressed=%s]", loop_id, boot_ctx.is_suppressed)
@@ -249,6 +304,26 @@ async def main() -> None:
         ))
         raise
     finally:
+        # Guarantee ops agent runs even on early abort/exception (F-14).
+        if not _ops_ran:
+            try:
+                await ops.run(
+                    loop_id=loop_id,
+                    summary={
+                        "signals_total": 0,
+                        "signals_buy_sell": 0,
+                        "risk_vetoes": 0,
+                        "orders_prepared": 0,
+                        "orders_placed": 0,
+                        "supervisor_action": "abort",
+                        "symbols_attempted": [],
+                        "veto_by_symbol": {},
+                        "equity_usd": 0.0,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Fallback ops.run failed [loop_id=%s]", loop_id, exc_info=True)
+
         log_event(AuditEvent(
             loop_id=loop_id,
             event_type="loop_end",
@@ -275,6 +350,8 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
     """
     Inner loop body. Separated so main() can guarantee loop_end is always logged.
     """
+    global _ops_ran  # noqa: PLW0603
+    _ops_ran = False
 
     # ── Step 1b: Safety pre-flight ────────────────────────────────────────────
     if is_trading_paused(loop_id=loop_id):
@@ -395,6 +472,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         regime=mkt_ctx.regime.regime_type,
         db_path=str(settings.strategic_memory_db_path),
         session_db_path=str(settings.session_memory_db_path),
+        audit_db_path=str(settings.db_path),
     )
 
     # ── Step 4: Build universe (screener or static .env list) ──────────────
@@ -517,16 +595,18 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             else:
                 signal: Signal = result
                 signals.append(signal)
-                log_event(AuditEvent(
-                    loop_id=loop_id,
-                    event_type="signal",
-                    symbol=sym,
-                    payload={
-                        "side": signal.side,
-                        "confidence": signal.confidence,
-                        "reasoning": signal.reasoning[:200],  # truncate for DB
-                    },
-                ))
+                log_signal(
+                    SignalRow(
+                        loop_id=loop_id,
+                        symbol=sym,
+                        side=signal.side,
+                        confidence=signal.confidence,
+                        reasoning=signal.reasoning[:200],
+                        vetoed=False,
+                        as_of=signal.as_of,
+                        prompt_version=signal.prompt_version,
+                    ),
+                )
 
     # ── Step 5b: Bull/Bear debate — deterministic opposing analysis ───────────
     debate_results: dict[str, object] = {}  # symbol → DebateResult
@@ -577,7 +657,31 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                 "Signal for %s below min_confidence (%.2f < %.2f) — skipping",
                 signal.symbol, signal.confidence, settings.min_confidence,
             )
+            log_event(AuditEvent(
+                loop_id=loop_id,
+                event_type="safety_check",
+                symbol=signal.symbol,
+                payload={
+                    "check": "confidence_floor",
+                    "result": False,
+                    "confidence": signal.confidence,
+                    "min_confidence": settings.min_confidence,
+                },
+            ))
             continue
+
+        # Log that signal passed the confidence floor check
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="safety_check",
+            symbol=signal.symbol,
+            payload={
+                "check": "confidence_floor",
+                "result": True,
+                "confidence": signal.confidence,
+                "min_confidence": settings.min_confidence,
+            },
+        ))
 
         _symbols_attempted.append(signal.symbol)
         try:
@@ -853,6 +957,19 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         ))
         # decision stays as the safe abort default above
 
+    # Log the supervisor decision from the orchestrator's perspective
+    # so the audit trail is complete even when supervisor.run is mocked.
+    log_event(AuditEvent(
+        loop_id=loop_id,
+        event_type="supervisor_decision",
+        payload={
+            "action": decision.action,
+            "reason": decision.reason,
+            "order_count": len(decision.final_orders),
+            "veto_count": len(decision.vetoes),
+        },
+    ))
+
     # ── Step 10: Place approved orders ───────────────────────────────────────
     if _shutdown_requested:
         logger.warning("Shutdown requested — skipping order placement [loop_id=%s]", loop_id)
@@ -865,6 +982,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         return
 
     _orders_placed_count: int = 0
+    _placed_broker_ids: list[str] = []
     _db_path = str(settings.db_path)
     if decision.action == "execute":
         for order in decision.final_orders:
@@ -901,6 +1019,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                 broker_order_id = str(
                     result.get("id") or result.get("order_id") or "unknown"
                 )
+                _placed_broker_ids.append(broker_order_id)
                 broker_status = str(result.get("status") or "submitted")
 
                 # ── Persist order record (Finding 3.1) ─────────────────────────
@@ -1059,11 +1178,91 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                     event_type="error",
                     payload={"stage": "reconciliation", "error": str(exc)},
                 ))
+
+            # ── Step 10c: Broker order cross-validation (IMP-03) ────────────
+            # Compare broker-side orders against DB records to detect
+            # phantom fills, silent rejects, or missing order rows.
+            try:
+                broker_orders = await asyncio.to_thread(get_recent_orders, loop_id)
+                broker_ids = {o["broker_order_id"] for o in broker_orders if o["broker_order_id"]}
+                db_ids = set(_placed_broker_ids)  # IDs placed this loop
+
+                missing_at_broker = db_ids - broker_ids
+                if missing_at_broker:
+                    log_event(AuditEvent(
+                        loop_id=loop_id,
+                        event_type="safety_check",
+                        payload={
+                            "check": "order_cross_validation",
+                            "result": False,
+                            "issue": "orders_missing_at_broker",
+                            "broker_order_ids": sorted(missing_at_broker),
+                        },
+                    ))
+                    logger.warning(
+                        "Order cross-validation: %d orders missing at broker [loop_id=%s]",
+                        len(missing_at_broker), loop_id,
+                    )
+                else:
+                    log_event(AuditEvent(
+                        loop_id=loop_id,
+                        event_type="safety_check",
+                        payload={
+                            "check": "order_cross_validation",
+                            "result": True,
+                            "orders_validated": len(db_ids),
+                        },
+                    ))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Order cross-validation failed [loop_id=%s]: %s", loop_id, exc)
+
+            # ── Step 10d: Audit/orders table consistency (IMP-08) ───────────
+            try:
+                from sauce.adapters.db import verify_order_consistency
+                oc = verify_order_consistency(loop_id, db_path=_db_path)
+                log_event(AuditEvent(
+                    loop_id=loop_id,
+                    event_type="safety_check",
+                    payload={
+                        "check": "order_table_consistency",
+                        "result": oc["consistent"],
+                        "audit_only": oc.get("audit_only", []),
+                        "orders_only": oc.get("orders_only", []),
+                    },
+                ))
+                if not oc["consistent"]:
+                    logger.warning(
+                        "Order/audit mismatch [loop_id=%s]: audit_only=%s orders_only=%s",
+                        loop_id, oc["audit_only"], oc["orders_only"],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Order table consistency check failed [loop_id=%s]: %s", loop_id, exc)
     else:
         logger.info(
             "Supervisor decision: abort — no orders placed [loop_id=%s]. Reason: %s",
             loop_id, decision.reason,
         )
+
+        # Record veto patterns for each actionable signal so strategic memory
+        # tracks recurring abort reasons by setup type (F-01).
+        _strategic_db = str(settings.strategic_memory_db_path)
+        _veto_now = datetime.now(timezone.utc)
+        for _sig in signals:
+            if _sig.side == "hold" or _sig.confidence < settings.min_confidence:
+                continue
+            _veto_setup = "crypto_mean_reversion" if _is_crypto(_sig.symbol) else "equity_trend_pullback"
+            for _veto_reason in decision.vetoes:
+                try:
+                    write_veto_pattern(
+                        VetoPatternEntry(
+                            veto_reason=_veto_reason,
+                            setup_type=_veto_setup,  # type: ignore[arg-type]
+                            last_seen=_veto_now,
+                        ),
+                        _strategic_db,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to record veto pattern [loop_id=%s]: %s", loop_id, exc)
 
     # ── Step 11: Ops agent — write audit trail ────────────────────────────────
     # Build veto_by_symbol so ops.py anomaly detection can flag persistently
@@ -1073,6 +1272,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         if _rr.veto:
             _veto_by_symbol[_rr.symbol] = _veto_by_symbol.get(_rr.symbol, 0) + 1
 
+    _ops_ran = True
     try:
         await ops.run(
             loop_id=loop_id,
@@ -1089,6 +1289,8 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                 # Pass equity so ops.py can compute NAV and write daily_stats
                 # (Finding 1.1, Finding 5.1).
                 "equity_usd": float(account.get("equity") or 0.0),
+                # Trigger weekly learning cycle on Sundays (F-03).
+                "run_weekly": datetime.now(timezone.utc).weekday() == 6,
             },
         )
     except Exception as exc:

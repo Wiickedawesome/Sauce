@@ -316,6 +316,38 @@ def get_latest_quote(symbol: str, loop_id: str = "unset") -> PriceReference:
         raise BrokerError(f"get_latest_quote failed for {symbol}: {exc}") from exc
 
 
+# ── Recent orders query ──────────────────────────────────────────────────────
+
+def get_recent_orders(loop_id: str = "unset") -> list[dict[str, Any]]:
+    """
+    Return today's orders from the broker as a list of dicts.
+
+    Each dict has keys: broker_order_id, symbol, side, qty, status, created_at.
+    Never raises — logs errors and returns [] on failure.
+    """
+    from alpaca.trading.enums import QueryOrderStatus  # type: ignore[import-untyped]
+    from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import-untyped]
+
+    try:
+        client = _get_trading_client()
+        request = GetOrdersRequest(status=QueryOrderStatus.ALL)
+        raw = client.get_orders(filter=request)
+        result: list[dict[str, Any]] = []
+        for o in raw:
+            result.append({
+                "broker_order_id": str(getattr(o, "id", "")),
+                "symbol": str(getattr(o, "symbol", "")),
+                "side": str(getattr(o, "side", "")),
+                "qty": str(getattr(o, "qty", "")),
+                "status": str(getattr(o, "status", "")),
+                "created_at": str(getattr(o, "created_at", "")),
+            })
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_recent_orders failed [loop_id=%s]: %s", loop_id, exc)
+        return []
+
+
 # ── Stale order cancellation ─────────────────────────────────────────────────
 
 def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> int:

@@ -352,3 +352,44 @@ def test_place_order_crypto_symbol_dispatches_correctly(
 
     assert mock_client.submit_order.called
     assert result["symbol"] == "BTC/USD"
+
+
+# ── get_recent_orders (IMP-03) ────────────────────────────────────────────────
+
+def test_get_recent_orders_returns_list(monkeypatch):
+    """get_recent_orders returns a list of dicts from broker."""
+    set_env(monkeypatch)
+    from sauce.adapters import broker
+
+    mock_order = MagicMock()
+    mock_order.id = "order-abc"
+    mock_order.symbol = "AAPL"
+    mock_order.side = "buy"
+    mock_order.qty = "10"
+    mock_order.status = "filled"
+    mock_order.created_at = "2024-01-02T15:30:00Z"
+
+    mock_client = MagicMock()
+    mock_client.get_orders.return_value = [mock_order]
+
+    with patch("sauce.adapters.broker._get_trading_client", return_value=mock_client):
+        result = broker.get_recent_orders(loop_id="test-loop")
+
+    assert len(result) == 1
+    assert result[0]["broker_order_id"] == "order-abc"
+    assert result[0]["symbol"] == "AAPL"
+    assert result[0]["side"] == "buy"
+
+
+def test_get_recent_orders_returns_empty_on_error(monkeypatch):
+    """On broker failure, returns [] instead of raising."""
+    set_env(monkeypatch)
+    from sauce.adapters import broker
+
+    mock_client = MagicMock()
+    mock_client.get_orders.side_effect = Exception("API timeout")
+
+    with patch("sauce.adapters.broker._get_trading_client", return_value=mock_client):
+        result = broker.get_recent_orders(loop_id="test-loop")
+
+    assert result == []

@@ -75,7 +75,7 @@ async def run(
                 loop_id=loop_id,
                 event_type="signal",
                 symbol=symbol,
-                payload={"agent": "research", "side": "hold", "reason": reason},
+                payload={"agent": "research", "side": "hold", "confidence": 0.0, "reasoning": reason},
                 prompt_version=settings.prompt_version,
             ),
             db_path=db_path,

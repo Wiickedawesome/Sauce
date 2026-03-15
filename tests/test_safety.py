@@ -362,3 +362,154 @@ def test_market_open_at_930_boundary():
 
     with patch.object(safety, "_now_et", return_value=tuesday_930):
         assert safety.check_market_hours("MSFT") is True
+
+
+# ── check_market_hours audit logging (IMP-01) ────────────────────────────────
+
+def test_market_hours_logs_safety_check_on_closed(tmp_path, monkeypatch):
+    """When market is closed, check_market_hours logs a safety_check event."""
+    import json
+    from sauce.adapters.db import AuditEventRow, get_session
+    from sauce.core import safety
+
+    sunday = datetime(2024, 1, 7, 11, 0, 0, tzinfo=_ET)
+    with patch.object(safety, "_now_et", return_value=sunday):
+        result = safety.check_market_hours("AAPL", loop_id="test-loop")
+
+    assert result is False
+    session = get_session()
+    try:
+        rows = session.query(AuditEventRow).filter(
+            AuditEventRow.event_type == "safety_check",
+        ).all()
+        assert len(rows) >= 1
+        payload = json.loads(rows[-1].payload) if isinstance(rows[-1].payload, str) else rows[-1].payload
+        assert payload["check"] == "market_hours"
+        assert payload["result"] is False
+        assert payload["reason"] == "weekend"
+    finally:
+        session.close()
+
+
+def test_market_hours_logs_outside_hours(tmp_path, monkeypatch):
+    """Before-hours equity check logs reason='outside_hours'."""
+    import json
+    from sauce.adapters.db import AuditEventRow, get_session
+    from sauce.core import safety
+
+    tuesday_8am = datetime(2024, 1, 2, 8, 0, 0, tzinfo=_ET)
+    with patch.object(safety, "_now_et", return_value=tuesday_8am):
+        result = safety.check_market_hours("AAPL", loop_id="test-loop")
+
+    assert result is False
+    session = get_session()
+    try:
+        rows = session.query(AuditEventRow).filter(
+            AuditEventRow.event_type == "safety_check",
+        ).all()
+        payload = json.loads(rows[-1].payload) if isinstance(rows[-1].payload, str) else rows[-1].payload
+        assert payload["reason"] == "outside_hours"
+    finally:
+        session.close()
+
+
+def test_market_hours_logs_pass_when_open():
+    """When market is open (True returned), a safety_check event IS logged with result=True."""
+    import json
+    from sauce.adapters.db import AuditEventRow, get_session
+    from sauce.core import safety
+
+    tuesday_10am = datetime(2024, 1, 2, 10, 0, 0, tzinfo=_ET)
+    with patch.object(safety, "_now_et", return_value=tuesday_10am):
+        result = safety.check_market_hours("AAPL", loop_id="test-loop")
+
+    assert result is True
+    session = get_session()
+    try:
+        rows = session.query(AuditEventRow).filter(
+            AuditEventRow.event_type == "safety_check",
+        ).all()
+        market_checks = [r for r in rows if "market_hours" in (r.payload or "")]
+        assert len(market_checks) == 1
+        payload = json.loads(market_checks[0].payload) if isinstance(market_checks[0].payload, str) else market_checks[0].payload
+        assert payload["check"] == "market_hours"
+        assert payload["result"] is True
+    finally:
+        session.close()
+
+
+def test_market_hours_crypto_no_log():
+    """Crypto symbols bypass market hours entirely — no event logged."""
+    from sauce.adapters.db import AuditEventRow, get_session
+    from sauce.core import safety
+
+    assert safety.check_market_hours("BTC/USD", loop_id="test-loop") is True
+
+    session = get_session()
+    try:
+        rows = session.query(AuditEventRow).filter(
+            AuditEventRow.event_type == "safety_check",
+        ).all()
+        assert len(rows) == 0
+    finally:
+        session.close()
+
+
+# ── is_trading_paused — pass-through audit logging ───────────────────────────
+
+def test_not_paused_logs_safety_check(monkeypatch):
+    """When trading is NOT paused, is_trading_paused logs result=False."""
+    import json
+    monkeypatch.setenv("TRADING_PAUSE", "false")
+    from sauce.core.config import get_settings
+    get_settings.cache_clear()
+    from sauce.adapters.db import AuditEventRow, get_session
+    from sauce.core.safety import is_trading_paused
+
+    result = is_trading_paused(loop_id="pass-test")
+    assert result is False
+
+    session = get_session()
+    try:
+        rows = session.query(AuditEventRow).filter(
+            AuditEventRow.event_type == "safety_check",
+        ).all()
+        pause_checks = [
+            r for r in rows
+            if "trading_pause" in (r.payload or "")
+        ]
+        assert len(pause_checks) >= 1
+        payload = json.loads(pause_checks[-1].payload) if isinstance(pause_checks[-1].payload, str) else pause_checks[-1].payload
+        assert payload["check"] == "trading_pause"
+        assert payload["result"] is False
+    finally:
+        session.close()
+
+
+def test_paused_logs_safety_check_result_true(monkeypatch):
+    """When trading IS paused, is_trading_paused logs result=True."""
+    import json
+    monkeypatch.setenv("TRADING_PAUSE", "true")
+    from sauce.core.config import get_settings
+    get_settings.cache_clear()
+    from sauce.adapters.db import AuditEventRow, get_session
+    from sauce.core.safety import is_trading_paused
+
+    result = is_trading_paused(loop_id="paused-test")
+    assert result is True
+
+    session = get_session()
+    try:
+        rows = session.query(AuditEventRow).filter(
+            AuditEventRow.event_type == "safety_check",
+        ).all()
+        pause_checks = [
+            r for r in rows
+            if "trading_pause" in (r.payload or "")
+        ]
+        assert len(pause_checks) >= 1
+        payload = json.loads(pause_checks[-1].payload) if isinstance(pause_checks[-1].payload, str) else pause_checks[-1].payload
+        assert payload["check"] == "trading_pause"
+        assert payload["result"] is True
+    finally:
+        session.close()

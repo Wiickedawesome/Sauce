@@ -391,6 +391,8 @@ class SignalLogEntry(StrictModel):
     score: float = Field(ge=0.0, le=100.0)
     claude_decision: Literal["approve", "reject", "hold"]
     reason: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    prompt_version: str | None = None
 
 
 class TradeLogEntry(StrictModel):

@@ -250,7 +250,7 @@ class TestClaudeCalibration:
                 _make_cal_entry(confidence=0.75, outcome="win" if i < 2 else "loss"),
                 tmp_strategic_db,
             )
-        result = analyze_claude_calibration(tmp_strategic_db)
+        result = analyze_claude_calibration(tmp_strategic_db, min_bucket_size=1)
         assert result["total_entries"] == 3
         bucket = result["buckets"]["0.70-0.80"]
         assert bucket["count"] == 3
@@ -269,7 +269,7 @@ class TestClaudeCalibration:
                 _make_cal_entry(confidence=0.55, outcome="win" if i < 2 else "loss"),
                 tmp_strategic_db,
             )
-        result = analyze_claude_calibration(tmp_strategic_db)
+        result = analyze_claude_calibration(tmp_strategic_db, min_bucket_size=1)
         assert result["total_entries"] == 10
         assert result["buckets"]["0.80-0.90"]["actual_win_rate"] == 0.75
         assert abs(result["buckets"]["0.50-0.60"]["actual_win_rate"] - 0.3333) < 0.001
@@ -285,8 +285,22 @@ class TestClaudeCalibration:
         write_claude_calibration(
             _make_cal_entry(confidence=1.0, outcome="win"), tmp_strategic_db
         )
-        result = analyze_claude_calibration(tmp_strategic_db)
+        result = analyze_claude_calibration(tmp_strategic_db, min_bucket_size=1)
         assert "0.90-1.00" in result["buckets"]
+
+    def test_min_bucket_size_guard(self, tmp_strategic_db):
+        """Buckets with fewer than min_bucket_size entries report insufficient_data (IMP-31)."""
+        for i in range(3):
+            write_claude_calibration(
+                _make_cal_entry(confidence=0.75, outcome="win" if i < 2 else "loss"),
+                tmp_strategic_db,
+            )
+        # Default min_bucket_size=5, so 3 entries should be insufficient
+        result = analyze_claude_calibration(tmp_strategic_db)
+        bucket = result["buckets"]["0.70-0.80"]
+        assert bucket["count"] == 3
+        assert bucket["insufficient_data"] is True
+        assert "actual_win_rate" not in bucket
 
 
 # ── update_symbol_learned_behavior ───────────────────────────────────────────
@@ -831,3 +845,55 @@ class TestFiftyMockTrades:
         assert cb.trades == 5
         assert cb.win_rate == 0.8
         assert cb.avg_pnl == 36.0  # (4×50+1×(-20))/5 = 180/5
+
+
+# ── F-02: update_symbol_learned_behavior wired into run_learning_cycle ──────
+
+
+class TestSymbolBehaviorInLearningCycle:
+    """F-02: run_learning_cycle should call update_symbol_learned_behavior
+    for each distinct (symbol, setup_type) pair with trade data."""
+
+    def test_symbol_behavior_updated_during_cycle(self, tmp_strategic_db):
+        """F-02: With sufficient trades, symbol behavior should be updated."""
+        # Need at least 5 trades per (symbol, setup_type) for meaningful stats
+        for i in range(10):
+            record_trade_outcome(
+                _make_perf_entry(
+                    symbol="BTC-USD",
+                    setup_type="crypto_mean_reversion",
+                    win=i < 7,
+                    pnl=20.0 if i < 7 else -10.0,
+                ),
+                tmp_strategic_db,
+            )
+        for i in range(8):
+            record_trade_outcome(
+                _make_perf_entry(
+                    symbol="AAPL",
+                    setup_type="equity_trend_pullback",
+                    win=i < 4,
+                    pnl=15.0 if i < 4 else -5.0,
+                ),
+                tmp_strategic_db,
+            )
+
+        result = run_learning_cycle("test-loop", tmp_strategic_db)
+        assert "symbol_behavior_updated" in result
+        assert result["symbol_behavior_updated"] == 2
+
+        # Verify rows were written to symbol_learned_behavior table
+        session = get_session(tmp_strategic_db)
+        try:
+            rows = session.query(SymbolLearnedBehaviorRow).all()
+            symbols_updated = {(r.symbol, r.setup_type) for r in rows}
+            assert ("BTC-USD", "crypto_mean_reversion") in symbols_updated
+            assert ("AAPL", "equity_trend_pullback") in symbols_updated
+        finally:
+            session.close()
+
+    def test_symbol_behavior_not_updated_when_no_data(self, tmp_strategic_db):
+        """F-02: With no trades, symbol_behavior_updated should be empty or absent."""
+        result = run_learning_cycle("test-loop", tmp_strategic_db)
+        # Either key is absent (no data at all → empty dict) or is empty list
+        assert result.get("symbol_behavior_updated", []) == []

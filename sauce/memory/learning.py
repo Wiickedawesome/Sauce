@@ -27,6 +27,8 @@ from sauce.core.schemas import (
     WeeklyPerformanceEntry,
 )
 
+from sqlalchemy import distinct
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,10 +89,17 @@ def detect_win_rate_drift(
 # ── Claude Calibration Analyzer ──────────────────────────────────────────────
 
 
-def analyze_claude_calibration(db_path: str) -> dict[str, Any]:
+def analyze_claude_calibration(
+    db_path: str,
+    min_bucket_size: int = 5,
+) -> dict[str, Any]:
     """
     Group calibration entries into confidence buckets and compute actual win rate
     per bucket.  A well-calibrated model has actual ≈ expected per bucket.
+
+    Buckets with fewer than *min_bucket_size* entries are reported with
+    ``insufficient_data=True`` and no ``actual_win_rate`` to prevent
+    misleading statistics from tiny samples (IMP-31).
 
     Returns ``{buckets: {label: {count, actual_win_rate, expected_midpoint}},
     total_entries: N}``.
@@ -124,11 +133,15 @@ def analyze_claude_calibration(db_path: str) -> dict[str, Any]:
             if not outcomes:
                 continue
             hi = min(hi_raw, 1.0)
-            report[label] = {
+            entry: dict[str, Any] = {
                 "count": len(outcomes),
-                "actual_win_rate": round(sum(outcomes) / len(outcomes), 4),
                 "expected_midpoint": round((lo + hi) / 2, 2),
             }
+            if len(outcomes) >= min_bucket_size:
+                entry["actual_win_rate"] = round(sum(outcomes) / len(outcomes), 4)
+            else:
+                entry["insufficient_data"] = True
+            report[label] = entry
 
         return {"buckets": report, "total_entries": len(rows)}
     finally:
@@ -273,6 +286,35 @@ def run_learning_cycle(
             )
     except Exception as exc:  # noqa: BLE001
         logger.error("learning[%s]: drift detection failed: %s", loop_id, exc)
+
+    # 1b. Update symbol learned behavior for all (symbol, setup_type) pairs
+    # that have enough trade history (≥3 trades) (F-02).
+    try:
+        session = get_session(strategic_db_path)
+        try:
+            pairs = (
+                session.query(
+                    SetupPerformanceRow.symbol,
+                    SetupPerformanceRow.setup_type,
+                )
+                .group_by(
+                    SetupPerformanceRow.symbol,
+                    SetupPerformanceRow.setup_type,
+                )
+                .all()
+            )
+        finally:
+            session.close()
+        _updated = 0
+        for sym, st in pairs:
+            result = update_symbol_learned_behavior(sym, st, strategic_db_path)
+            if result is not None:
+                _updated += 1
+        if _updated:
+            results["symbol_behavior_updated"] = _updated
+            logger.info("learning[%s]: updated %d symbol behavior entries", loop_id, _updated)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("learning[%s]: symbol behavior update failed: %s", loop_id, exc)
 
     # 2. Weekly report + calibration (on trigger)
     if run_weekly:

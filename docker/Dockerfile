@@ -63,4 +63,4 @@ HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \
 # Cron does NOT inherit the container's environment variables. We dump them to
 # a file that run_loop.sh sources before running the Python process.
 # Only whitelisted variable names are exported to avoid leaking shell internals.
-CMD ["sh", "-c", "env | grep -E '^(ALPACA_|LLM_|ANTHROPIC_|DB_PATH|TRADING_|DATA_|HEARTBEAT_|WEBHOOK_|TZ=)' > /etc/environment.sauce && cron && tail -F /app/data/logs/cron.log"]
+CMD ["sh", "-c", "env | grep -E '^(ALPACA_|LLM_|ANTHROPIC_|DB_PATH|TRADING_|DATA_|HEARTBEAT_|WEBHOOK_|TZ=)' > /etc/environment.sauce && /app/.venv/bin/python /app/scripts/log_container_start.py && cron && tail -F /app/data/logs/cron.log"]

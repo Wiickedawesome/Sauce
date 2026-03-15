@@ -100,6 +100,8 @@ class SignalLogRow(SessionBase):
     score: float = Column(Float, nullable=False)
     claude_decision: str = Column(String(10), nullable=False)
     reason: str | None = Column(Text, nullable=True)
+    confidence: float = Column(Float, nullable=False, default=0.0)
+    prompt_version: str | None = Column(String(32), nullable=True)
 
 
 class TradeLogRow(SessionBase):
@@ -422,6 +424,8 @@ def write_signal_log(entry: SignalLogEntry, db_path: str) -> None:
             score=entry.score,
             claude_decision=entry.claude_decision,
             reason=entry.reason,
+            confidence=entry.confidence,
+            prompt_version=entry.prompt_version,
         )
         session.add(row)
         session.commit()

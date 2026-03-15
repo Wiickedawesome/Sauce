@@ -24,7 +24,6 @@ def main() -> int:
         row = conn.execute(
             "SELECT MAX(timestamp) FROM audit_events WHERE event_type = 'loop_end'"
         ).fetchone()
-        conn.close()
     except Exception:
         # DB doesn't exist yet (first boot) — cron is running, that's enough
         return 0
@@ -50,6 +49,23 @@ def main() -> int:
         print(f"UNHEALTHY: last loop_end was {age_minutes:.0f} min ago (limit: {MAX_AGE_MINUTES})")
         return 1
 
+    # 3. Check for orphaned loop_start (started but never finished — crash indicator)
+    try:
+        orphan = conn.execute(
+            "SELECT s.loop_id, s.timestamp FROM audit_events s "
+            "WHERE s.event_type = 'loop_start' "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM audit_events e "
+            "  WHERE e.event_type = 'loop_end' AND e.loop_id = s.loop_id"
+            ") ORDER BY s.timestamp DESC LIMIT 1"
+        ).fetchone()
+        if orphan:
+            print(f"UNHEALTHY: orphaned loop_start detected (loop_id={orphan[0]}, started={orphan[1]})")
+            return 1
+    except Exception:
+        pass  # Non-fatal — primary checks already passed
+
+    conn.close()
     return 0
 
 

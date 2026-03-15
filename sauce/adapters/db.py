@@ -438,6 +438,36 @@ def has_recent_submitted_order(
         session.close()
 
 
+def get_latest_signal_confidence(
+    symbol: str,
+    db_path: str | None = None,
+) -> tuple[float, str | None] | None:
+    """
+    Return (confidence, prompt_version) for the most recent non-hold signal
+    for *symbol*, or None if no actionable signal exists.
+
+    Used by ``_detect_closed_positions`` to construct calibration entries.
+    """
+    session = get_session(db_path)
+    try:
+        row = (
+            session.query(SignalRow.confidence, SignalRow.prompt_version)
+            .filter(
+                SignalRow.symbol == symbol.upper(),
+                SignalRow.side != "hold",
+            )
+            .order_by(SignalRow.created_at.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return (float(row[0]), str(row[1]) if row[1] else None)
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        session.close()
+
+
 def get_recent_signals(
     symbol: str,
     days: int = 7,
@@ -523,5 +553,117 @@ def get_supervisor_abort_rate(
         }
     except Exception:  # noqa: BLE001
         return {"total_decisions": 0, "aborts": 0, "executes": 0, "abort_rate": 0.0}
+    finally:
+        session.close()
+
+
+# ── Test data sentinel detection (IMP-04) ────────────────────────────────────
+
+# Known test-data markers — if any appear in the production DB, something
+# leaked from a test run (e.g. conftest DB isolation was bypassed or an
+# old backup was restored without scrubbing).
+_TEST_SENTINELS = [
+    ("orders", "broker_order_id", ["broker-1", "broker-2", "broker-3"]),
+    ("orders", "loop_id", ["test-loop-1", "test-loop", "stub-loop"]),
+]
+
+
+def check_test_contamination(db_path: str | None = None) -> list[dict]:
+    """
+    Scan the production DB for known test-data markers.
+
+    Returns a list of findings (empty = clean). Each finding is a dict
+    with table, column, value, and count.  Never raises.
+    """
+    session = get_session(db_path)
+    findings: list[dict] = []
+    try:
+        for table, column, markers in _TEST_SENTINELS:
+            for marker in markers:
+                try:
+                    from sqlalchemy import text
+                    # Parameterised query — safe from injection.
+                    result = session.execute(
+                        text(f"SELECT COUNT(*) FROM {table} WHERE {column} = :val"),  # noqa: S608
+                        {"val": marker},
+                    )
+                    count = result.scalar() or 0
+                    if count > 0:
+                        findings.append({
+                            "table": table,
+                            "column": column,
+                            "value": marker,
+                            "count": count,
+                        })
+                except Exception:  # noqa: BLE001
+                    pass  # Table/column may not exist — skip
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        session.close()
+    return findings
+
+
+# ── Order / audit event consistency (IMP-08) ──────────────────────────────────
+
+
+def verify_order_consistency(
+    loop_id: str,
+    db_path: str | None = None,
+) -> dict:
+    """
+    Cross-validate ``order_submitted`` audit events against ``orders`` table
+    rows for a single loop run.
+
+    Returns a dict with:
+      - ``consistent`` (bool): True when every audit event has a matching
+        OrderRow and vice-versa.
+      - ``audit_only`` (list[str]): broker_order_ids present in audit events
+        but missing from the orders table.
+      - ``orders_only`` (list[str]): broker_order_ids in the orders table
+        but without a corresponding audit event.
+
+    Never raises — returns a safe default on error.
+    """
+    session = get_session(db_path)
+    try:
+        # Collect broker_order_ids from order_submitted audit events
+        event_rows = (
+            session.query(AuditEventRow)
+            .filter(
+                AuditEventRow.loop_id == loop_id,
+                AuditEventRow.event_type == "order_submitted",
+            )
+            .all()
+        )
+        event_ids: set[str] = set()
+        for row in event_rows:
+            try:
+                payload = json.loads(row.payload) if isinstance(row.payload, str) else row.payload
+                bid = payload.get("broker_order_id")
+                if bid:
+                    event_ids.add(str(bid))
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        # Collect broker_order_ids from orders table
+        order_rows = (
+            session.query(OrderRow)
+            .filter(OrderRow.loop_id == loop_id)
+            .all()
+        )
+        order_ids: set[str] = {
+            r.broker_order_id for r in order_rows if r.broker_order_id
+        }
+
+        audit_only = sorted(event_ids - order_ids)
+        orders_only = sorted(order_ids - event_ids)
+        return {
+            "consistent": len(audit_only) == 0 and len(orders_only) == 0,
+            "audit_only": audit_only,
+            "orders_only": orders_only,
+        }
+    except Exception:  # noqa: BLE001
+        return {"consistent": False, "audit_only": [], "orders_only": [], "error": "query_failed"}
     finally:
         session.close()

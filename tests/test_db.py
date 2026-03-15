@@ -24,6 +24,7 @@ from sauce.adapters.db import (
     log_event,
     log_order,
     log_signal,
+    verify_order_consistency,
 )
 from sauce.core.schemas import AuditEvent, DailyStats
 
@@ -245,3 +246,152 @@ def test_no_update_method_exists_on_log_event() -> None:
     assert not hasattr(db_module, "delete_event")
     assert not hasattr(db_module, "update_order")
     assert not hasattr(db_module, "delete_order")
+
+
+# ── Test data sentinel detection (IMP-04) ─────────────────────────────────────
+
+def test_check_test_contamination_clean_db(tmp_db: str) -> None:
+    """Empty DB has no sentinel hits."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    from sauce.adapters.db import check_test_contamination
+    findings = check_test_contamination(db_path=tmp_db)
+    assert findings == []
+
+
+def test_check_test_contamination_detects_known_marker(tmp_db: str) -> None:
+    """A known test marker (broker_order_id='broker-1') triggers a finding."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    log_order(
+        OrderRow(
+            loop_id="leak-loop",
+            symbol="AAPL",
+            side="buy",
+            qty=1,
+            order_type="market",
+            time_in_force="day",
+            status="submitted",
+            broker_order_id="broker-1",
+            prompt_version="v1",
+        ),
+        db_path=tmp_db,
+    )
+    from sauce.adapters.db import check_test_contamination
+    findings = check_test_contamination(db_path=tmp_db)
+    assert len(findings) >= 1
+    assert any(f["value"] == "broker-1" for f in findings)
+
+
+def test_check_test_contamination_ignores_real_ids(tmp_db: str) -> None:
+    """A legitimate broker_order_id does not trigger contamination."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    log_order(
+        OrderRow(
+            loop_id="real-loop-123",
+            symbol="TSLA",
+            side="buy",
+            qty=10,
+            order_type="limit",
+            time_in_force="day",
+            limit_price=250.0,
+            status="submitted",
+            broker_order_id="abc-def-123-real",
+            prompt_version="v1",
+        ),
+        db_path=tmp_db,
+    )
+    from sauce.adapters.db import check_test_contamination
+    findings = check_test_contamination(db_path=tmp_db)
+    assert findings == []
+
+
+# ── IMP-08: Order/audit event consistency ─────────────────────────────────────
+
+
+def test_verify_order_consistency_both_match(tmp_db: str) -> None:
+    """When OrderRow and order_submitted event both exist, result is consistent."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    lid = "consist-loop-1"
+    bid = "broker-consist-1"
+
+    log_order(
+        OrderRow(
+            loop_id=lid, symbol="AAPL", side="buy", qty=5,
+            order_type="market", time_in_force="day",
+            status="submitted", broker_order_id=bid, prompt_version="v1",
+        ),
+        db_path=tmp_db,
+    )
+    log_event(
+        AuditEvent(
+            loop_id=lid, event_type="order_submitted", symbol="AAPL",
+            payload={"broker_order_id": bid, "side": "buy", "qty": 5},
+        ),
+        db_path=tmp_db,
+    )
+
+    result = verify_order_consistency(lid, db_path=tmp_db)
+    assert result["consistent"] is True
+    assert result["audit_only"] == []
+    assert result["orders_only"] == []
+
+
+def test_verify_order_consistency_audit_only(tmp_db: str) -> None:
+    """Audit event exists but OrderRow is missing — flags audit_only."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    lid = "consist-loop-2"
+    bid = "broker-consist-2"
+
+    log_event(
+        AuditEvent(
+            loop_id=lid, event_type="order_submitted", symbol="TSLA",
+            payload={"broker_order_id": bid, "side": "buy", "qty": 3},
+        ),
+        db_path=tmp_db,
+    )
+
+    result = verify_order_consistency(lid, db_path=tmp_db)
+    assert result["consistent"] is False
+    assert bid in result["audit_only"]
+    assert result["orders_only"] == []
+
+
+def test_verify_order_consistency_orders_only(tmp_db: str) -> None:
+    """OrderRow exists but no audit event — flags orders_only."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    lid = "consist-loop-3"
+    bid = "broker-consist-3"
+
+    log_order(
+        OrderRow(
+            loop_id=lid, symbol="MSFT", side="sell", qty=10,
+            order_type="limit", time_in_force="day", limit_price=400.0,
+            status="submitted", broker_order_id=bid, prompt_version="v1",
+        ),
+        db_path=tmp_db,
+    )
+
+    result = verify_order_consistency(lid, db_path=tmp_db)
+    assert result["consistent"] is False
+    assert result["audit_only"] == []
+    assert bid in result["orders_only"]
+
+
+def test_verify_order_consistency_empty_loop(tmp_db: str) -> None:
+    """A loop with no orders and no events is consistent (vacuously true)."""
+    import sauce.adapters.db as db_module
+    db_module._engines = {}
+
+    result = verify_order_consistency("no-orders-loop", db_path=tmp_db)
+    assert result["consistent"] is True

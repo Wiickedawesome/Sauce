@@ -122,7 +122,7 @@ def run() -> None:
             "SELECT timestamp, symbol, "
             "       json_extract(payload, '$.side'), "
             "       json_extract(payload, '$.confidence'), "
-            "       json_extract(payload, '$.reason') "
+            "       COALESCE(json_extract(payload, '$.reasoning'), json_extract(payload, '$.reason')) "
             "FROM audit_events "
             "WHERE event_type = 'signal' "
             "ORDER BY timestamp DESC LIMIT 15"

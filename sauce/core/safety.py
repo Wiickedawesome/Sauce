@@ -92,6 +92,15 @@ def is_trading_paused(loop_id: str = "unset") -> bool:
         )
         return True
 
+    # Log pass-through so the audit trail always shows the check ran (IMP-01)
+    log_event(
+        AuditEvent(
+            loop_id=loop_id,
+            event_type="safety_check",
+            payload={"check": "trading_pause", "result": False},
+        ),
+        db_path=db_path,
+    )
     return False
 
 
@@ -417,22 +426,56 @@ def check_market_hours(symbol: str = "", loop_id: str = "unset") -> bool:
     True  → market is open for this symbol.
     False → market is closed; skip this symbol for this run.
     """
+    from sauce.adapters.db import log_event
+
     # Crypto trades 24/7 on Alpaca
     if "/" in symbol:
         return True
 
     now_et = _now_et()
+    reason = ""
 
     # Weekend check (0=Monday, 6=Sunday)
     if now_et.weekday() >= 5:
-        return False
-
+        reason = "weekend"
     # NYSE market holiday check (Finding 7.7)
-    if _is_nyse_holiday(now_et.date()):
+    elif _is_nyse_holiday(now_et.date()):
+        reason = "nyse_holiday"
+    else:
+        current_time = now_et.time()
+        if not (_MARKET_OPEN <= current_time < _MARKET_CLOSE):
+            reason = "outside_hours"
+
+    if reason:
+        log_event(
+            AuditEvent(
+                loop_id=loop_id,
+                event_type="safety_check",
+                symbol=symbol,
+                payload={
+                    "check": "market_hours",
+                    "result": False,
+                    "reason": reason,
+                    "time_et": now_et.strftime("%H:%M %Z"),
+                },
+            ),
+        )
         return False
 
-    current_time = now_et.time()
-    return _MARKET_OPEN <= current_time < _MARKET_CLOSE
+    # Log pass-through so audit trail confirms the check ran
+    log_event(
+        AuditEvent(
+            loop_id=loop_id,
+            event_type="safety_check",
+            symbol=symbol,
+            payload={
+                "check": "market_hours",
+                "result": True,
+                "time_et": now_et.strftime("%H:%M %Z"),
+            },
+        ),
+    )
+    return True
 
 
 # ── Earnings Proximity Guard (Finding 2.6) ────────────────────────────────────
