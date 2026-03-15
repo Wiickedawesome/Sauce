@@ -143,16 +143,27 @@ def get_engine(db_path: str | None = None) -> Engine:
             connect_args={"check_same_thread": False, "timeout": 30},
             echo=False,
         )
+        # Enable WAL mode for concurrent read safety (consistent with memory/db.py).
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
         Base.metadata.create_all(engine)
         _engines[db_path] = engine
     return _engines[db_path]
 
 
+# Cache session factories keyed by db_path (consistent with memory/db.py).
+_session_factories: dict[str, sessionmaker] = {}
+
+
 def get_session(db_path: str | None = None) -> Session:
     """Return a new SQLAlchemy session. Caller is responsible for closing it."""
-    engine = get_engine(db_path)
-    SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-    return SessionLocal()
+    if db_path is None:
+        db_path = _default_db_path()
+    if db_path not in _session_factories:
+        engine = get_engine(db_path)
+        _session_factories[db_path] = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    return _session_factories[db_path]()
 
 
 def cleanup_engines() -> None:
@@ -160,6 +171,7 @@ def cleanup_engines() -> None:
     for engine in _engines.values():
         engine.dispose()
     _engines.clear()
+    _session_factories.clear()
 
 
 # ── Public Write Helpers ──────────────────────────────────────────────────────

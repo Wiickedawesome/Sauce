@@ -41,7 +41,7 @@ from sauce.adapters.market_data import get_universe_snapshot, is_crypto as _is_c
 from sauce.agents import execution, exit_research, market_context, ops, portfolio, research, risk, session_boot, supervisor
 from sauce.agents.debate import run_debate
 from sauce.core.capital import detect_tier_transition, get_tier_parameters
-from sauce.core.config import get_settings
+from sauce.core.config import get_settings, Settings
 from sauce.core.screener import screen_equities
 from sauce.core.setups import SETUP_2_REGIMES
 from sauce.core.safety import (
@@ -271,7 +271,7 @@ async def main() -> None:
         logger.info("Loop ended [loop_id=%s]", loop_id)
 
 
-async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
+async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> None:
     """
     Inner loop body. Separated so main() can guarantee loop_end is always logged.
     """
@@ -1102,7 +1102,7 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_abort_decision(reason: str, settings: Any) -> SupervisorDecision:
+def _make_abort_decision(reason: str, settings: Settings) -> SupervisorDecision:
     """Build a safe abort SupervisorDecision for use as a default."""
     return SupervisorDecision(
         action="abort",

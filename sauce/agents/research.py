@@ -174,7 +174,6 @@ async def run(
     # ── Step 2c: Fetch recent signal history for feedback loop ─────────────
     signal_history: list[dict] | None = None
     try:
-        db_path = str(settings.db_path)
         recent = get_recent_signals(symbol=symbol, days=7, db_path=db_path)
         if recent:
             signal_history = recent

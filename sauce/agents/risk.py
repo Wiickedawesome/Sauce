@@ -209,7 +209,11 @@ async def run(
     total_existing_exposure = 0.0
     for pos in positions:
         try:
-            market_value = float(pos.get("market_value") or pos.get("current_price", 0.0))
+            raw_mv = pos.get("market_value")
+            if raw_mv is not None:
+                market_value = float(raw_mv)
+            else:
+                market_value = 0.0
             if market_value == 0.0:
                 qty_val = float(pos.get("qty") or 0.0)
                 total_existing_exposure += abs(qty_val) * float(pos.get("current_price") or 0.0)

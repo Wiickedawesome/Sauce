@@ -15,8 +15,6 @@ from sauce.core.config import get_settings
 
 
 def sanitize_llm_text(text: str, max_len: int | None = None) -> str:
-    if max_len is None:
-        max_len = get_settings().max_reasoning_len
     """
     Sanitize an LLM-generated string before embedding it in another prompt.
 
@@ -47,6 +45,8 @@ def sanitize_llm_text(text: str, max_len: int | None = None) -> str:
     -------
     Safe, truncated plain-text string.
     """
+    if max_len is None:
+        max_len = get_settings().max_reasoning_len
     if not isinstance(text, str):
         return ""
 

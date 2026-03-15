@@ -116,8 +116,8 @@ class TestComputeRSI:
     def test_known_monotonically_rising(self):
         s = pd.Series([float(x) for x in range(1, 31)])
         result = _compute_rsi(s, 14)
-        # All gains, no losses → avg_loss=0 → NaN (division by zero guarded)
-        assert pd.isna(result.iloc[-1])
+        # All gains, no losses → RSI = 100
+        assert result.iloc[-1] == 100.0
 
     def test_known_monotonically_falling(self):
         s = pd.Series([float(30 - x) for x in range(30)])

@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
+import pandas_ta as ta  # type: ignore[import-untyped]
 from zoneinfo import ZoneInfo
 
 from sauce.core.calendar import is_major_event_within_hours, is_near_major_event
@@ -97,23 +98,20 @@ SELLING_PRESSURE_KEYWORDS: list[str] = [
 
 
 def _compute_macd_histogram(closes: pd.Series) -> pd.Series:
-    """Compute MACD histogram (12, 26, 9) from close prices."""
-    ema12 = closes.ewm(span=12, adjust=False).mean()
-    ema26 = closes.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    return macd - signal
+    """Compute MACD histogram (12, 26, 9) via pandas_ta (matches indicators/core.py)."""
+    macd_df = ta.macd(closes, fast=12, slow=26, signal=9)
+    if macd_df is None or macd_df.empty:
+        return pd.Series(dtype=float)
+    # pandas_ta MACD returns columns: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
+    return macd_df.iloc[:, 2]
 
 
 def _compute_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
-    """Compute RSI from close prices using simple moving average method."""
-    delta = closes.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss.replace(0, float("nan"))
-    return 100.0 - (100.0 / (1.0 + rs))
+    """Compute RSI via pandas_ta Wilder smoothing (matches indicators/core.py)."""
+    result = ta.rsi(closes, length=period)
+    if result is None:
+        return pd.Series(dtype=float)
+    return result
 
 
 def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:

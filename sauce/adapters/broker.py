@@ -117,6 +117,16 @@ def get_positions(loop_id: str = "unset") -> list[dict[str, Any]]:
         positions = call_with_retry(client.get_all_positions)
         result: list[dict[str, Any]] = [p.__dict__ for p in positions]
 
+        # Validate expected fields are present (catches Alpaca SDK changes early).
+        _EXPECTED_FIELDS = {"symbol", "qty", "side", "avg_entry_price", "market_value", "current_price"}
+        for pos_dict in result:
+            missing = _EXPECTED_FIELDS - pos_dict.keys()
+            if missing:
+                logger.warning(
+                    "Position for %s missing expected fields: %s — Alpaca SDK may have changed",
+                    pos_dict.get("symbol", "???"), missing,
+                )
+
         log_event(AuditEvent(
             loop_id=loop_id,
             event_type="broker_response",

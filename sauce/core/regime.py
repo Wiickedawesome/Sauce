@@ -19,6 +19,8 @@ import pandas as pd
 
 from pydantic import Field
 
+from sauce.memory.db import _ensure_utc
+
 from sauce.core.schemas import (
     Indicators,
     MarketRegime,
@@ -341,13 +343,6 @@ def classify_regime(
 # When the active duration reaches this fraction of the historical average,
 # the regime is flagged as "aging out" (approaching typical transition point).
 AGING_THRESHOLD: float = 0.8
-
-
-def _ensure_utc(dt: datetime) -> datetime:
-    """Return a UTC-aware datetime for downstream duration math."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def compute_regime_duration(

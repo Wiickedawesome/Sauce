@@ -208,10 +208,8 @@ class AuditEvent(StrictModel):
         "order",
         "order_prepared",
         "order_submitted",   # broker confirmed submission (not fill) — Finding 5.4
-        "fill",              # kept for legacy compatibility; prefer order_submitted
         "veto",
         "error",
-        "stub_called",
         "llm_call",
         "llm_response",
         "broker_call",
@@ -224,16 +222,13 @@ class AuditEvent(StrictModel):
         "session_boot",
         "market_context",
         "debate",
-        "regime_transition",
         "tier_transition",
         "tier_check",
         "learning_drift_detected",
         "learning_weekly_report",
         "learning_calibration_analysis",
-        "learning_behavior_updated",
         "validation_daily_check",
         "validation_passed",
-        "validation_degradation",
         "exit_signal_generated",
     ]
     symbol: str | None = None
