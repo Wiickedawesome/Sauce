@@ -50,14 +50,18 @@ def main() -> int:
         return 1
 
     # 3. Check for orphaned loop_start (started but never finished — crash indicator)
+    # Only flag orphans from within the MAX_AGE window; older ones are historical.
     try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).isoformat()
         orphan = conn.execute(
             "SELECT s.loop_id, s.timestamp FROM audit_events s "
             "WHERE s.event_type = 'loop_start' "
+            "AND s.timestamp >= ? "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM audit_events e "
             "  WHERE e.event_type = 'loop_end' AND e.loop_id = s.loop_id"
-            ") ORDER BY s.timestamp DESC LIMIT 1"
+            ") ORDER BY s.timestamp DESC LIMIT 1",
+            (cutoff,),
         ).fetchone()
         if orphan:
             print(f"UNHEALTHY: orphaned loop_start detected (loop_id={orphan[0]}, started={orphan[1]})")
