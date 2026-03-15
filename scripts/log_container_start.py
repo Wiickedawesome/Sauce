@@ -7,7 +7,6 @@ unexpected restarts (Finding F-13 / IMP-15).
 
 import os
 import sqlite3
-import uuid
 from datetime import datetime, timezone
 from json import dumps
 
@@ -15,15 +14,13 @@ from json import dumps
 def main() -> int:
     db_path = os.environ.get("DB_PATH", "data/sauce.db")
     now = datetime.now(timezone.utc).isoformat()
-    event_id = str(uuid.uuid4())
 
     try:
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "INSERT INTO audit_events (id, loop_id, event_type, timestamp, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO audit_events (loop_id, event_type, timestamp, payload) "
+            "VALUES (?, ?, ?, ?)",
             (
-                event_id,
                 "container",
                 "container_start",
                 now,
