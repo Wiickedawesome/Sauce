@@ -260,6 +260,12 @@ class ValidationResultRow(StrategicBase):
 # ── Engine Factory ────────────────────────────────────────────────────────────
 
 _engines: dict[str, Engine] = {}
+_session_factories: dict[str, sessionmaker] = {}
+
+
+def canonicalize_symbol(symbol: str) -> str:
+    """Canonical symbol format: uppercase, no slash (e.g. BTC/USD → BTCUSD)."""
+    return symbol.strip().upper().replace("/", "")
 
 
 def get_engine(db_path: str) -> Engine:
@@ -297,6 +303,7 @@ def cleanup_engines() -> None:
     for engine in _engines.values():
         engine.dispose()
     _engines.clear()
+    _session_factories.clear()
 
 
 def _ensure_unique_indexes(engine: Engine, db_path: str) -> None:
@@ -327,9 +334,12 @@ def _ensure_unique_indexes(engine: Engine, db_path: str) -> None:
 
 def get_session(db_path: str) -> Session:
     """Return a new SQLAlchemy session. Caller must close."""
-    engine = get_engine(db_path)
-    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-    return factory()
+    if db_path not in _session_factories:
+        engine = get_engine(db_path)
+        _session_factories[db_path] = sessionmaker(
+            bind=engine, autocommit=False, autoflush=False,
+        )
+    return _session_factories[db_path]()
 
 
 # ── Session Reset (wipe session_memory.db at start of each day) ──────────────
@@ -407,7 +417,7 @@ def write_signal_log(entry: SignalLogEntry, db_path: str) -> None:
     try:
         row = SignalLogRow(
             timestamp=entry.timestamp,
-            symbol=entry.symbol,
+            symbol=canonicalize_symbol(entry.symbol),
             setup_type=entry.setup_type,
             score=entry.score,
             claude_decision=entry.claude_decision,
@@ -428,7 +438,7 @@ def get_latest_setup_type(symbol: str, db_path: str) -> str | None:
     try:
         row = (
             session.query(SignalLogRow.setup_type)
-            .filter(SignalLogRow.symbol == symbol)
+            .filter(SignalLogRow.symbol == canonicalize_symbol(symbol))
             .order_by(SignalLogRow.timestamp.desc())
             .first()
         )
@@ -445,7 +455,7 @@ def get_trade_entry_time(symbol: str, db_path: str) -> datetime | None:
     try:
         row = (
             session.query(TradeLogRow.timestamp)
-            .filter(TradeLogRow.symbol == symbol, TradeLogRow.direction == "buy")
+            .filter(TradeLogRow.symbol == canonicalize_symbol(symbol), TradeLogRow.direction == "buy")
             .order_by(TradeLogRow.timestamp.asc())
             .first()
         )
@@ -462,7 +472,7 @@ def write_trade_log(entry: TradeLogEntry, db_path: str) -> None:
     try:
         row = TradeLogRow(
             timestamp=entry.timestamp,
-            symbol=entry.symbol,
+            symbol=canonicalize_symbol(entry.symbol),
             entry_price=entry.entry_price,
             direction=entry.direction,
             status=entry.status,
@@ -499,7 +509,7 @@ def write_symbol_character(entry: SymbolCharacterEntry, db_path: str) -> None:
     session = get_session(db_path)
     try:
         stmt = sqlite_insert(SymbolCharacterRow).values(
-            symbol=entry.symbol,
+            symbol=canonicalize_symbol(entry.symbol),
             signal_count_today=entry.signal_count_today,
             direction_consistency=entry.direction_consistency,
             last_signal_result=entry.last_signal_result,
@@ -526,7 +536,7 @@ def write_peak_pnl(entry: PositionPeakPnL, db_path: str) -> None:
     session = get_session(db_path)
     try:
         stmt = sqlite_insert(PositionPeakPnLRow).values(
-            symbol=entry.symbol,
+            symbol=canonicalize_symbol(entry.symbol),
             peak_unrealized_pnl=entry.peak_unrealized_pnl,
             peak_at=entry.peak_at,
         )
@@ -566,7 +576,7 @@ def get_peak_pnl(symbol: str, db_path: str) -> PositionPeakPnL | None:
     try:
         row = (
             session.query(PositionPeakPnLRow)
-            .filter(PositionPeakPnLRow.symbol == symbol)
+            .filter(PositionPeakPnLRow.symbol == canonicalize_symbol(symbol))
             .first()
         )
         if row is None:
@@ -588,7 +598,7 @@ def delete_peak_pnl(symbol: str, db_path: str) -> None:
     session = get_session(db_path)
     try:
         session.query(PositionPeakPnLRow).filter(
-            PositionPeakPnLRow.symbol == symbol,
+            PositionPeakPnLRow.symbol == canonicalize_symbol(symbol),
         ).delete()
         session.commit()
     except Exception as exc:  # noqa: BLE001
@@ -606,7 +616,7 @@ def write_setup_performance(entry: SetupPerformanceEntry, db_path: str) -> None:
     try:
         row = SetupPerformanceRow(
             setup_type=entry.setup_type,
-            symbol=entry.symbol,
+            symbol=canonicalize_symbol(entry.symbol),
             regime_at_entry=entry.regime_at_entry,
             time_of_day_bucket=entry.time_of_day_bucket,
             win=entry.win,
@@ -710,7 +720,7 @@ def write_symbol_behavior(entry: SymbolLearnedBehaviorEntry, db_path: str) -> No
     session = get_session(db_path)
     try:
         stmt = sqlite_insert(SymbolLearnedBehaviorRow).values(
-            symbol=entry.symbol,
+            symbol=canonicalize_symbol(entry.symbol),
             setup_type=entry.setup_type,
             optimal_rsi_entry=entry.optimal_rsi_entry,
             avg_reversion_depth=entry.avg_reversion_depth,
@@ -856,7 +866,7 @@ def get_strategic_context(
         if setup_type is not None:
             perf_query = perf_query.filter_by(setup_type=setup_type)
         if symbol is not None:
-            perf_query = perf_query.filter_by(symbol=symbol)
+            perf_query = perf_query.filter_by(symbol=canonicalize_symbol(symbol))
         if regime is not None:
             perf_query = perf_query.filter_by(regime_at_entry=regime)
         perf_rows = perf_query.order_by(SetupPerformanceRow.date.desc()).limit(100).all()
@@ -925,7 +935,7 @@ def get_strategic_context(
         if symbol is not None and setup_type is not None:
             sb_row = (
                 session.query(SymbolLearnedBehaviorRow)
-                .filter_by(symbol=symbol, setup_type=setup_type)
+                .filter_by(symbol=canonicalize_symbol(symbol), setup_type=setup_type)
                 .first()
             )
             if sb_row is not None:
@@ -985,18 +995,19 @@ def get_similar_trades(
     """
     session = get_session(db_path)
     try:
+        csym = canonicalize_symbol(symbol)
         # Fetch candidates: same symbol OR same regime (at least one must match)
         query = session.query(SetupPerformanceRow)
         if regime is not None:
             query = query.filter(
-                (SetupPerformanceRow.symbol == symbol)
+                (SetupPerformanceRow.symbol == csym)
                 | (SetupPerformanceRow.regime_at_entry == regime)
             )
         else:
-            query = query.filter(SetupPerformanceRow.symbol == symbol)
+            query = query.filter(SetupPerformanceRow.symbol == csym)
 
         # Limit to a reasonable candidate pool before scoring
-        rows = query.order_by(SetupPerformanceRow.date.desc()).limit(200).all()
+        rows = query.order_by(SetupPerformanceRow.date.desc()).limit(500).all()
 
         if not rows:
             return []
@@ -1005,7 +1016,7 @@ def get_similar_trades(
         scored: list[tuple[int, str, SetupPerformanceRow]] = []
         for row in rows:
             score = 0
-            if row.symbol == symbol:
+            if row.symbol == csym:
                 score += 3
             if regime is not None and row.regime_at_entry == regime:
                 score += 2

@@ -11,6 +11,7 @@ All indicator computation delegates to sauce.indicators.core.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from sauce.adapters import market_data
@@ -134,7 +135,10 @@ def fetch_multi_timeframe(
     """
     analyses: list[TimeframeAnalysis] = []
 
-    for label, tf_str, bars in TIMEFRAMES:
+    def _fetch_one(
+        label: str, tf_str: str, bars: int,
+    ) -> TimeframeAnalysis | None:
+        """Fetch a single timeframe; returns None on failure."""
         try:
             df = market_data.get_history(symbol, timeframe=tf_str, bars=bars)
             if df.empty or len(df) < 20:
@@ -142,23 +146,41 @@ def fetch_multi_timeframe(
                     "multi-tf[%s/%s]: insufficient bars (%d), skipping",
                     symbol, label, len(df),
                 )
-                continue
+                return None
 
             indicators = compute_all(df, is_crypto=is_crypto)
             trend = _classify_trend(indicators)
             momentum = _classify_momentum(indicators)
 
-            analyses.append(TimeframeAnalysis(
+            return TimeframeAnalysis(
                 label=label,
                 timeframe=tf_str,
                 bars_fetched=len(df),
                 indicators=indicators,
                 trend=trend,
                 momentum=momentum,
-            ))
+            )
         except market_data.MarketDataError as exc:
             logger.warning("multi-tf[%s/%s]: fetch failed: %s", symbol, label, exc)
         except Exception as exc:  # noqa: BLE001
             logger.warning("multi-tf[%s/%s]: unexpected error: %s", symbol, label, exc)
+        return None
+
+    with ThreadPoolExecutor(max_workers=len(TIMEFRAMES)) as pool:
+        futures = {
+            pool.submit(_fetch_one, label, tf_str, bars): label
+            for label, tf_str, bars in TIMEFRAMES
+        }
+        # Collect results keyed by label to restore original ordering.
+        results: dict[str, TimeframeAnalysis] = {}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results[result.label] = result
+
+    # Preserve the canonical TIMEFRAMES ordering.
+    for label, _tf, _bars in TIMEFRAMES:
+        if label in results:
+            analyses.append(results[label])
 
     return MultiTimeframeContext(symbol=symbol, analyses=tuple(analyses))

@@ -11,12 +11,12 @@ Rules:
 import re
 import unicodedata
 
-# Maximum allowed length for any single piece of LLM-generated text
-# embedded as context in a downstream prompt.
-_MAX_REASONING_LEN: int = 300
+from sauce.core.config import get_settings
 
 
-def sanitize_llm_text(text: str, max_len: int = _MAX_REASONING_LEN) -> str:
+def sanitize_llm_text(text: str, max_len: int | None = None) -> str:
+    if max_len is None:
+        max_len = get_settings().max_reasoning_len
     """
     Sanitize an LLM-generated string before embedding it in another prompt.
 

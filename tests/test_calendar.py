@@ -42,11 +42,11 @@ class TestEventsListIntegrity:
     """Validate the pre-parsed EVENTS list."""
 
     def test_total_event_count(self) -> None:
-        assert len(EVENTS) == 88  # 16 FOMC + 36 CPI + 36 NFP
+        assert len(EVENTS) == 96  # 24 FOMC + 36 CPI + 36 NFP
 
     def test_fomc_count(self) -> None:
         fomc = [e for e in EVENTS if e.event_type == "FOMC"]
-        assert len(fomc) == 16  # 8 per year × 2 years
+        assert len(fomc) == 24  # 8 per year × 3 years
 
     def test_cpi_count(self) -> None:
         cpi = [e for e in EVENTS if e.event_type == "CPI"]

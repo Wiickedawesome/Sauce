@@ -14,6 +14,11 @@ import pandas_ta as ta  # type: ignore[import-untyped]
 
 from sauce.core.schemas import Indicators
 
+# 30-min bar counts per trading day.
+# Crypto: 24h × 2 bars/h = 48.  Equity: 6.5h × 2 bars/h = 13.
+BARS_PER_DAY_CRYPTO: int = 48
+BARS_PER_DAY_EQUITY: int = 13
+
 
 def _last_float(series: object) -> float | None:
     """Return the last non-NaN value from a pandas Series, or None."""
@@ -153,7 +158,7 @@ def compute_all(
     stoch_k, stoch_d = compute_stochastic(high, low, close)
     vwap_val = compute_vwap(high, low, close, volume)
 
-    bars_per_day = 48 if is_crypto else 13  # 30-min bars
+    bars_per_day = BARS_PER_DAY_CRYPTO if is_crypto else BARS_PER_DAY_EQUITY
     volume_1d_avg = compute_volume_1d_avg(volume, n_bars, bars_per_day)
 
     return Indicators(

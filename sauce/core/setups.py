@@ -32,6 +32,7 @@ from sauce.core.schemas import (
 )
 
 from sauce.adapters.market_data import is_crypto as _is_crypto
+from sauce.memory.db import canonicalize_symbol
 
 # ── Eligible regimes ─────────────────────────────────────────────────────────
 
@@ -187,15 +188,6 @@ def _build_narrative(
 
     parts.append(f"Score: {score:.0f}. {'PASSED' if passed else 'REJECTED'}.")
     return " ".join(parts)
-
-
-def _canon(s: str) -> str:
-    """Canonical symbol form — strips '/' and uppercases for position lookups.
-
-    Alpaca returns 'BTCUSD' in positions; setup symbols use 'BTC/USD'.
-    Normalise both sides so the membership check is always correct.
-    """
-    return s.replace("/", "").upper()
 
 
 # ── Setup 1: Crypto Mean Reversion ────────────────────────────────────────────
@@ -868,8 +860,8 @@ def scan_setups(
     # Canonical form used for position membership checks.
     # Alpaca returns 'BTCUSD' in positions but setup symbols are 'BTC/USD'.
     # Callers may pass symbols in either format, so canonicalise both sides.
-    canon_symbol = _canon(symbol)
-    canon_open_syms = {_canon(s) for s in open_syms}
+    canon_symbol = canonicalize_symbol(symbol)
+    canon_open_syms = {canonicalize_symbol(s) for s in open_syms}
 
     # Setup 1: Crypto Mean Reversion
     if _is_crypto(symbol) and regime in SETUP_1_REGIMES:

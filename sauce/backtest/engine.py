@@ -29,7 +29,7 @@ from sauce.backtest.models import (
     TradeDirection,
 )
 from sauce.adapters.market_data import is_crypto as _is_crypto
-from sauce.indicators.core import compute_all
+from sauce.indicators.core import BARS_PER_DAY_CRYPTO, BARS_PER_DAY_EQUITY, compute_all
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,7 @@ def _compute_metrics(result: BacktestResult) -> None:
             var = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
             std_r = math.sqrt(var) if var > 0 else 0.0
             if std_r > 0:
-                # Annualise assuming 30-min bars, ~13 bars/day equity, ~48/day crypto
-                bars_per_day = 48 if _is_crypto(result.symbol) else 13
+                bars_per_day = BARS_PER_DAY_CRYPTO if _is_crypto(result.symbol) else BARS_PER_DAY_EQUITY
                 result.sharpe_ratio = round(
                     mean_r / std_r * math.sqrt(bars_per_day * 252), 4,
                 )

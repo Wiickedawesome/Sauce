@@ -199,6 +199,13 @@ class Settings(BaseSettings):
         description="Maximum last-trade price for screener eligibility.",
     )
 
+    # ── Prompt Tuning ─────────────────────────────────────────────────────────
+    max_reasoning_len: int = Field(
+        default=500, ge=50, le=5000,
+        description="Maximum character length for LLM reasoning text embedded "
+                    "in downstream prompts (sanitize_llm_text truncation limit).",
+    )
+
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = Field(default="data/sauce.db")
     session_memory_db_path: str = Field(default="data/session_memory.db")

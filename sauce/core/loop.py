@@ -63,7 +63,7 @@ from sauce.core.schemas import (
     SupervisorDecision,
 )
 from sauce.memory.learning import record_trade_outcome
-from sauce.memory.db import delete_peak_pnl, get_latest_setup_type, get_trade_entry_time
+from sauce.memory.db import canonicalize_symbol, delete_peak_pnl, get_latest_setup_type, get_trade_entry_time
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def _detect_closed_positions(
     from sauce.core.schemas import SetupPerformanceEntry
 
     current_symbols = {
-        _canonicalize_symbol(str(p.get("symbol", ""))): p
+        canonicalize_symbol(str(p.get("symbol", ""))): p
         for p in current_positions
     }
 
@@ -135,11 +135,6 @@ def _detect_closed_positions(
             delete_peak_pnl(sym, session_db_path)
 
     _previous_positions = current_symbols
-
-
-def _canonicalize_symbol(symbol: str) -> str:
-    """Normalize broker and strategy symbols for reconciliation lookups."""
-    return symbol.replace("/", "").upper()
 
 
 def configure_logging() -> None:
@@ -739,17 +734,17 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
         # Build canonicalized lookups — broker returns "BTCUSD" but
         # universe quotes/signals use "BTC/USD".
         canon_quotes: dict[str, PriceReference] = {
-            _canonicalize_symbol(sym): q for sym, q in quotes.items()
+            canonicalize_symbol(sym): q for sym, q in quotes.items()
         }
         canon_signals: dict[str, Signal] = {
-            _canonicalize_symbol(s.symbol): s for s in signals
+            canonicalize_symbol(s.symbol): s for s in signals
         }
         canon_to_universe: dict[str, str] = {
-            _canonicalize_symbol(sym): sym for sym in quotes
+            canonicalize_symbol(sym): sym for sym in quotes
         }
         for pos in positions:
             pos_symbol = str(pos.get("symbol", "")).upper()
-            pos_canon = _canonicalize_symbol(pos_symbol)
+            pos_canon = canonicalize_symbol(pos_symbol)
             pos_qty = float(pos.get("qty") or 0.0)
             if pos_qty <= 0:
                 continue  # skip zero or short positions (no short selling yet)
@@ -1036,10 +1031,10 @@ async def _run_loop(loop_id: str, settings: Any, boot_ctx: BootContext) -> None:
             try:
                 _reconciled = await asyncio.to_thread(get_positions, loop_id)
                 _reconciled_by_sym = {
-                    _canonicalize_symbol(str(p.get("symbol", ""))): p for p in _reconciled
+                    canonicalize_symbol(str(p.get("symbol", ""))): p for p in _reconciled
                 }
                 for _order in decision.final_orders:
-                    _rp = _reconciled_by_sym.get(_canonicalize_symbol(_order.symbol))
+                    _rp = _reconciled_by_sym.get(canonicalize_symbol(_order.symbol))
                     log_event(AuditEvent(
                         loop_id=loop_id,
                         event_type="reconciliation",

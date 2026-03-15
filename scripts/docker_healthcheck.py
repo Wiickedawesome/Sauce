@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Docker HEALTHCHECK script — verifies cron + recent loop completion."""
 
+import os
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = "/app/data/sauce.db"
+DB_PATH = os.environ.get("DB_PATH", "/app/data/sauce.db")
 MAX_AGE_MINUTES = 70  # 2 cron cycles + grace
 
 

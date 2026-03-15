@@ -16,6 +16,7 @@ Market hours note:
 """
 
 import logging
+import sqlite3
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,15 @@ from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent
 
 logger = logging.getLogger(__name__)
+
+# SQLite json_extract requires 3.9.0+ — warn once at import time.
+_sqlite_version = tuple(int(x) for x in sqlite3.sqlite_version.split("."))
+if _sqlite_version < (3, 9, 0):
+    logger.warning(
+        "SQLite %s lacks json_extract (requires 3.9.0+). "
+        "_is_paused_in_db() will always return False.",
+        sqlite3.sqlite_version,
+    )
 
 # Eastern timezone used for US market-hours checks
 _ET = ZoneInfo("America/New_York")
@@ -99,6 +109,9 @@ def _is_paused_in_db(db_path: str | None = None) -> bool:
     from sqlalchemy import text as sa_text
 
     from sauce.adapters.db import get_session
+
+    if _sqlite_version < (3, 9, 0):
+        return False
 
     resolved_path = db_path or str(get_settings().db_path)
     session = get_session(resolved_path)
@@ -186,13 +199,9 @@ def is_data_fresh(as_of: datetime, ttl_sec: int = 120) -> bool:
     False → data is stale; do not trade on it.
     """
     now = datetime.now(timezone.utc)
-
-    # Normalise naive datetimes to UTC (defensive — API should always return tz-aware)
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=timezone.utc)
-
-    age_seconds = (now - as_of).total_seconds()
-    return age_seconds <= ttl_sec
+    return (now - as_of).total_seconds() <= ttl_sec
 
 
 # ── Daily P&L Guard ───────────────────────────────────────────────────────────

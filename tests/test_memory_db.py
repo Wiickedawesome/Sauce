@@ -177,7 +177,7 @@ def test_write_trade_log(tmp_session_db: str) -> None:
     write_trade_log(entry, tmp_session_db)
 
     session = get_session(tmp_session_db)
-    row = session.query(TradeLogRow).filter_by(symbol="BTC/USD").first()
+    row = session.query(TradeLogRow).filter_by(symbol="BTCUSD").first()
     session.close()
 
     assert row is not None
@@ -272,7 +272,7 @@ def test_write_setup_performance(tmp_strategic_db: str) -> None:
 
     assert row is not None
     assert row.setup_type == "crypto_mean_reversion"
-    assert row.symbol == "BTC/USD"
+    assert row.symbol == "BTCUSD"
     assert row.win is True
     assert row.pnl == pytest.approx(350.0)
 
@@ -419,7 +419,7 @@ def test_write_symbol_behavior_insert(tmp_strategic_db: str) -> None:
     write_symbol_behavior(entry, tmp_strategic_db)
 
     session = get_session(tmp_strategic_db)
-    row = session.query(SymbolLearnedBehaviorRow).filter_by(symbol="ETH/USD").first()
+    row = session.query(SymbolLearnedBehaviorRow).filter_by(symbol="ETHUSD").first()
     session.close()
 
     assert row is not None
@@ -447,7 +447,7 @@ def test_write_symbol_behavior_upsert(tmp_strategic_db: str) -> None:
 
     session = get_session(tmp_strategic_db)
     rows = session.query(SymbolLearnedBehaviorRow).filter_by(
-        symbol="ETH/USD", setup_type="crypto_mean_reversion"
+        symbol="ETHUSD", setup_type="crypto_mean_reversion"
     ).all()
     session.close()
 
@@ -641,7 +641,7 @@ def test_get_strategic_context_filtered(tmp_strategic_db: str) -> None:
     )
 
     assert len(ctx.setup_performance) == 1
-    assert ctx.setup_performance[0].symbol == "BTC/USD"
+    assert ctx.setup_performance[0].symbol == "BTCUSD"
     assert len(ctx.relevant_veto_patterns) == 1
     assert ctx.relevant_veto_patterns[0].veto_reason == "Volume too low"
     assert ctx.symbol_behavior is not None

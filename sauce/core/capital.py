@@ -66,7 +66,7 @@ TIER_TABLE: list[TierParameters] = [
         ],
         max_positions=3,
         max_position_pct=0.18,
-        cash_reserve_pct=0.25,
+        cash_reserve_pct=0.20,
         max_daily_loss_pct=0.025,
     ),
     TierParameters(

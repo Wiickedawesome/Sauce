@@ -46,6 +46,15 @@ _EVENTS: list[dict[str, str]] = [
     {"date": "2025-09-17T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
     {"date": "2025-10-29T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
     {"date": "2025-12-17T19:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    # ── 2026 FOMC ──
+    {"date": "2026-01-28T19:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-03-18T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-05-06T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-06-17T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-07-29T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-09-16T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-10-28T18:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
+    {"date": "2026-12-16T19:00:00Z", "type": "FOMC", "desc": "FOMC Rate Decision"},
     # ── 2024 CPI ──
     {"date": "2024-01-11T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
     {"date": "2024-02-13T13:30:00Z", "type": "CPI", "desc": "CPI Release"},
