@@ -159,7 +159,7 @@ class Order(StrictModel):
     )
     as_of: datetime
     prompt_version: str
-    source: Literal["execution", "exit_research", "stop_loss"] | None = Field(
+    source: Literal["execution", "exit_research", "stop_loss", "options_entry", "options_exit", "options_stop"] | None = Field(
         default=None,
         description="Provenance tag: which agent/stage created this order.",
     )
@@ -230,6 +230,15 @@ class AuditEvent(StrictModel):
         "validation_daily_check",
         "validation_passed",
         "exit_signal_generated",
+        # Options module events
+        "options_safety_check",
+        "options_signal",
+        "options_order",
+        "options_order_submitted",
+        "options_exit_stage",
+        "options_exit_stop",
+        "options_position_opened",
+        "options_position_closed",
     ]
     symbol: str | None = None
     payload: dict = Field(default_factory=dict)  # serialised model or error detail

@@ -34,7 +34,12 @@ treated as hold by the system — Claude should know this.
 will block the trade.
 - Return ONLY valid JSON. No prose, no explanation, no markdown fences, no extra keys.
 
-You are operating on a 30-minute trading cadence. Signals are for the NEXT 30 minutes only."""
+FOMC / MACRO EVENT AWARENESS:
+- FOMC meetings, CPI releases, and other major macro events cause heightened volatility. \
+If the market_context or session memory mentions an upcoming FOMC/macro event within 48 hours, \
+reduce confidence by 0.05-0.15 depending on proximity. Within 24 hours, apply maximum caution.
+
+You are operating on a 15-minute trading cadence. Signals are for the NEXT 15 minutes only."""
 
 # ── v2 prompt — auditor role ──────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an auditor inside a live algorithmic trading system. \
@@ -62,7 +67,14 @@ If you find a genuine contradiction: reject with specific reason. \
 Do not approve because the score is high. Do not reject because you are uncertain. \
 Approve or reject based on whether the evidence coheres.
 
-You are operating on a 30-minute trading cadence. Signals are for the NEXT 30 minutes only."""
+FOMC / MACRO EVENT AWARENESS:
+- FOMC meetings, CPI releases, and other major macro events cause heightened volatility. \
+If the market_context or session memory mentions an upcoming FOMC/macro event within 48 hours, \
+reduce confidence by 0.05-0.15 depending on proximity. Within 24 hours, apply maximum caution. \
+Do NOT auto-reject — the setup may still be valid, but calibrate confidence downward to reflect \
+event risk.
+
+You are operating on a 15-minute trading cadence. Signals are for the NEXT 15 minutes only."""
 
 
 def build_user_prompt(
@@ -240,19 +252,19 @@ def build_user_prompt(
             {
                 "usage": (
                     "The daily_trend_context provides the bigger picture. "
-                    "Use it to confirm or contradict 30-minute signals."
+                    "Use it to confirm or contradict 15-minute signals."
                 ),
                 "bullish_daily_plus_30m_oversold": (
-                    "Daily trend bullish + 30min RSI oversold = buy-the-dip opportunity. "
+                    "Daily trend bullish + 15min RSI oversold = buy-the-dip opportunity. "
                     "High conviction setup — confidence 0.60-0.75."
                 ),
                 "bearish_daily_plus_30m_overbought": (
-                    "Daily trend bearish + 30min RSI overbought = potential sell/short. "
+                    "Daily trend bearish + 15min RSI overbought = potential sell/short. "
                     "Confidence 0.55-0.70."
                 ),
                 "conflicting_timeframes": (
-                    "If daily and 30min disagree, reduce confidence by 0.10-0.15 "
-                    "but do NOT automatically hold. The 30min signal still has value."
+                    "If daily and 15min disagree, reduce confidence by 0.10-0.15 "
+                    "but do NOT automatically hold. The 15min signal still has value."
                 ),
             }
             if daily_trend_context is not None

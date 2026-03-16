@@ -418,6 +418,117 @@ def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> in
 
 # ── Error logging helper ──────────────────────────────────────────────────────
 
+# ── Options: order placement ──────────────────────────────────────────────────
+
+def place_option_order(
+    order: "OptionsOrder", loop_id: str = "unset",
+) -> dict[str, Any]:
+    """
+    Submit an options order to Alpaca. Limit orders only.
+
+    Requires a fully-validated OptionsOrder schema.
+    Returns a dict with Alpaca's order response.
+    Raises BrokerError on failure.
+    """
+    from alpaca.trading.enums import OrderSide, TimeInForce  # type: ignore[import-untyped]
+    from alpaca.trading.requests import LimitOrderRequest  # type: ignore[import-untyped]
+    from sauce.adapters.db import log_event
+    from sauce.core.options_schemas import OptionsOrder  # noqa: F811
+
+    log_event(AuditEvent(
+        loop_id=loop_id,
+        event_type="options_order_submitted",
+        symbol=order.underlying,
+        payload={
+            "action": "place_option_order",
+            "contract": order.contract_symbol,
+            "side": order.side,
+            "qty": order.qty,
+            "limit_price": order.limit_price,
+            "stage": order.stage,
+            "source": order.source,
+        },
+        timestamp=datetime.now(timezone.utc),
+    ))
+
+    try:
+        client = _get_trading_client()
+        side = OrderSide.BUY if order.side == "buy" else OrderSide.SELL
+
+        order_request = LimitOrderRequest(
+            symbol=order.contract_symbol,
+            qty=order.qty,
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            limit_price=order.limit_price,
+        )
+
+        submitted = client.submit_order(order_data=order_request)
+        result: dict[str, Any] = submitted.__dict__
+
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="broker_response",
+            symbol=order.underlying,
+            payload={
+                "action": "place_option_order",
+                "contract": order.contract_symbol,
+                "broker_order_id": str(getattr(submitted, "id", "unknown")),
+                "status": str(getattr(submitted, "status", "unknown")),
+            },
+            timestamp=datetime.now(timezone.utc),
+        ))
+
+        return result
+
+    except Exception as exc:
+        _log_broker_error(loop_id, f"place_option_order({order.contract_symbol})", exc)
+        raise BrokerError(
+            f"place_option_order failed for {order.contract_symbol}: {exc}",
+        ) from exc
+
+
+def get_option_positions(loop_id: str = "unset") -> list[dict[str, Any]]:
+    """
+    Fetch open options positions from Alpaca.
+
+    Returns a list of position dicts filtered to asset_class == 'options'.
+    Never raises — logs errors and returns [] on failure.
+    """
+    from sauce.adapters.db import log_event
+
+    try:
+        client = _get_trading_client()
+        positions = call_with_retry(client.get_all_positions)
+        result: list[dict[str, Any]] = []
+
+        for p in positions:
+            # Alpaca marks options positions with asset_class
+            asset_class = str(getattr(p, "asset_class", "")).lower()
+            if "option" in asset_class:
+                result.append(p.__dict__)
+
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="broker_response",
+            payload={
+                "action": "get_option_positions",
+                "count": len(result),
+            },
+            timestamp=datetime.now(timezone.utc),
+        ))
+
+        return result
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "get_option_positions failed [loop_id=%s]: %s", loop_id, exc,
+        )
+        return []
+
+
+# ── Error logging helper ──────────────────────────────────────────────────────
+
 def _log_broker_error(loop_id: str, action: str, exc: Exception) -> None:
     """Log a broker error to the audit DB. Never raises."""
     try:

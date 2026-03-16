@@ -159,6 +159,11 @@ class Settings(BaseSettings):
 
     # ── Safety ────────────────────────────────────────────────────────────────
     trading_pause: bool = Field(default=False)
+    options_enabled: bool = Field(
+        default=False,
+        description="Master switch for the options module. "
+                    "Must be explicitly set to True to allow options trading.",
+    )
     confirm_live_trading: str = Field(
         default="",
         description="Must be set to 'LIVE-TRADING-CONFIRMED' when alpaca_paper=False. "

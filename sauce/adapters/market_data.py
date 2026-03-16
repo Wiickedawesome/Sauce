@@ -119,7 +119,7 @@ def _crypto_quote(symbol: str) -> PriceReference:
 
 def get_history(
     symbol: str,
-    timeframe: str = "30Min",
+    timeframe: str = "15Min",
     bars: int = 100,
 ) -> pd.DataFrame:
     """

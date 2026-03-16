@@ -211,6 +211,38 @@ class TestComputeScore:
         score, passed = _compute_score(hard, soft, [], 60.0)
         assert score <= 100.0
 
+    def test_min_hard_required_partial_pass(self):
+        """4 of 6 hard pass with min_hard_required=4 → passed=True."""
+        hard = [
+            HardConditionResult(label=f"H{i}", passed=(i <= 4))
+            for i in range(1, 7)
+        ]
+        # hard_score = (4/6)*60 = 40. Need soft to reach 60.
+        soft = [SoftConditionResult(label="S1", triggered=True, points=25.0)]
+        score, passed = _compute_score(hard, soft, [], 60.0, min_hard_required=4)
+        assert passed is True
+        assert score >= 60.0
+
+    def test_min_hard_required_too_few(self):
+        """3 of 6 hard pass with min_hard_required=4 → passed=False."""
+        hard = [
+            HardConditionResult(label=f"H{i}", passed=(i <= 3))
+            for i in range(1, 7)
+        ]
+        soft = [SoftConditionResult(label="S1", triggered=True, points=50.0)]
+        score, passed = _compute_score(hard, soft, [], 60.0, min_hard_required=4)
+        assert passed is False
+
+    def test_min_hard_required_none_means_all(self):
+        """Without min_hard_required, all hard must pass (backward compat)."""
+        hard = [
+            HardConditionResult(label="H1", passed=True),
+            HardConditionResult(label="H2", passed=True),
+            HardConditionResult(label="H3", passed=False),
+        ]
+        score, passed = _compute_score(hard, [], [], 60.0)
+        assert passed is False
+
 
 class TestBuildNarrative:
     def test_contains_setup_type_and_symbol(self):
@@ -308,8 +340,8 @@ def _make_setup1_passing_df(n_bars: int = 500) -> pd.DataFrame:
 def _make_setup1_passing_indicators() -> Indicators:
     """Indicators that satisfy H1/H2 and trigger soft conditions."""
     return Indicators(
-        rsi_14=25.0,       # H1: <38, S1: <32
-        bb_lower=98.5,     # H2: close(98.0) <= 98.5*1.005≈98.99
+        rsi_14=25.0,       # H1: <42, S1: <32
+        bb_lower=98.5,     # H2: close(98.0) <= 98.5*1.01≈99.49
         stoch_k=15.0,      # S2: <20
         sma_20=99.0,       # S3: close(98.0)<=sma20
         vwap=99.0,         # S4: vwap>close(98.0)
@@ -327,7 +359,7 @@ class TestCryptoMeanReversion:
         assert isinstance(result, SetupResult)
         assert result.setup_type == "crypto_mean_reversion"
         assert result.symbol == "BTC/USD"
-        assert len(result.hard_conditions) == 6
+        assert len(result.hard_conditions) == 4
         assert all(h.passed for h in result.hard_conditions), (
             f"Failed hard: {[h.label for h in result.hard_conditions if not h.passed]}"
         )
@@ -337,12 +369,12 @@ class TestCryptoMeanReversion:
     def test_h1_rsi_too_high(self):
         df = _make_setup1_passing_df()
         ind = _make_setup1_passing_indicators()
-        ind.rsi_14 = 50.0  # > 38; fails H1
+        ind.rsi_14 = 50.0  # > 42; fails H1
         result = evaluate_crypto_mean_reversion("BTC/USD", ind, df, "RANGING", as_of=_NOW)
         h1 = result.hard_conditions[0]
-        assert h1.label == "RSI < 38"
+        assert h1.label == f"RSI < {S1_RSI_HARD}"
         assert h1.passed is False
-        assert result.passed is False
+        # With min_hard_required=3, failing just H1 still passes (3/4 >= 3)
 
     def test_h1_rsi_none(self):
         df = _make_setup1_passing_df()
@@ -367,15 +399,14 @@ class TestCryptoMeanReversion:
         h3 = result.hard_conditions[2]
         assert h3.passed is False
 
-    def test_h6_open_position_disqualifies(self):
+    def test_open_position_disqualifies(self):
         df = _make_setup1_passing_df()
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion(
             "BTC/USD", ind, df, "RANGING", has_open_position=True, as_of=_NOW,
         )
-        h6 = result.hard_conditions[5]
-        assert h6.label == "No open position"
-        assert h6.passed is False
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("open" in r.lower() for r in reasons)
         assert result.passed is False
 
     def test_disqualifier_volatile(self):
@@ -437,7 +468,7 @@ class TestCryptoMeanReversion:
         s1 = result.soft_conditions[0]
         assert s1.label == "Deep oversold RSI < 32"
         assert s1.triggered is True
-        assert s1.points == 15.0
+        assert s1.points == 20.0
 
     def test_soft_stoch_k(self):
         df = _make_setup1_passing_df()
@@ -610,7 +641,7 @@ class TestEquityTrendPullback:
         labels = [s.label for s in result.soft_conditions]
         assert "SMA20 bounce" in labels
         assert "Weekly uptrend proxy" in labels
-        assert "30m RSI turning up from <45" in labels
+        assert "15m RSI turning up from <45" in labels
         assert "Very low volume contraction" in labels
 
     def test_as_of_and_min_score(self):
@@ -675,7 +706,7 @@ class TestCryptoBreakout:
         )
         assert result.setup_type == "crypto_breakout"
         assert result.symbol == "BTC/USD"
-        assert len(result.hard_conditions) == 6
+        assert len(result.hard_conditions) == 5
 
     def test_h1_range_too_wide(self):
         df = _make_setup3_passing_df()
@@ -684,7 +715,7 @@ class TestCryptoBreakout:
         ind = _make_indicators()
         result = evaluate_crypto_breakout("BTC/USD", ind, df, "RANGING", as_of=_NOW)
         h1 = result.hard_conditions[0]
-        assert h1.label == "Consolidation >= 4hr, range < 2%"
+        assert h1.label == f"Consolidation >= {S3_CONSOLIDATION_BARS} bars, range < {S3_RANGE_PCT_MAX}%"
         assert h1.passed is False
 
     def test_h3_close_below_range_high(self):
@@ -704,18 +735,18 @@ class TestCryptoBreakout:
         ind = _make_indicators()
         result = evaluate_crypto_breakout("BTC/USD", ind, df, "RANGING", as_of=_NOW)
         h4 = result.hard_conditions[3]
-        assert h4.label == "Breakout volume >= 2x avg"
+        assert h4.label == f"Breakout volume >= {S3_BREAKOUT_VOL_MULTIPLE}x avg"
         assert h4.passed is False
 
-    def test_h6_open_position(self):
+    def test_open_position_disqualifies(self):
         df = _make_setup3_passing_df()
         ind = _make_indicators()
         result = evaluate_crypto_breakout(
             "BTC/USD", ind, df, "RANGING", has_open_position=True, as_of=_NOW,
         )
-        h6 = result.hard_conditions[5]
-        assert h6.label == "No open position"
-        assert h6.passed is False
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("open" in r.lower() for r in reasons)
+        assert result.passed is False
 
     def test_insufficient_bars(self):
         df = _make_df(5, close=100.0)  # < 9 bars needed
@@ -893,8 +924,9 @@ class TestScanSetups:
             as_of=_NOW,
         )
         mr = next(r for r in results if r.setup_type == "crypto_mean_reversion")
-        h6 = next(h for h in mr.hard_conditions if h.label == "No open position")
-        assert h6.passed is False
+        reasons = [d.reason for d in mr.disqualifiers]
+        assert any("open" in r.lower() for r in reasons)
+        assert mr.passed is False
 
     def test_empty_when_dead_regime(self):
         df = _make_df(250, close=100.0)

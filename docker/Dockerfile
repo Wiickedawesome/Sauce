@@ -4,7 +4,7 @@
 # Build:  docker build -f docker/Dockerfile -t sauce .
 # Run:    docker compose -f docker/docker-compose.yml up -d
 #
-# The image installs cron and configures it to fire run_loop.sh every 30
+# The image installs cron and configures it to fire run_loop.sh every 15
 # minutes. Cron runs as the foreground process (PID 1 via exec).
 # All output goes to /app/data/logs/cron.log (mounted volume).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -45,7 +45,7 @@ RUN mkdir -p /app/data/logs
 # ── Cron setup ────────────────────────────────────────────────────────────────
 # Write the crontab entry. Output is appended to /app/data/logs/cron.log
 # which is on the mounted volume and survives container restarts.
-RUN printf "*/30 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1\n" \
+RUN printf "*/15 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1\n" \
         > /etc/cron.d/sauce \
     && chmod 0644 /etc/cron.d/sauce
 
@@ -53,7 +53,7 @@ RUN printf "*/30 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.lo
 RUN chmod +x /app/scripts/run_loop.sh
 
 # ── Health check ──────────────────────────────────────────────────────────────
-# Confirm cron is running AND that a loop has completed within the last 70
+# Confirm cron is running AND that a loop has completed within the last 35
 # minutes (just over 2 cron cycles). Queries the audit DB for the most recent
 # loop_end event.
 HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \

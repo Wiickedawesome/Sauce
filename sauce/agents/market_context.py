@@ -103,7 +103,7 @@ async def run(loop_id: str, boot_ctx: BootContext) -> MarketContext:
     # Step 1 — Fetch SPY OHLCV data
     # ------------------------------------------------------------------
     try:
-        spy_df = market_data.get_history("SPY", timeframe="30Min", bars=60)
+        spy_df = market_data.get_history("SPY", timeframe="15Min", bars=120)
     except market_data.MarketDataError:
         logger.exception("Failed to fetch SPY data")
         ctx = _degraded_context(boot_ctx, as_of)

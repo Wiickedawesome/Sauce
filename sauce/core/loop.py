@@ -2,7 +2,7 @@
 core/loop.py — Main orchestration loop for the Sauce trading system.
 
 This module is the single entry point for a complete trading cycle.
-It is called by `scripts/run_loop.sh` via cron every 30 minutes.
+It is called by `scripts/run_loop.sh` via cron every 15 minutes.
 
 Loop sequence (per run):
   1.  Log loop_start
@@ -27,6 +27,7 @@ Rules:
 """
 
 import asyncio
+import json
 import logging
 import logging.handlers
 import signal
@@ -35,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, get_recent_orders, place_order
+from sauce.adapters.broker import BrokerError, cancel_stale_orders, get_account, get_positions, get_recent_orders, place_order, place_option_order, get_option_positions
 from sauce.adapters.db import OrderRow, SignalRow, check_test_contamination, get_latest_signal_confidence, has_recent_submitted_order, log_event, log_order, log_signal
 from sauce.adapters.market_data import get_universe_snapshot, is_crypto as _is_crypto
 from sauce.agents import execution, exit_research, market_context, ops, portfolio, research, risk, session_boot, supervisor
@@ -929,6 +930,30 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
     # Merge exit orders into the main orders list for supervisor approval
     orders.extend(exit_orders)
 
+    # ── Step 8c: Options pipeline (feature-flagged) ──────────────────────────
+    # Runs after equity pipeline so it can see final positions/account state.
+    # Options orders go through the same Supervisor gate as equity orders.
+    options_orders: list[Any] = []
+    if settings.options_enabled:
+        try:
+            options_orders = await _run_options_pipeline(
+                loop_id=loop_id,
+                settings=settings,
+                mkt_ctx=mkt_ctx,
+                account=account,
+                positions=positions,
+                quotes=quotes,
+                signals=signals,
+            )
+            orders.extend(options_orders)
+        except Exception as exc:
+            logger.error("Options pipeline failed [loop_id=%s]: %s", loop_id, exc)
+            log_event(AuditEvent(
+                loop_id=loop_id,
+                event_type="error",
+                payload={"stage": "options_pipeline", "error": str(exc)},
+            ))
+
     # ── Step 9: Supervisor — final arbitration ────────────────────────────────
     if _shutdown_requested:
         logger.warning("Shutdown requested — exiting before supervisor stage [loop_id=%s]", loop_id)
@@ -989,17 +1014,17 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             # ── Idempotency guard (Finding 3.2) ───────────────────────────────
             # If this loop crashed after submitting this order and cron restarted
             # it, an OrderRow with status='submitted' will already exist for
-            # this symbol+side within the last 30 minutes. Detect and skip it
+            # this symbol+side within the last 15 minutes. Detect and skip it
             # rather than sending a duplicate order to the broker.
             if has_recent_submitted_order(
                 symbol=order.symbol,
                 side=order.side,
-                minutes=30,
+                minutes=15,
                 db_path=_db_path,
             ):
                 logger.warning(
                     "Idempotency: skipping %s %s — order already submitted "
-                    "within last 30 min [loop_id=%s]",
+                    "within last 15 min [loop_id=%s]",
                     order.side, order.symbol, loop_id,
                 )
                 log_event(AuditEvent(
@@ -1014,7 +1039,17 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                 continue
 
             try:
-                result = await asyncio.to_thread(place_order, order, loop_id)
+                # Route options orders to the options broker method
+                _is_options = order.source in (
+                    "options_entry", "options_exit", "options_stop",
+                )
+                if _is_options:
+                    opt_order = _order_to_options_order(order)
+                    result = await asyncio.to_thread(
+                        place_option_order, opt_order, loop_id,
+                    )
+                else:
+                    result = await asyncio.to_thread(place_order, order, loop_id)
                 _orders_placed_count += 1
                 broker_order_id = str(
                     result.get("id") or result.get("order_id") or "unknown"
@@ -1058,6 +1093,50 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                         "stop_price": order.stop_price,
                     },
                 ))
+
+                # ── Persist new options position for exit tracking ─────────
+                if _is_options and order.source == "options_entry":
+                    try:
+                        from sauce.adapters.db import save_options_position
+                        from sauce.core.options_config import get_options_settings as _get_opts
+                        from sauce.core.options_schemas import (
+                            CompoundStage as _CS,
+                            OptionsContract as _OC,
+                            OptionsPosition as _OP,
+                        )
+                        _opts = _get_opts()
+                        _underlying = order.symbol[:6].strip()
+                        _contract = _OC(
+                            contract_symbol=order.symbol,
+                            underlying=_underlying,
+                            expiration="2099-12-31",
+                            strike=0.0,
+                            option_type="call",
+                        )
+                        _stages = [
+                            _CS(
+                                stage_num=i + 1,
+                                trigger_multiplier=_opts.option_profit_multiplier ** (i + 1),
+                                sell_fraction=_opts.option_sell_fraction,
+                                trailing_stop_pct=getattr(
+                                    _opts, f"option_trailing_stop_stage{i + 1}",
+                                    0.15,
+                                ),
+                            )
+                            for i in range(_opts.option_compound_stages)
+                        ]
+                        _pos = _OP(
+                            contract=_contract,
+                            entry_price=order.limit_price or 0.01,
+                            qty=int(order.qty),
+                            remaining_qty=int(order.qty),
+                            direction="long_call",
+                            compound_stages=_stages,
+                            entry_time=datetime.now(timezone.utc),
+                        )
+                        save_options_position(_pos, loop_id)
+                    except Exception as _ope:  # noqa: BLE001
+                        logger.error("Failed to persist options position: %s", _ope)
 
                 # ── Companion stop-loss order (P0-1) ──────────────────────
                 if order.side == "buy" and order.stop_loss_price:
@@ -1300,6 +1379,315 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             event_type="error",
             payload={"stage": "ops", "error": str(exc)},
         ))
+
+
+# ── Options pipeline ──────────────────────────────────────────────────────────
+
+async def _run_options_pipeline(
+    loop_id: str,
+    settings: Settings,
+    mkt_ctx: Any,
+    account: dict[str, Any],
+    positions: list[dict[str, Any]],
+    quotes: dict[str, Any],
+    signals: list[Signal],
+) -> list[Order]:
+    """
+    Run the full options pipeline: research + exit management.
+
+    Returns a list of Order objects (mapped from OptionsOrder) to be included
+    in the Supervisor approval batch alongside equity/crypto orders.
+
+    Feature-gated by OPTIONS_ENABLED. Called only when settings.options_enabled is True.
+    """
+    from sauce.adapters.options_data import get_option_quote, OptionsDataError
+    from sauce.agents import options_exit as exit_engine
+    from sauce.agents import options_execution
+    from sauce.agents import options_research
+    from sauce.core.options_config import get_options_settings
+    from sauce.core.options_schemas import OptionsOrder, OptionsPosition
+    from sauce.signals.options_confluence import compute_options_bias
+
+    opts_cfg = get_options_settings()
+    result_orders: list[Order] = []
+
+    log_event(AuditEvent(
+        loop_id=loop_id,
+        event_type="options_signal",
+        payload={"stage": "options_pipeline_start", "universe": opts_cfg.universe},
+    ))
+
+    # ── 1. Compute NAV for position sizing ──────────────────────────────────
+    try:
+        nav = float(account.get("equity") or 0.0)
+    except (TypeError, ValueError):
+        nav = 0.0
+
+    # ── 2. Get current options exposure ─────────────────────────────────────
+    try:
+        option_positions_raw = await asyncio.to_thread(get_option_positions, loop_id)
+        current_options_value = sum(
+            abs(float(p.get("market_value", 0.0))) for p in option_positions_raw
+        )
+    except Exception:  # noqa: BLE001
+        option_positions_raw = []
+        current_options_value = 0.0
+
+    # ── 3. Options research: entry signals ──────────────────────────────────
+    # Build confluence from equity signals and check each options-universe symbol
+    from sauce.signals.confluence import ConfluenceResult, SignalTier
+
+    for symbol in opts_cfg.universe:
+        if _shutdown_requested:
+            break
+
+        # Find matching equity signal for this symbol to extract confluence
+        matching_equity_sig = None
+        for sig in signals:
+            if sig.symbol.upper() == symbol.upper():
+                matching_equity_sig = sig
+                break
+
+        if matching_equity_sig is None:
+            # No equity signal → skip this symbol for options
+            continue
+
+        try:
+            # Build bias from equity confluence
+            # Approximate ConfluenceResult from the equity Signal
+            _score = (
+                matching_equity_sig.confidence
+                if matching_equity_sig.side == "buy"
+                else -matching_equity_sig.confidence
+            )
+            _tier = SignalTier.S2 if matching_equity_sig.confidence >= 0.6 else SignalTier.S3
+            bias = compute_options_bias(
+                symbol=symbol,
+                confluence=ConfluenceResult(
+                    score=_score,
+                    tier=_tier,
+                    bullish_count=1 if matching_equity_sig.side == "buy" else 0,
+                    bearish_count=1 if matching_equity_sig.side == "sell" else 0,
+                    neutral_count=0,
+                    confidence_adjustment=0.0,
+                    summary=f"From equity signal: {matching_equity_sig.side} "
+                            f"conf={matching_equity_sig.confidence:.2f}",
+                ),
+                iv_rank=None,  # Will be fetched by research agent
+                regime=mkt_ctx.regime.regime_type,
+            )
+
+            if bias.direction == "neutral" or bias.confidence < settings.min_confidence:
+                continue
+
+            # Run options research agent
+            options_signal = await options_research.run(
+                symbol=symbol,
+                bias=bias,
+                nav=nav,
+                current_options_value=current_options_value,
+                loop_id=loop_id,
+            )
+
+            if options_signal is None:
+                continue
+
+            # Get fresh quote for the selected contract
+            try:
+                opt_quote = await asyncio.to_thread(
+                    get_option_quote, options_signal.contract.contract_symbol,
+                )
+            except OptionsDataError:
+                logger.warning(
+                    "Cannot get quote for options contract %s — skipping",
+                    options_signal.contract.contract_symbol,
+                )
+                continue
+
+            # Build entry order
+            entry_order = await options_execution.build_entry_order(
+                signal=options_signal,
+                quote=opt_quote,
+                loop_id=loop_id,
+            )
+
+            if entry_order is not None:
+                # Convert OptionsOrder → Order for supervisor compatibility
+                mapped_order = _options_order_to_order(entry_order)
+                result_orders.append(mapped_order)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Options research failed for %s [loop_id=%s]: %s",
+                symbol, loop_id, exc,
+            )
+
+    # ── 4. Options exit management: evaluate open positions ──────────────────
+    from sauce.adapters.db import (
+        load_open_options_positions,
+        save_options_position,
+        update_options_position,
+        close_options_position,
+    )
+    from sauce.core.options_schemas import CompoundStage, OptionsContract
+
+    # Save newly created positions (after entry orders are built)
+    # Position objects will be persisted after supervisor approval in step 10,
+    # but we prepare them here for exit management on subsequent loops.
+
+    # Load persisted open positions and evaluate exits
+    try:
+        open_pos_rows = load_open_options_positions()
+    except Exception:  # noqa: BLE001
+        open_pos_rows = []
+
+    for pos_data in open_pos_rows:
+        if _shutdown_requested:
+            break
+        try:
+            # Reconstruct OptionsPosition from DB row
+            stages_raw = json.loads(pos_data["compound_stages_json"])
+            compound_stages = [CompoundStage(**s) for s in stages_raw]
+            contract = OptionsContract(
+                contract_symbol=pos_data["contract_symbol"],
+                underlying=pos_data["underlying"],
+                expiration="2099-12-31",  # placeholder — not used by exit engine
+                strike=0.0,  # placeholder — not used by exit engine
+                option_type="call" if "call" in pos_data["direction"] else "put",
+            )
+            position = OptionsPosition(
+                position_id=pos_data["position_id"],
+                contract=contract,
+                entry_price=pos_data["entry_price"],
+                qty=pos_data["qty"],
+                remaining_qty=pos_data["remaining_qty"],
+                direction=pos_data["direction"],
+                strategy_type=pos_data["strategy_type"],
+                compound_stages=compound_stages,
+                stages_completed=pos_data["stages_completed"],
+                realized_pnl=pos_data["realized_pnl"],
+                trailing_stop_price=pos_data["trailing_stop_price"],
+                entry_time=pos_data["entry_time"],
+            )
+
+            # Get live quote
+            try:
+                opt_quote = await asyncio.to_thread(
+                    get_option_quote, pos_data["contract_symbol"],
+                )
+            except OptionsDataError:
+                logger.warning(
+                    "Cannot get quote for %s — skipping exit eval",
+                    pos_data["contract_symbol"],
+                )
+                continue
+
+            # Evaluate exit
+            decision = exit_engine.evaluate_position(position, opt_quote, loop_id)
+
+            if decision.action == "HOLD":
+                # Update trailing stop if it changed
+                if position.trailing_stop_price != pos_data["trailing_stop_price"]:
+                    update_options_position(
+                        pos_data["position_id"],
+                        trailing_stop_price=position.trailing_stop_price,
+                    )
+                continue
+
+            # Apply decision to position state
+            exit_engine.apply_exit_decision(position, decision)
+
+            # Set trailing stop after partial close (needs current price)
+            if decision.set_trailing_stop and decision.trailing_stop_pct > 0:
+                position.trailing_stop_price = opt_quote.mid * (1 - decision.trailing_stop_pct)
+
+            # Build exit order
+            exit_order = await options_execution.build_exit_order(
+                contract_symbol=pos_data["contract_symbol"],
+                underlying=pos_data["underlying"],
+                qty=decision.qty,
+                quote=opt_quote,
+                stage=decision.stage,
+                loop_id=loop_id,
+            )
+
+            if exit_order is not None:
+                mapped = _options_order_to_order(exit_order)
+                result_orders.append(mapped)
+
+            # Update DB state
+            stages_json = json.dumps([s.model_dump() for s in position.compound_stages])
+            if position.remaining_qty <= 0:
+                close_options_position(
+                    pos_data["position_id"],
+                    realized_pnl=position.realized_pnl,
+                )
+            else:
+                update_options_position(
+                    pos_data["position_id"],
+                    remaining_qty=position.remaining_qty,
+                    stages_completed=position.stages_completed,
+                    trailing_stop_price=position.trailing_stop_price,
+                    compound_stages_json=stages_json,
+                    realized_pnl=position.realized_pnl,
+                )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Options exit eval failed for position %s [loop_id=%s]: %s",
+                pos_data.get("position_id", "?"), loop_id, exc,
+            )
+
+    log_event(AuditEvent(
+        loop_id=loop_id,
+        event_type="options_signal",
+        payload={
+            "stage": "options_pipeline_end",
+            "entry_orders": len(result_orders),
+        },
+    ))
+
+    return result_orders
+
+
+def _options_order_to_order(opt_order: Any) -> Order:
+    """
+    Convert an OptionsOrder to an Order for unified supervisor approval.
+
+    The Order schema uses 'symbol' for the OCC contract symbol.
+    """
+    return Order(
+        symbol=opt_order.contract_symbol,
+        side=opt_order.side,
+        qty=opt_order.qty,
+        order_type="limit",
+        time_in_force=opt_order.time_in_force,
+        limit_price=opt_order.limit_price,
+        stop_price=None,
+        as_of=opt_order.as_of,
+        prompt_version=opt_order.prompt_version,
+        source=opt_order.source,
+    )
+
+
+def _order_to_options_order(order: Order) -> Any:
+    """
+    Reverse-map a supervisor-approved Order back to an OptionsOrder for
+    broker submission via place_option_order().
+    """
+    from sauce.core.options_schemas import OptionsOrder as _OptOrder
+    # OCC symbols encode the underlying in the first 6 chars (space-padded)
+    underlying = order.symbol[:6].strip()
+    return _OptOrder(
+        contract_symbol=order.symbol,
+        underlying=underlying,
+        qty=int(order.qty),
+        side=order.side,
+        limit_price=order.limit_price or 0.01,
+        as_of=order.as_of,
+        prompt_version=order.prompt_version,
+        source=order.source,  # type: ignore[arg-type]
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -55,9 +55,9 @@ MIN_BARS_SETUP_3: int = 10
 
 # ── Setup 1 thresholds ───────────────────────────────────────────────────────
 
-S1_RSI_HARD: float = 38.0
-S1_BB_TOLERANCE: float = 0.005
-S1_DOWN_CANDLE_VOL_RATIO: float = 1.5
+S1_RSI_HARD: float = 42.0
+S1_BB_TOLERANCE: float = 0.01
+S1_DOWN_CANDLE_VOL_RATIO: float = 1.2
 S1_RSI_SOFT: float = 32.0
 S1_STOCH_K_SOFT: float = 20.0
 S1_WIN_RATE_THRESHOLD: float = 0.60
@@ -65,18 +65,18 @@ S1_MAX_ATTEMPTS: int = 2
 
 # ── Setup 2 thresholds ───────────────────────────────────────────────────────
 
-S2_SMA_PROXIMITY_PCT: float = 0.01
-S2_RSI_LOW: float = 38.0
-S2_RSI_HIGH: float = 58.0
+S2_SMA_PROXIMITY_PCT: float = 0.02
+S2_RSI_LOW: float = 35.0
+S2_RSI_HIGH: float = 62.0
 S2_RSI_TURNING_THRESHOLD: float = 45.0
 S2_BOUNCE_TOLERANCE: float = 0.003
 S2_VOLUME_CONTRACTION_RATIO: float = 0.5
 
 # ── Setup 3 thresholds ───────────────────────────────────────────────────────
 
-S3_CONSOLIDATION_BARS: int = 8
-S3_RANGE_PCT_MAX: float = 2.0
-S3_BREAKOUT_VOL_MULTIPLE: float = 2.0
+S3_CONSOLIDATION_BARS: int = 6
+S3_RANGE_PCT_MAX: float = 3.0
+S3_BREAKOUT_VOL_MULTIPLE: float = 1.5
 S3_EXTENDED_CONSOL_BARS: int = 12
 S3_VOLUME_3X: float = 3.0
 S3_REVERSAL_WICK_RATIO: float = 0.5
@@ -115,7 +115,7 @@ def _compute_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
 
 
 def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample 30-min OHLCV to 4-hour bars."""
+    """Resample 15-min (or 30-min) OHLCV to 4-hour bars."""
     return (
         df.resample("4h")
         .agg({"open": "first", "high": "max", "low": "min",
@@ -125,7 +125,7 @@ def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _resample_daily(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample 30-min OHLCV to daily bars."""
+    """Resample 15-min (or 30-min) OHLCV to daily bars."""
     return (
         df.resample("1D")
         .agg({"open": "first", "high": "max", "low": "min",
@@ -139,19 +139,24 @@ def _compute_score(
     soft_conditions: list[SoftConditionResult],
     disqualifiers: list[Disqualification],
     min_score: float,
+    min_hard_required: int | None = None,
 ) -> tuple[float, bool]:
     """
     Compute final score and passed flag.
+
+    min_hard_required: minimum number of hard conditions that must pass.
+        Defaults to n_total (all) when None — preserving original behaviour.
 
     Returns (score, passed).
     """
     n_total = len(hard_conditions)
     n_passed = sum(1 for h in hard_conditions if h.passed)
+    n_required = min_hard_required if min_hard_required is not None else n_total
     hard_score = (n_passed / n_total) * min_score if n_total > 0 else 0.0
     soft_score = sum(s.points for s in soft_conditions if s.triggered)
     score = min(hard_score + soft_score, 100.0)
-    all_passed = n_passed == n_total
-    passed = all_passed and len(disqualifiers) == 0 and score >= min_score
+    enough_hard = n_passed >= n_required
+    passed = enough_hard and len(disqualifiers) == 0 and score >= min_score
     return round(score, 2), passed
 
 
@@ -167,12 +172,14 @@ def _build_narrative(
     """Build plain-English evidence narrative from rule outputs."""
     parts: list[str] = [f"{setup_type} scan for {symbol}:"]
 
+    n_total = len(hard_conditions)
+    n_passed = sum(1 for h in hard_conditions if h.passed)
     failed = [h for h in hard_conditions if not h.passed]
     if failed:
         labels = ", ".join(h.label for h in failed)
-        parts.append(f"Failed hard conditions: {labels}.")
+        parts.append(f"Hard conditions: {n_passed}/{n_total} passed. Failed: {labels}.")
     else:
-        parts.append("All hard conditions passed.")
+        parts.append(f"All {n_total} hard conditions passed.")
 
     triggered = [s for s in soft_conditions if s.triggered]
     if triggered:
@@ -216,10 +223,10 @@ def evaluate_crypto_mean_reversion(
 
     # ── Hard conditions ──────────────────────────────────────────────────────
 
-    # H1: RSI 30-min < 38
+    # H1: RSI 30-min < 42
     rsi_ok = indicators.rsi_14 is not None and indicators.rsi_14 < S1_RSI_HARD
     hard.append(HardConditionResult(
-        label="RSI < 38",
+        label=f"RSI < {S1_RSI_HARD}",
         passed=rsi_ok,
         detail=f"RSI={indicators.rsi_14}" if indicators.rsi_14 is not None else "RSI unavailable",
     ))
@@ -271,40 +278,18 @@ def evaluate_crypto_mean_reversion(
         h4_ok = False
         detail = "Insufficient bars for down-candle volume check"
     hard.append(HardConditionResult(
-        label="Down-candle volume > 1.5x", passed=h4_ok, detail=detail,
-    ))
-
-    # H5: MACD histogram curling (current value > 2 bars ago)
-    if len(df) >= 30:
-        hist = _compute_macd_histogram(df["close"])
-        if len(hist) >= 3 and pd.notna(hist.iloc[-1]) and pd.notna(hist.iloc[-3]):
-            h5_ok = float(hist.iloc[-1]) > float(hist.iloc[-3])
-            detail = f"hist_now={hist.iloc[-1]:.6f}, hist_2ago={hist.iloc[-3]:.6f}"
-        else:
-            h5_ok = False
-            detail = "MACD histogram values unavailable"
-    else:
-        h5_ok = False
-        detail = "Insufficient bars for MACD computation"
-    hard.append(HardConditionResult(label="MACD histogram curling", passed=h5_ok, detail=detail))
-
-    # H6: No open position in this symbol
-    h6_ok = not has_open_position
-    hard.append(HardConditionResult(
-        label="No open position",
-        passed=h6_ok,
-        detail="Position already open" if has_open_position else "No position",
+        label=f"Down-candle volume > {S1_DOWN_CANDLE_VOL_RATIO}x", passed=h4_ok, detail=detail,
     ))
 
     # ── Soft conditions ──────────────────────────────────────────────────────
 
-    # S1: RSI < 32 → deep oversold (+15 pts)
+    # S1: RSI < 32 → deep oversold (+20 pts)
     s1 = indicators.rsi_14 is not None and indicators.rsi_14 < S1_RSI_SOFT
-    soft.append(SoftConditionResult(label="Deep oversold RSI < 32", triggered=s1, points=15.0))
+    soft.append(SoftConditionResult(label="Deep oversold RSI < 32", triggered=s1, points=20.0))
 
-    # S2: Stochastic K < 20 (+10 pts)
+    # S2: Stochastic K < 20 (+15 pts)
     s2 = indicators.stoch_k is not None and indicators.stoch_k < S1_STOCH_K_SOFT
-    soft.append(SoftConditionResult(label="StochK < 20", triggered=s2, points=10.0))
+    soft.append(SoftConditionResult(label="StochK < 20", triggered=s2, points=15.0))
 
     # S3: Price ≤ SMA20 (+10 pts)
     s3 = indicators.sma_20 is not None and last_close <= indicators.sma_20
@@ -320,11 +305,27 @@ def evaluate_crypto_mean_reversion(
         label="Strategic win rate > 60%", triggered=s5, points=10.0,
     ))
 
+    # S6: MACD histogram curling up (+15 pts — moved from hard condition)
+    if len(df) >= 30:
+        hist = _compute_macd_histogram(df["close"])
+        if len(hist) >= 3 and pd.notna(hist.iloc[-1]) and pd.notna(hist.iloc[-3]):
+            s6_triggered = float(hist.iloc[-1]) > float(hist.iloc[-3])
+        else:
+            s6_triggered = False
+    else:
+        s6_triggered = False
+    soft.append(SoftConditionResult(label="MACD histogram curling", triggered=s6_triggered, points=15.0))
+
     # ── Disqualifiers ────────────────────────────────────────────────────────
 
     if is_near_major_event(as_of, window_minutes=90):
         disqualifiers.append(Disqualification(
             reason="Major economic event within 90 minutes",
+        ))
+
+    if has_open_position:
+        disqualifiers.append(Disqualification(
+            reason="Already have an open position in this symbol",
         ))
 
     if mean_reversion_attempts_today >= S1_MAX_ATTEMPTS:
@@ -346,7 +347,7 @@ def evaluate_crypto_mean_reversion(
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
-    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_1_MIN_SCORE)
+    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_1_MIN_SCORE, min_hard_required=3)
     narrative = _build_narrative(
         "crypto_mean_reversion", symbol, hard, soft, disqualifiers, score, passed,
     )
@@ -385,8 +386,8 @@ def evaluate_equity_trend_pullback(
     in an established uptrend on SPY or QQQ.
 
     df_daily_ext: Optional pre-fetched daily bars (50 days of 1-day OHLCV).
-        When provided, used instead of resampling the 30-min df — critical
-        because 60 bars of 30-min data only covers ~5 trading days, which
+        When provided, used instead of resampling the intraday df — critical
+        because 120 bars of 15-min data only covers ~5 trading days, which
         is far too few for SMA50 and most H/S conditions.
     """
     hard: list[HardConditionResult] = []
@@ -427,7 +428,7 @@ def evaluate_equity_trend_pullback(
         h2_ok = False
         detail = "Daily SMA20 unavailable"
     hard.append(HardConditionResult(
-        label="Price within 1% of SMA20", passed=h2_ok, detail=detail,
+        label="Price within 2% of SMA20", passed=h2_ok, detail=detail,
     ))
 
     # H3: Daily RSI between 38-58
@@ -442,7 +443,9 @@ def evaluate_equity_trend_pullback(
     else:
         h3_ok = False
         detail = "Daily RSI unavailable"
-    hard.append(HardConditionResult(label="Daily RSI 38-58", passed=h3_ok, detail=detail))
+    hard.append(HardConditionResult(
+        label=f"Daily RSI {S2_RSI_LOW}-{S2_RSI_HIGH}", passed=h3_ok, detail=detail,
+    ))
 
     # H4: Price > Daily SMA50
     if pd.notna(daily_sma50):
@@ -524,7 +527,7 @@ def evaluate_equity_trend_pullback(
     else:
         s3_triggered = False
     soft.append(SoftConditionResult(
-        label="30m RSI turning up from <45", triggered=s3_triggered, points=10.0,
+        label="15m RSI turning up from <45", triggered=s3_triggered, points=10.0,
     ))
 
     # S4: Very low volume contraction — today's volume < 50% of 20d avg (+10 pts)
@@ -581,7 +584,7 @@ def evaluate_equity_trend_pullback(
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
-    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_2_MIN_SCORE)
+    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_2_MIN_SCORE, min_hard_required=5)
     narrative = _build_narrative(
         "equity_trend_pullback", symbol, hard, soft, disqualifiers, score, passed,
     )
@@ -644,14 +647,15 @@ def evaluate_crypto_breakout(
 
     # ── Hard conditions ──────────────────────────────────────────────────────
 
-    # H1: Price in range ≥4 hours with <2% range
+    # H1: Price in tight range for consolidation period with < 3% range
     h1_ok = has_enough and range_pct < S3_RANGE_PCT_MAX
     if has_enough:
         detail = f"range={range_pct:.2f}% over {S3_CONSOLIDATION_BARS} bars"
     else:
         detail = f"Only {len(df)} bars (need {S3_CONSOLIDATION_BARS + 1})"
     hard.append(HardConditionResult(
-        label="Consolidation >= 4hr, range < 2%", passed=h1_ok, detail=detail,
+        label=f"Consolidation >= {S3_CONSOLIDATION_BARS} bars, range < {S3_RANGE_PCT_MAX}%",
+        passed=h1_ok, detail=detail,
     ))
 
     # H2: Volume declining during consolidation
@@ -687,7 +691,8 @@ def evaluate_crypto_breakout(
         h4_ok = False
         detail = "Consolidation avg volume is zero or insufficient bars"
     hard.append(HardConditionResult(
-        label="Breakout volume >= 2x avg", passed=h4_ok, detail=detail,
+        label=f"Breakout volume >= {S3_BREAKOUT_VOL_MULTIPLE}x avg",
+        passed=h4_ok, detail=detail,
     ))
 
     # H5: 4hr trend aligned with breakout direction (upward)
@@ -707,14 +712,6 @@ def evaluate_crypto_breakout(
         detail = f"Only {len(df)} bars (need 24 for 4hr trend)"
     hard.append(HardConditionResult(
         label="4hr trend aligned (up)", passed=h5_ok, detail=detail,
-    ))
-
-    # H6: No open positions
-    h6_ok = not has_open_position
-    hard.append(HardConditionResult(
-        label="No open position",
-        passed=h6_ok,
-        detail="Position already open" if has_open_position else "No position",
     ))
 
     # ── Soft conditions ──────────────────────────────────────────────────────
@@ -769,6 +766,10 @@ def evaluate_crypto_breakout(
 
     # ── Disqualifiers ────────────────────────────────────────────────────────
 
+    # Already have an open position
+    if has_open_position:
+        disqualifiers.append(Disqualification(reason="Position already open"))
+
     # 3rd breakout attempt today — previous two failed
     if breakout_attempts_today >= S3_MAX_ATTEMPTS:
         disqualifiers.append(Disqualification(
@@ -806,7 +807,7 @@ def evaluate_crypto_breakout(
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
-    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_3_MIN_SCORE)
+    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_3_MIN_SCORE, min_hard_required=4)
     narrative = _build_narrative(
         "crypto_breakout", symbol, hard, soft, disqualifiers, score, passed,
     )

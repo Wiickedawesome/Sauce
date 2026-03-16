@@ -107,7 +107,7 @@ async def run(
         s.symbol.upper(): s for s in signals
     }
     stale_symbols: list[str] = []
-    _SELL_SOURCES = {"exit_research", "stop_loss"}
+    _SELL_SOURCES = {"exit_research", "stop_loss", "options_exit", "options_stop"}
     for order in orders:
         # Sell orders from exit_research/stop_loss bypass the research pipeline
         # and may not have a matching signal — exempt them from freshness, but

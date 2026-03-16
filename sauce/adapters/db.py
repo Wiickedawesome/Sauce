@@ -99,6 +99,35 @@ class SignalRow(Base):
     prompt_version: str = Column(String(32), nullable=False, default="v1")
 
 
+class OptionsPositionRow(Base):
+    """Tracked options positions for the compounding exit engine.
+
+    Unlike audit tables, this table supports UPDATE (remaining_qty, stages,
+    trailing_stop, status) because exit management mutates position state
+    across loop iterations.
+    """
+
+    __tablename__ = "options_positions"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    position_id: str = Column(String(36), nullable=False, unique=True, index=True)
+    contract_symbol: str = Column(String(40), nullable=False, index=True)
+    underlying: str = Column(String(20), nullable=False, index=True)
+    entry_price: float = Column(Float, nullable=False)
+    qty: int = Column(Integer, nullable=False)
+    remaining_qty: int = Column(Integer, nullable=False)
+    direction: str = Column(String(16), nullable=False)  # long_call / long_put
+    strategy_type: str = Column(String(24), nullable=False, default="directional")
+    stages_completed: int = Column(Integer, nullable=False, default=0)
+    realized_pnl: float = Column(Float, nullable=False, default=0.0)
+    trailing_stop_price: float | None = Column(Float, nullable=True)
+    compound_stages_json: str = Column(Text, nullable=False, default="[]")  # JSON
+    status: str = Column(String(12), nullable=False, default="open", index=True)  # open/closed
+    entry_time: datetime = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    closed_at: datetime | None = Column(DateTime, nullable=True)
+    loop_id: str = Column(String(36), nullable=False)
+
+
 class DailyStatsRow(Base):
     """One row per trading day, written by the Ops agent."""
 
@@ -334,6 +363,137 @@ def upsert_daily_stats(
         session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.critical("upsert_daily_stats failed: %s", exc)
+    finally:
+        session.close()
+
+
+# ── Options Position Persistence ──────────────────────────────────────────────
+
+def save_options_position(
+    position: object,
+    loop_id: str,
+    db_path: str | None = None,
+) -> None:
+    """Persist a new OptionsPosition to the DB. Never raises."""
+    session = get_session(db_path)
+    try:
+        stages_json = json.dumps([s.model_dump() for s in position.compound_stages])  # type: ignore[union-attr]
+        row = OptionsPositionRow(
+            position_id=position.position_id,  # type: ignore[union-attr]
+            contract_symbol=position.contract.contract_symbol,  # type: ignore[union-attr]
+            underlying=position.contract.underlying,  # type: ignore[union-attr]
+            entry_price=position.entry_price,  # type: ignore[union-attr]
+            qty=position.qty,  # type: ignore[union-attr]
+            remaining_qty=position.remaining_qty,  # type: ignore[union-attr]
+            direction=position.direction,  # type: ignore[union-attr]
+            strategy_type=position.strategy_type,  # type: ignore[union-attr]
+            stages_completed=position.stages_completed,  # type: ignore[union-attr]
+            realized_pnl=position.realized_pnl,  # type: ignore[union-attr]
+            trailing_stop_price=position.trailing_stop_price,  # type: ignore[union-attr]
+            compound_stages_json=stages_json,
+            status="open",
+            entry_time=position.entry_time or datetime.now(timezone.utc),  # type: ignore[union-attr]
+            loop_id=loop_id,
+        )
+        session.add(row)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.critical("Failed to save options position %s: %s",
+                        getattr(position, "position_id", "?"), exc)
+    finally:
+        session.close()
+
+
+def load_open_options_positions(db_path: str | None = None) -> list[dict]:
+    """Load all open options positions as dicts (caller reconstructs Pydantic models).
+
+    Returns a list of dicts with all fields needed to rebuild OptionsPosition.
+    """
+    session = get_session(db_path)
+    try:
+        rows = (
+            session.query(OptionsPositionRow)
+            .filter(OptionsPositionRow.status == "open")
+            .all()
+        )
+        results = []
+        for row in rows:
+            results.append({
+                "position_id": row.position_id,
+                "contract_symbol": row.contract_symbol,
+                "underlying": row.underlying,
+                "entry_price": row.entry_price,
+                "qty": row.qty,
+                "remaining_qty": row.remaining_qty,
+                "direction": row.direction,
+                "strategy_type": row.strategy_type,
+                "stages_completed": row.stages_completed,
+                "realized_pnl": row.realized_pnl,
+                "trailing_stop_price": row.trailing_stop_price,
+                "compound_stages_json": row.compound_stages_json,
+                "entry_time": row.entry_time,
+                "loop_id": row.loop_id,
+            })
+        return results
+    except Exception as exc:  # noqa: BLE001
+        logger.critical("Failed to load open options positions: %s", exc)
+        return []
+    finally:
+        session.close()
+
+
+def update_options_position(
+    position_id: str,
+    db_path: str | None = None,
+    **fields: object,
+) -> None:
+    """Update mutable fields on an open options position. Never raises."""
+    session = get_session(db_path)
+    try:
+        row = (
+            session.query(OptionsPositionRow)
+            .filter(OptionsPositionRow.position_id == position_id)
+            .first()
+        )
+        if row is None:
+            logger.warning("update_options_position: position_id=%s not found", position_id)
+            return
+        for key, value in fields.items():
+            if hasattr(row, key):
+                setattr(row, key, value)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.critical("Failed to update options position %s: %s", position_id, exc)
+    finally:
+        session.close()
+
+
+def close_options_position(
+    position_id: str,
+    realized_pnl: float,
+    db_path: str | None = None,
+) -> None:
+    """Mark an options position as closed. Never raises."""
+    session = get_session(db_path)
+    try:
+        row = (
+            session.query(OptionsPositionRow)
+            .filter(OptionsPositionRow.position_id == position_id)
+            .first()
+        )
+        if row is None:
+            logger.warning("close_options_position: position_id=%s not found", position_id)
+            return
+        row.status = "closed"
+        row.remaining_qty = 0
+        row.realized_pnl = realized_pnl
+        row.closed_at = datetime.now(timezone.utc)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.critical("Failed to close options position %s: %s", position_id, exc)
     finally:
         session.close()
 

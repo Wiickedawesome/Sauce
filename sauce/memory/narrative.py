@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Number of bars from session open used to measure opening momentum.
-# At 30-min cadence, 1 bar = first 30 minutes of the session.
+# At 15-min cadence, 1 bar = first 15 minutes of the session.
 OPEN_MOMENTUM_BARS: int = 1
 
 # Volume decline lookback (number of regime log entries to compare).
@@ -68,7 +68,7 @@ def _build_open_momentum(spy_df: pd.DataFrame | None) -> str:
     """
     Describe the opening momentum from SPY (or primary benchmark) data.
 
-    Returns a sentence fragment like "moderate upward momentum (+0.3% SPY first 30min)".
+    Returns a sentence fragment like "moderate upward momentum (+0.3% SPY first 15min)".
     If no data is available, returns a fallback.
     """
     if spy_df is None or len(spy_df) < 2:
@@ -93,7 +93,7 @@ def _build_open_momentum(spy_df: pd.DataFrame | None) -> str:
     else:
         direction = "strong upward" if change_pct > 0 else "strong downward"
 
-    return f"{direction} momentum ({_format_pct(change_pct)} SPY first 30min)"
+    return f"{direction} momentum ({_format_pct(change_pct)} SPY first 15min)"
 
 
 def _build_regime_sentence(

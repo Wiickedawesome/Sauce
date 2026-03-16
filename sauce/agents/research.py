@@ -97,10 +97,10 @@ async def run(
 
     # ── Step 1: Fetch OHLCV history ───────────────────────────────────────────
     # Crypto needs 500 bars so Setup 1 H3 (4hr SMA50) can compute:
-    # 500 / 8 = ~62 4hr bars, clearing the 50-bar threshold.
-    _bars = 500 if _is_crypto else 60
+    # 500 / 16 = ~31 4hr bars from 15-min data; use 1000 for 62+ 4hr bars.
+    _bars = 1000 if _is_crypto else 120
     try:
-        df = market_data.get_history(symbol, timeframe="30Min", bars=_bars)
+        df = market_data.get_history(symbol, timeframe="15Min", bars=_bars)
     except market_data.MarketDataError as exc:
         logger.warning("research[%s]: get_history failed: %s", symbol, exc)
         return _safe_hold(f"market data unavailable: {exc}")
@@ -169,7 +169,7 @@ async def run(
                 "trend_classification": trend,
             }
     except market_data.MarketDataError:
-        pass  # Daily data unavailable — proceed with 30min only
+        pass  # Daily data unavailable — proceed with 15min only
 
     # ── Step 2c: Fetch recent signal history for feedback loop ─────────────
     signal_history: list[dict] | None = None
