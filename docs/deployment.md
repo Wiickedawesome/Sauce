@@ -1,6 +1,6 @@
 # Deployment
 
-Sauce is deployed as a Docker container on a VPS, running on a 30-minute cron schedule.
+Sauce is deployed as a Docker container on a VPS, running on a 15-minute cron schedule.
 
 ---
 
@@ -42,7 +42,7 @@ docker/
 
 - `.env` is mounted **read-only** — secrets never bake into the image
 - `./data` is mounted **read-write** — SQLite DB and logs survive restarts
-- Cron fires every 30 minutes via `scripts/run_loop.sh`
+- Cron fires every 15 minutes via `scripts/run_loop.sh`
 - Container restarts automatically (`restart: unless-stopped`)
 
 ---
@@ -57,6 +57,7 @@ docker/
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
 | `LLM_MODEL` | No | `claude-sonnet-4-6` | Anthropic model name |
 | `TRADING_PAUSE` | No | `false` | Emergency kill switch |
+| `OPTIONS_ENABLED` | No | `false` | Enable options trading pipeline |
 | `DB_PATH` | No | `data/sauce.db` | SQLite database path |
 
 See `sauce/core/config.py` for the complete list of configuration options.

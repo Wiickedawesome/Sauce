@@ -12,7 +12,7 @@
 ![DB](https://img.shields.io/badge/Database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)
 ![Docker](https://img.shields.io/badge/Deploy-Docker-2496ed?style=flat-square&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPLv3-22c55e?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-861%20passed-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-976%20passed-22c55e?style=flat-square)
 ![Paper](https://img.shields.io/badge/Mode-Paper%20First-f59e0b?style=flat-square)
 
 <br/>
@@ -21,7 +21,7 @@
 
 ---
 
-Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 30-minute cron cadence. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities and crypto, and SQLite as an append-only audit database. No machine learning. No training.
+Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 15-minute cron cadence. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities, crypto, and options, and SQLite as an append-only audit database. No machine learning. No training.
 
 ---
 
@@ -32,10 +32,11 @@ Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 
 - **Multi-timeframe signal engine** — confluence scoring across 5m, 15m, 1h, 4h, 1d with weighted S1–S4 signal tiers
 - **Technical indicator library** — RSI, MACD, Bollinger Bands, ATR, VWAP, SMA, Stochastic, volume ratio (via pandas-ta)
 - **Bull/Bear debate layer** — deterministic adversarial arguments for/against every trade, forwarded to the Supervisor
-- **Backtesting engine** — vectorized bar-replay with ATR-based stop-loss and take-profit
+- **Options trading** — "Double Up & Take Gains" compounding strategy with multi-stage profit targets, IV/delta/DTE safety gates, and dedicated exit engine
+- **Backtesting engine** — vectorized bar-replay with ATR-based stop-loss and take-profit, plus dedicated options backtest engine with delta+theta pricing model
 - **Memory & RAG** — session memory (resets daily) + strategic memory (persistent). Top-K similar past trades retrieved and injected into Claude's prompt for confidence calibration
-- **Exit management** — active position monitoring with trailing stops and regime-flip detection
-- **861 tests, zero real API calls** — full test coverage with no external dependencies
+- **Exit management** — active position monitoring with trailing stops, regime-flip detection, and options compound-stage exit engine
+- **976 tests, zero real API calls** — full test coverage with no external dependencies
 - **Paper-first default** — live trading requires explicit opt-in
 - **Append-only SQLite audit log** — full forensic trail of every decision
 
@@ -45,7 +46,7 @@ Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                       SAUCE LOOP (every 30min)                      │
+│                       SAUCE LOOP (every 15min)                      │
 ├──────────────┬───────────────────────────────────────────────────────┤
 │  Session Boot│  Init day, load economic calendar, macro suppression  │
 │  Mkt Context │  SPY bars → regime classification → narrative         │
@@ -56,6 +57,8 @@ Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 
 │  Execution   │  Live quote → price validation → order construction   │
 │  Supervisor  │  Hard pre-flight + Claude veto (temp 0.2)             │
 │  Exit Mgmt   │  Open position evaluation, trailing stops             │
+│  Options     │  Research → safety gates → entry/exit → compound      │
+│              │  stage management (feature-flagged)                    │
 │  Broker      │  Place orders + companion stop-loss                   │
 │  Ops         │  Audit trail, anomaly detection, circuit breakers     │
 └──────────────┴───────────────────────────────────────────────────────┘
@@ -72,8 +75,9 @@ sauce/
   adapters/
     broker.py          Alpaca order placement + account queries
     market_data.py     Bars, quotes, snapshots via Alpaca Data API
+    options_data.py    Options chain, quotes, greeks via Alpaca Options API
     llm.py             Claude via Anthropic API (with retry + back-off)
-    db.py              SQLite engine, audit log, signal/order writers
+    db.py              SQLite engine, audit log, signal/order/options writers
     notify.py          Alert dispatch
   agents/
     session_boot.py    Day-start initialization + calendar suppression
@@ -83,6 +87,9 @@ sauce/
     execution.py       Order construction + price validation
     debate.py          Deterministic bull/bear debate engine
     exit_research.py   Exit signal evaluation for open positions
+    options_research.py Options signal generation (Claude)
+    options_execution.py Options order construction
+    options_exit.py    Options compound-stage exit engine
     supervisor.py      Final approval gate (Claude)
     portfolio.py       Portfolio analysis
     ops.py             Operational health checks
@@ -98,6 +105,9 @@ sauce/
     nav.py             NAV tracking + high-water mark
     metrics.py         Performance metrics calculations
     screener.py        Dynamic equity screening from full Alpaca market
+    options_schemas.py Pydantic models: OptionsPosition, ExitDecision, ...
+    options_config.py  Options settings (IV, DTE, delta, stages)
+    options_safety.py  7 safety gates: IV rank, DTE, spread, delta, exposure
     validation.py      Input validation helpers
   indicators/
     core.py            RSI, MACD, BB, ATR, VWAP, SMA, Stochastic, vol ratio
@@ -107,9 +117,12 @@ sauce/
   backtest/
     models.py          BacktestConfig, BacktestResult, BacktestTrade
     engine.py          Vectorized bar-replay backtesting
+    options_models.py  Options backtest dataclasses + exit reasons
+    options_engine.py  Options bar-replay engine (delta+theta pricing)
   memory/
     db.py              Session + strategic memory ORM, RAG retrieval
     learning.py        Post-trade outcome recording
+    options_learning.py  Options post-trade analytics + win rate drift
     narrative.py       Intraday narrative builder
   prompts/
     context.py         Memory → plain English context builders
@@ -118,7 +131,7 @@ sauce/
     supervisor.py      Supervisor agent prompt templates
     utils.py           Shared prompt formatting utilities
 
-tests/                 861 tests, zero real API calls
+tests/                 976 tests, zero real API calls
 scripts/               Cron entry, health checks, diagnostics
 docker/                Dockerfile + docker-compose.yml
 docs/                  Architecture, features, deployment guides
@@ -168,6 +181,15 @@ All configuration lives in `.env`. No value is hardcoded in agent or adapter cod
 | `MAX_PRICE_DEVIATION` | `0.01` | Execution vetoes if live quote deviates > 1% |
 | `TRADING_PAUSE` | `false` | Set `true` to halt all trading immediately |
 | `PROMPT_VERSION` | `v1` | Stamped on every LLM call for auditability |
+| `OPTIONS_ENABLED` | `false` | Enable options trading pipeline |
+| `OPTION_IV_RANK_MIN` | `0.25` | Minimum IV rank to enter an options trade |
+| `OPTION_DTE_MIN` | `14` | Minimum days to expiration |
+| `OPTION_DTE_MAX` | `60` | Maximum days to expiration |
+| `OPTION_DELTA_MIN` | `0.25` | Minimum absolute delta |
+| `OPTION_DELTA_MAX` | `0.55` | Maximum absolute delta |
+| `OPTION_MAX_SPREAD_PCT` | `0.05` | Max bid-ask spread as pct of mid |
+| `OPTION_PROFIT_TARGET_MULT` | `2.0` | Multiplier for compound profit stages |
+| `OPTION_MAX_LOSS_PCT` | `0.50` | Hard stop: max loss per position |
 
 ---
 
@@ -214,6 +236,7 @@ See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 | [Indicators](docs/indicators.md) | Technical indicator library reference |
 | [Signals](docs/signals.md) | Multi-timeframe engine, confluence scoring, signal tiers |
 | [Backtesting](docs/backtesting.md) | Bar-replay engine, configuration, exit reasons |
+| [Options](docs/options.md) | Options trading strategy, safety gates, compound exits |
 | [Debate](docs/debate.md) | Bull/bear debate layer, arguments, integration |
 | [Memory & RAG](docs/memory.md) | Session/strategic memory, similar trade retrieval |
 | [Safety & Risk](docs/safety.md) | 8-layer gauntlet, risk parameters, anomaly detection |
@@ -225,7 +248,7 @@ See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 
 [GNU General Public License v3.0](LICENSE)
 
-The container runs cron as PID 1. `run_loop.sh` fires every 30 minutes, activates the venv, and executes `python -m sauce.core.loop`. All output is written to `data/logs/cron.log`, which is on the host-mounted volume and survives container restarts.
+The container runs cron as PID 1. `run_loop.sh` fires every 15 minutes, activates the venv, and executes `python -m sauce.core.loop`. All output is written to `data/logs/cron.log`, which is on the host-mounted volume and survives container restarts.
 
 ---
 

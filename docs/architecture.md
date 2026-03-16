@@ -1,16 +1,16 @@
 # Architecture
 
-Sauce is a fully autonomous, multi-agent trading system that runs on a 30-minute cron cadence. It uses Claude as the reasoning engine, Alpaca as the broker for US equities and crypto, and SQLite as an append-only audit database.
+Sauce is a fully autonomous, multi-agent trading system that runs on a 15-minute cron cadence. It uses Claude as the reasoning engine, Alpaca as the broker for US equities, crypto, and options, and SQLite as an append-only audit database.
 
 ---
 
 ## Pipeline Overview
 
-Every 30 minutes, the loop orchestrator (`core/loop.py`) executes this sequence:
+Every 15 minutes, the loop orchestrator (`core/loop.py`) executes this sequence:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                          SAUCE LOOP (every 30min)                       │
+│                          SAUCE LOOP (every 15min)                       │
 ├──────────────┬───────────────────────────────────────────────────────────┤
 │  Step 0      │  Session Boot (Pure Python)                              │
 │              │  Wipe session memory if new day, load economic calendar, │
@@ -46,6 +46,10 @@ Every 30 minutes, the loop orchestrator (`core/loop.py`) executes this sequence:
 │  Step 8      │  Exit Research — for each open position                  │
 │              │  Evaluate trailing stops, regime flips, exit signals     │
 ├──────────────┼───────────────────────────────────────────────────────────┤
+│  Step 8c     │  Options Pipeline (feature-flagged via OPTIONS_ENABLED)  │
+│              │  Research → safety gates (IV, DTE, spread, delta,        │
+│              │  exposure, max loss) → entry/exit → compound stage mgmt  │
+├──────────────┼───────────────────────────────────────────────────────────┤
 │  Broker      │  Place orders only if Supervisor says "execute"          │
 │              │  Companion stop-loss placed immediately                  │
 ├──────────────┼───────────────────────────────────────────────────────────┤
@@ -62,8 +66,9 @@ sauce/
 ├── adapters/          External interface layer
 │   ├── broker.py        Alpaca order placement + account queries
 │   ├── market_data.py   OHLCV bars, quotes, snapshots via Alpaca Data API
+│   ├── options_data.py  Options chains, quotes, greeks via Alpaca Options API
 │   ├── llm.py           Claude via GitHub Models API (+ Anthropic fallback)
-│   ├── db.py            SQLite engine, audit log, signal/order writers
+│   ├── db.py            SQLite engine, audit log, signal/order/options writers
 │   ├── notify.py        Alert dispatch
 │   └── utils.py         Adapter utilities
 │
@@ -75,6 +80,9 @@ sauce/
 │   ├── execution.py     Order construction + price validation
 │   ├── debate.py        Deterministic bull/bear debate engine
 │   ├── exit_research.py Exit signal evaluation for open positions
+│   ├── options_research.py  Options signal generation (Claude)
+│   ├── options_execution.py Options order construction
+│   ├── options_exit.py  Options compound-stage exit engine
 │   ├── portfolio.py     Portfolio analysis + rebalance suggestions
 │   ├── supervisor.py    Final veto gate (Claude)
 │   └── ops.py           Operational health + anomaly detection
@@ -90,6 +98,9 @@ sauce/
 │   ├── metrics.py       Performance metrics
 │   ├── nav.py           Net asset value tracking
 │   ├── calendar.py      Economic calendar integration
+│   ├── options_schemas.py Pydantic models for options (Position, ExitDecision, ...)
+│   ├── options_config.py  Options settings (IV, DTE, delta, stages)
+│   ├── options_safety.py  7 safety gates: IV rank, DTE, spread, delta, exposure
 │   └── validation.py    Input validation
 │
 ├── indicators/        Technical analysis
@@ -102,16 +113,20 @@ sauce/
 │
 ├── backtest/          Backtesting engine
 │   ├── models.py        BacktestConfig, BacktestResult, BacktestTrade
-│   └── engine.py        Vectorized bar-replay with ATR-based exits
+│   ├── engine.py        Vectorized bar-replay with ATR-based exits
+│   ├── options_models.py  Options backtest dataclasses + exit reasons
+│   └── options_engine.py  Options bar-replay engine (delta+theta pricing)
 │
 ├── memory/            Session + strategic memory (SQLite)
 │   ├── db.py            ORM adapters, get_similar_trades() RAG retrieval
 │   ├── learning.py      Post-trade outcome recording
+│   ├── options_learning.py  Options post-trade analytics + win rate drift
 │   └── narrative.py     Intraday narrative builder
 │
 └── prompts/           Prompt templates for Claude
     ├── context.py       Context builders (memory → plain English)
     ├── research.py      Research agent system + user prompts
+    ├── options_research.py  Options research agent prompts
     ├── execution.py     Execution agent prompts
     ├── supervisor.py    Supervisor agent prompts
     └── utils.py         Prompt sanitization + injection protection
