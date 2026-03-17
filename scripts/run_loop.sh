@@ -37,8 +37,8 @@ if [[ ! -f "${VENV}/bin/python" ]]; then
     exit 1
 fi
 
-if [[ ! -f "${APP_DIR}/.env" ]]; then
-    echo "[$(ts)] ERROR: .env file not found at ${APP_DIR}/.env" >&2
+if [[ ! -f "${APP_DIR}/.env" ]] && [[ ! -f /etc/environment.sauce ]]; then
+    echo "[$(ts)] ERROR: no credentials found — expected ${APP_DIR}/.env or /etc/environment.sauce" >&2
     echo "[$(ts)] Copy .env.example to .env and fill in credentials." >&2
     exit 1
 fi
