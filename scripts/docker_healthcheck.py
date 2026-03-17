@@ -8,7 +8,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.environ.get("DB_PATH", "/app/data/sauce.db")
-MAX_AGE_MINUTES = 35  # 2 cron cycles + grace
+_INTERVAL = int(os.environ.get("LOOP_INTERVAL_MINUTES", "30"))
+MAX_AGE_MINUTES = (_INTERVAL * 2) + 5  # 2 cron cycles + grace
 
 
 def main() -> int:

@@ -273,19 +273,19 @@ async def main() -> None:
     try:
         await asyncio.wait_for(
             _run_loop(loop_id=loop_id, settings=settings, boot_ctx=boot_ctx),
-            timeout=settings.loop_timeout_seconds,
+            timeout=settings.effective_loop_timeout,
         )
     except TimeoutError:
         logger.critical(
             "Loop timed out after %ds [loop_id=%s]",
-            settings.loop_timeout_seconds, loop_id,
+            settings.effective_loop_timeout, loop_id,
         )
         log_event(AuditEvent(
             loop_id=loop_id,
             event_type="error",
             payload={
                 "stage": "main",
-                "error": f"Loop timed out after {settings.loop_timeout_seconds}s",
+                "error": f"Loop timed out after {settings.effective_loop_timeout}s",
                 "type": "TimeoutError",
             },
         ))
@@ -360,27 +360,31 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         return
 
     if boot_ctx.is_suppressed:
-        logger.warning(
-            "Macro-event suppression active — aborting loop before research [loop_id=%s]",
-            loop_id,
-        )
+        # Macro-event suppression (FOMC/CPI/NFP) only blocks equities.
+        # Crypto trades 24/7 and is unaffected by these announcements.
+        # If the universe is crypto-only, log but continue.
+        _has_equities = any(not _is_crypto(s) for s in settings.full_universe)
+        if _has_equities:
+            logger.warning(
+                "Macro-event suppression active — skipping equity symbols [loop_id=%s]",
+                loop_id,
+            )
         log_event(AuditEvent(
             loop_id=loop_id,
             event_type="safety_check",
             payload={
                 "check": "macro_suppression",
                 "result": True,
-                "reason": "major economic event suppression window active",
+                "reason": "major economic event suppression window active (equities only)",
             },
         ))
-        return
 
     # ── Agent 1: Market Context ───────────────────────────────────────────────
     # Cancel any unfilled orders from previous runs before new cycle begins
     try:
         stale_cancelled = await asyncio.to_thread(
             cancel_stale_orders,
-            max_age_minutes=settings.stale_order_cancel_minutes,
+            max_age_minutes=settings.effective_stale_order_minutes,
             loop_id=loop_id,
         )
         if stale_cancelled:
@@ -395,6 +399,23 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         "Market context ready [loop_id=%s, regime=%s, dead=%s]",
         loop_id, mkt_ctx.regime.regime_type, mkt_ctx.is_dead,
     )
+
+    # Gate: if market context signals DEAD regime, abort loop early.
+    # A DEAD regime means SPY data is unavailable or catastrophically stale.
+    if mkt_ctx.is_dead:
+        logger.warning(
+            "Market context is DEAD — aborting loop [loop_id=%s]", loop_id,
+        )
+        log_event(AuditEvent(
+            loop_id=loop_id,
+            event_type="safety_check",
+            payload={
+                "check": "market_dead",
+                "result": True,
+                "reason": "Market context regime is DEAD — no reliable data",
+            },
+        ))
+        return
 
     # ── Step 3: Account + positions ───────────────────────────────────────────
     try:
@@ -493,6 +514,17 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
     else:
         universe = settings.full_universe
 
+    # CF-01: During macro-event suppression, exclude equities from the universe.
+    # Crypto trades 24/7 and is unaffected by FOMC/CPI/NFP announcements.
+    if boot_ctx.is_suppressed:
+        universe = [s for s in universe if _is_crypto(s)]
+        if not universe:
+            logger.warning(
+                "Macro-event suppression active and no crypto symbols — aborting [loop_id=%s]",
+                loop_id,
+            )
+            return
+
     logger.info(
         "Universe: %d symbols (%s) [loop_id=%s]",
         len(universe), "screener" if settings.screener_enabled else "static", loop_id,
@@ -579,6 +611,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                     loop_id=loop_id,
                     regime=mkt_ctx.regime.regime_type,
                     positions=positions,
+                    allowed_setups=tier_params.allowed_setups,
                 )
                 for sym, q in _eligible
             ],
@@ -645,6 +678,12 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
     except (TypeError, ValueError):
         _loop_buying_power = 0.0
 
+    # FH-03: Track how many buy orders have been approved this run so we
+    # can enforce the tier's max_positions limit.  Sells/exits are always
+    # allowed — only new positions count against the cap.
+    _current_positions = len(positions)
+    _buys_approved_this_run = 0
+
     # Symbols that actually went through the risk check (non-hold, above
     # min_confidence). Used by ops.py to compute the veto-rate anomaly.
     _symbols_attempted: list[str] = []
@@ -653,6 +692,29 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         # Short-circuit: hold signals and low-confidence signals skip risk
         if signal.side == "hold":
             continue
+
+        # FH-03: Enforce max_positions — skip buy signals once the cap is hit.
+        # Sell/exit signals are always allowed through.
+        if signal.side == "buy" and (_current_positions + _buys_approved_this_run) >= tier_params.max_positions:
+            logger.info(
+                "max_positions reached (%d + %d >= %d) — skipping buy for %s",
+                _current_positions, _buys_approved_this_run,
+                tier_params.max_positions, signal.symbol,
+            )
+            log_event(AuditEvent(
+                loop_id=loop_id,
+                event_type="safety_check",
+                symbol=signal.symbol,
+                payload={
+                    "check": "max_positions",
+                    "result": False,
+                    "current_positions": _current_positions,
+                    "buys_this_run": _buys_approved_this_run,
+                    "max_positions": tier_params.max_positions,
+                },
+            ))
+            continue
+
         if signal.confidence < settings.min_confidence:
             logger.debug(
                 "Signal for %s below min_confidence (%.2f < %.2f) — skipping",
@@ -701,6 +763,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             if not risk_result.veto and risk_result.qty and signal.side == "buy":
                 committed = risk_result.qty * signal.evidence.price_reference.mid
                 _loop_buying_power = max(0.0, _loop_buying_power - committed)
+                _buys_approved_this_run += 1  # FH-03
                 logger.debug(
                     "Buying power after %s approval: $%.2f (committed $%.2f)",
                     signal.symbol, _loop_buying_power, committed,
@@ -972,6 +1035,8 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             loop_id=loop_id,
             portfolio_review=portfolio_review,
             debate_results=debate_results,
+            positions=positions,
+            max_positions=tier_params.max_positions,
         )
     except Exception as exc:
         logger.error("Supervisor failed [loop_id=%s]: %s", loop_id, exc)

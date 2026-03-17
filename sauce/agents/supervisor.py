@@ -43,6 +43,8 @@ async def run(
     loop_id: str,
     portfolio_review: PortfolioReview | None = None,
     debate_results: dict[str, object] | None = None,
+    positions: list[dict] | None = None,
+    max_positions: int | None = None,
 ) -> SupervisorDecision:
     """
     Perform pre-flight checks then ask Claude for a final execute/abort decision.
@@ -170,6 +172,40 @@ async def run(
             )
     except (TypeError, ValueError):
         pass  # If we can’t parse buying power, let Claude decide.
+    # ── Pre-flight 6: Price deviation guard (FM-01) ────────────────────────────
+    # Reject buy orders whose limit_price deviates more than 5% from the
+    # signal's mid price.  This is a deterministic arithmetic check that
+    # catches stale or erroneous prices before the LLM gate.
+    _MAX_PRICE_DEVIATION = 0.05
+    for order in orders:
+        if order.side != "buy" or order.limit_price is None:
+            continue
+        sig = signal_by_symbol.get(order.symbol.upper())
+        if sig is None:
+            continue
+        mid = sig.evidence.price_reference.mid
+        if mid <= 0:
+            continue
+        deviation = abs(order.limit_price - mid) / mid
+        if deviation > _MAX_PRICE_DEVIATION:
+            return _abort(
+                f"Buy order for {order.symbol} limit_price ${order.limit_price:.4f} "
+                f"deviates {deviation:.1%} from mid ${mid:.4f} (max {_MAX_PRICE_DEVIATION:.0%}).",
+                vetoes=[order.symbol],
+            )
+
+    # ── Pre-flight 7: Max positions guard (FM-01) ─────────────────────────────
+    # Block new buy orders when the portfolio already holds the tier's
+    # maximum number of positions.  max_positions is passed via extra kwargs
+    # when available; if not provided this check is skipped.
+    if positions is not None and max_positions is not None:
+        buy_symbols = [o.symbol for o in orders if o.side == "buy"]
+        if buy_symbols and len(positions) >= max_positions:
+            return _abort(
+                f"Already at max_positions ({len(positions)} >= {max_positions}) "
+                f"— cannot open new buys for {buy_symbols}.",
+                vetoes=buy_symbols,
+            )
     # ── Claude gate ─────────────────────────────────────────────────────────────
     orders_dicts = [o.model_dump(mode="json") for o in orders]
     signals_summary = [

@@ -45,7 +45,7 @@ SETUP_4_REGIMES: frozenset[str] = frozenset({"TRENDING_UP", "RANGING"})
 # ── Min scores per setup ─────────────────────────────────────────────────────
 
 SETUP_1_MIN_SCORE: float = 50.0
-SETUP_2_MIN_SCORE: float = 65.0
+SETUP_2_MIN_SCORE: float = 55.0
 SETUP_3_MIN_SCORE: float = 55.0
 SETUP_4_MIN_SCORE: float = 50.0
 
@@ -344,10 +344,8 @@ def evaluate_crypto_mean_reversion(
 
     # ── Disqualifiers ────────────────────────────────────────────────────────
 
-    if is_near_major_event(as_of, window_minutes=90):
-        disqualifiers.append(Disqualification(
-            reason="Major economic event within 90 minutes",
-        ))
+    # NOTE: Macro-event blackout (FOMC/CPI/NFP) intentionally omitted for
+    # crypto setups — these events affect equities, not 24/7 crypto markets.
 
     if has_open_position:
         disqualifiers.append(Disqualification(
@@ -359,11 +357,9 @@ def evaluate_crypto_mean_reversion(
             reason=f"Mean reversion already attempted {mean_reversion_attempts_today}x today",
         ))
 
-    if regime == "VOLATILE":
-        disqualifiers.append(Disqualification(reason="Regime is VOLATILE"))
-
-    if regime == "TRENDING_DOWN":
-        disqualifiers.append(Disqualification(reason="Regime is TRENDING_DOWN"))
+    # NOTE: SPY regime disqualifiers (VOLATILE/TRENDING_DOWN) intentionally
+    # omitted for crypto setups — these reflect equity market conditions, not
+    # crypto-specific risk. Crypto setups rely on their own indicators.
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
@@ -815,15 +811,11 @@ def evaluate_crypto_breakout(
                 reason="Volume already elevated before breakout",
             ))
 
-    # Major economic event within 2 hours
-    if is_near_major_event(as_of, window_minutes=120):
-        disqualifiers.append(Disqualification(
-            reason="Major economic event within 2 hours",
-        ))
+    # NOTE: Macro-event blackout (FOMC/CPI/NFP) intentionally omitted for
+    # crypto setups — these events affect equities, not 24/7 crypto markets.
 
-    # Regime is VOLATILE
-    if regime == "VOLATILE":
-        disqualifiers.append(Disqualification(reason="Regime is VOLATILE"))
+    # NOTE: SPY regime VOLATILE disqualifier intentionally omitted for
+    # crypto setups — equity market volatility does not imply crypto risk.
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
@@ -964,16 +956,12 @@ def evaluate_crypto_momentum(
             reason=f"Momentum already attempted {momentum_attempts_today}x today",
         ))
 
-    if regime == "VOLATILE":
-        disqualifiers.append(Disqualification(reason="Regime is VOLATILE"))
+    # NOTE: SPY regime disqualifiers (VOLATILE/TRENDING_DOWN) intentionally
+    # omitted for crypto setups — these reflect equity market conditions, not
+    # crypto-specific risk. Crypto setups rely on their own indicators.
 
-    if regime == "TRENDING_DOWN":
-        disqualifiers.append(Disqualification(reason="Regime is TRENDING_DOWN"))
-
-    if is_near_major_event(as_of, window_minutes=60):
-        disqualifiers.append(Disqualification(
-            reason="Major economic event within 60 minutes",
-        ))
+    # NOTE: Macro-event blackout (FOMC/CPI/NFP) intentionally omitted for
+    # crypto setups — these events affect equities, not 24/7 crypto markets.
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
@@ -1011,14 +999,26 @@ def scan_setups(
     narrative_text: str = "",
     df_daily: pd.DataFrame | None = None,
     as_of: datetime,
+    allowed_setups: list[str] | None = None,
 ) -> list[SetupResult]:
     """
     Run all eligible setup evaluations for a single symbol.
 
     Returns a list of SetupResult — one per eligible setup type.
     Empty list means no setups are eligible for this symbol/regime combination.
+
+    Parameters
+    ----------
+    allowed_setups: When provided, only evaluate setups whose type is in this
+                    list.  Used by the capital-tier system to restrict which
+                    strategies a tier may trade (FH-01).
     """
     results: list[SetupResult] = []
+
+    # DEAD regime means no reliable data — never evaluate any setup.
+    if regime == "DEAD":
+        return results
+
     open_syms = open_symbols or set()
     sigs = signals_today or []
     win_rates = strategic_win_rates or {}
@@ -1032,8 +1032,14 @@ def scan_setups(
     canon_symbol = canonicalize_symbol(symbol)
     canon_open_syms = {canonicalize_symbol(s) for s in open_syms}
 
+    # FH-01: When the capital tier restricts which setups are allowed,
+    # skip evaluators for disallowed setup types entirely.
+    _allowed: set[str] | None = set(allowed_setups) if allowed_setups else None
+
     # Setup 1: Crypto Mean Reversion
-    if _is_crypto(symbol) and regime in SETUP_1_REGIMES:
+    # CF-02: Crypto setups are no longer gated by SPY regime — crypto markets
+    # operate independently of equity market conditions.
+    if _is_crypto(symbol) and (_allowed is None or "crypto_mean_reversion" in _allowed):
         results.append(evaluate_crypto_mean_reversion(
             symbol=symbol,
             indicators=indicators,
@@ -1047,7 +1053,7 @@ def scan_setups(
         ))
 
     # Setup 2: Equity Trend Pullback
-    if not _is_crypto(symbol) and regime in SETUP_2_REGIMES:
+    if not _is_crypto(symbol) and regime in SETUP_2_REGIMES and (_allowed is None or "equity_trend_pullback" in _allowed):
         results.append(evaluate_equity_trend_pullback(
             symbol=symbol,
             indicators=indicators,
@@ -1059,7 +1065,7 @@ def scan_setups(
         ))
 
     # Setup 3: Crypto Breakout
-    if _is_crypto(symbol) and regime in SETUP_3_REGIMES:
+    if _is_crypto(symbol) and (_allowed is None or "crypto_breakout" in _allowed):
         results.append(evaluate_crypto_breakout(
             symbol=symbol,
             indicators=indicators,
@@ -1072,7 +1078,7 @@ def scan_setups(
         ))
 
     # Setup 4: Crypto Momentum
-    if _is_crypto(symbol) and regime in SETUP_4_REGIMES:
+    if _is_crypto(symbol) and (_allowed is None or "crypto_momentum" in _allowed):
         results.append(evaluate_crypto_momentum(
             symbol=symbol,
             indicators=indicators,

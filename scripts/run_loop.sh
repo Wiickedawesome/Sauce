@@ -2,8 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # scripts/run_loop.sh — Cron entrypoint for the Sauce trading loop.
 #
-# Invoked by cron every 15 minutes:
-#   */15 * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1
+# Invoked by cron at LOOP_INTERVAL_MINUTES cadence (default 30).
 #
 # Contract:
 #   - Logs a timestamped START and END line on every run.

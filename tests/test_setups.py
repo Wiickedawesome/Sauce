@@ -296,7 +296,7 @@ class TestConstants:
 
     def test_min_scores(self):
         assert SETUP_1_MIN_SCORE == 50.0
-        assert SETUP_2_MIN_SCORE == 65.0
+        assert SETUP_2_MIN_SCORE == 55.0  # FH-02: lowered from 65.0
         assert SETUP_3_MIN_SCORE == 55.0
 
     def test_min_bars(self):
@@ -416,20 +416,20 @@ class TestCryptoMeanReversion:
         assert result.passed is False
 
     def test_disqualifier_volatile(self):
+        """CF-02: VOLATILE no longer disqualifies crypto setups."""
         df = _make_setup1_passing_df()
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion("BTC/USD", ind, df, "VOLATILE", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("VOLATILE" in r for r in reasons)
-        assert result.passed is False
+        assert not any("VOLATILE" in r for r in reasons)
 
     def test_disqualifier_trending_down(self):
+        """CF-02: TRENDING_DOWN no longer disqualifies crypto setups."""
         df = _make_setup1_passing_df()
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion("BTC/USD", ind, df, "TRENDING_DOWN", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("TRENDING_DOWN" in r for r in reasons)
-        assert result.passed is False
+        assert not any("TRENDING_DOWN" in r for r in reasons)
 
     def test_disqualifier_max_attempts(self):
         df = _make_setup1_passing_df()
@@ -444,6 +444,7 @@ class TestCryptoMeanReversion:
         assert result.passed is False
 
     def test_disqualifier_near_major_event(self, monkeypatch):
+        """CF-01: near_major_event no longer disqualifies crypto setups."""
         monkeypatch.setattr(
             "sauce.core.setups.is_near_major_event", lambda *a, **kw: True,
         )
@@ -451,8 +452,7 @@ class TestCryptoMeanReversion:
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion("BTC/USD", ind, df, "RANGING", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("Major economic event" in r for r in reasons)
-        assert result.passed is False
+        assert not any("Major economic event" in r for r in reasons)
 
     def test_disqualifier_selling_pressure(self):
         """Selling pressure disqualifier removed for crypto — should pass."""
@@ -793,13 +793,15 @@ class TestCryptoBreakout:
         assert any("reversal" in r.lower() for r in reasons)
 
     def test_disqualifier_volatile(self):
+        """CF-02: VOLATILE no longer disqualifies crypto setups."""
         df = _make_setup3_passing_df()
         ind = _make_indicators()
         result = evaluate_crypto_breakout("BTC/USD", ind, df, "VOLATILE", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("VOLATILE" in r for r in reasons)
+        assert not any("VOLATILE" in r for r in reasons)
 
     def test_disqualifier_near_major_event(self, monkeypatch):
+        """CF-01: near_major_event no longer disqualifies crypto setups."""
         monkeypatch.setattr(
             "sauce.core.setups.is_near_major_event", lambda *a, **kw: True,
         )
@@ -807,7 +809,7 @@ class TestCryptoBreakout:
         ind = _make_indicators()
         result = evaluate_crypto_breakout("BTC/USD", ind, df, "RANGING", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("event" in r.lower() for r in reasons)
+        assert not any("event" in r.lower() for r in reasons)
 
     def test_disqualifier_pre_elevated_volume(self):
         df = _make_setup3_passing_df()
@@ -938,20 +940,20 @@ class TestCryptoMomentum:
         assert result.passed is False
 
     def test_disqualifier_volatile(self):
+        """CF-02: VOLATILE no longer disqualifies crypto setups."""
         df = _make_setup4_passing_df()
         ind = _make_setup4_passing_indicators()
         result = evaluate_crypto_momentum("BTC/USD", ind, df, "VOLATILE", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("VOLATILE" in r for r in reasons)
-        assert result.passed is False
+        assert not any("VOLATILE" in r for r in reasons)
 
     def test_disqualifier_trending_down(self):
+        """CF-02: TRENDING_DOWN no longer disqualifies crypto setups."""
         df = _make_setup4_passing_df()
         ind = _make_setup4_passing_indicators()
         result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_DOWN", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("TRENDING_DOWN" in r for r in reasons)
-        assert result.passed is False
+        assert not any("TRENDING_DOWN" in r for r in reasons)
 
     def test_disqualifier_max_attempts(self):
         df = _make_setup4_passing_df()
@@ -966,6 +968,7 @@ class TestCryptoMomentum:
         assert result.passed is False
 
     def test_disqualifier_near_major_event(self, monkeypatch):
+        """CF-01: near_major_event no longer disqualifies crypto setups."""
         monkeypatch.setattr(
             "sauce.core.setups.is_near_major_event", lambda *a, **kw: True,
         )
@@ -973,8 +976,7 @@ class TestCryptoMomentum:
         ind = _make_setup4_passing_indicators()
         result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
         reasons = [d.reason for d in result.disqualifiers]
-        assert any("Major economic event" in r for r in reasons)
-        assert result.passed is False
+        assert not any("Major economic event" in r for r in reasons)
 
     def test_setup4_regimes(self):
         assert SETUP_4_REGIMES == frozenset({"TRENDING_UP", "RANGING"})

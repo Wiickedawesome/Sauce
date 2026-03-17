@@ -581,12 +581,14 @@ def has_earnings_risk(symbol: str, loop_id: str = "unset") -> bool:
         return False
 
     except ImportError:
-        # alpaca-py NewsClient not available in this SDK version — skip check
-        logger.debug(
-            "has_earnings_risk[%s]: NewsClient not available — skipping [loop_id=%s]",
+        # alpaca-py NewsClient not available in this SDK version — fail closed.
+        # Missing dependency means we cannot verify earnings safety, so block
+        # the symbol as a precaution until the SDK is installed.
+        logger.warning(
+            "has_earnings_risk[%s]: NewsClient not available — blocking symbol as precaution [loop_id=%s]",
             symbol, loop_id,
         )
-        return False
+        return True
     except Exception as exc:
         # Any infrastructure failure → fail closed (block trading until check succeeds)
         logger.warning(

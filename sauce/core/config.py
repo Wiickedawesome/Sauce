@@ -164,7 +164,18 @@ class Settings(BaseSettings):
     data_feed: str = Field(
         default="iex",
         description="Alpaca market data feed for equities: 'iex' (free) or 'sip' (paid). "
-                    "Free-tier accounts MUST use 'iex'. Default is 'iex'.",
+                    "Free-tier accounts MUST use 'iex'. Default is 'iex'. "
+                    "NOTE: IEX provides 15-min delayed quotes for equities. "
+                    "Crypto quotes are real-time regardless of data_feed setting. "
+                    "SIP provides real-time NBBO but requires a paid market data subscription.",
+    )
+
+    # ── Loop Cadence ──────────────────────────────────────────────────────────
+    loop_interval_minutes: int = Field(
+        default=30, ge=5, le=60,
+        description="Cron loop cadence in minutes. Set to 15 for fast mode or "
+                    "30 for cost-saving mode. The Dockerfile CMD reads this at "
+                    "container start to write the cron schedule.",
     )
 
     # ── Safety ────────────────────────────────────────────────────────────────
@@ -180,15 +191,29 @@ class Settings(BaseSettings):
                     "Prevents accidental live-money trading.",
     )
     loop_timeout_seconds: int = Field(
-        default=1500, ge=60,
+        default=0, ge=0,
         description="Maximum seconds a single loop iteration may run before being "
-                    "cancelled. Default 1500 (25 min) for a 30-min cron cadence.",
+                    "cancelled. 0 = auto (loop_interval_minutes × 50 seconds).",
     )
     stale_order_cancel_minutes: int = Field(
-        default=30, ge=1,
+        default=0, ge=0,
         description="Cancel any open (unfilled) orders older than this many minutes "
-                    "at the start of each loop run. Default 30 (one cron cycle).",
+                    "at the start of each loop run. 0 = auto (loop_interval_minutes).",
     )
+
+    @property
+    def effective_loop_timeout(self) -> int:
+        """Loop timeout in seconds, auto-derived from interval if not set."""
+        if self.loop_timeout_seconds > 0:
+            return self.loop_timeout_seconds
+        return self.loop_interval_minutes * 50
+
+    @property
+    def effective_stale_order_minutes(self) -> int:
+        """Stale order cancel threshold, auto-derived from interval if not set."""
+        if self.stale_order_cancel_minutes > 0:
+            return self.stale_order_cancel_minutes
+        return self.loop_interval_minutes
 
     # ── Screener ──────────────────────────────────────────────────────────────
     screener_enabled: bool = Field(

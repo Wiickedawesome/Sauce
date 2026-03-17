@@ -321,7 +321,11 @@ async def test_loop_aborts_when_trading_paused(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_loop_aborts_when_macro_suppressed(monkeypatch):
-    """If macro suppression is active the loop should exit before market/account work."""
+    """CF-01: Macro suppression filters out equities but allows crypto through.
+
+    When is_suppressed=True the loop no longer aborts entirely — it continues
+    with only crypto symbols.  Market context and account fetches still run.
+    """
     from sauce.core.schemas import BootContext, StrategicContext
 
     suppressed_boot_ctx = BootContext(
@@ -332,19 +336,44 @@ async def test_loop_aborts_when_macro_suppressed(monkeypatch):
         as_of=datetime.now(timezone.utc),
     )
 
-    with patch("sauce.agents.session_boot.run", new=AsyncMock(return_value=suppressed_boot_ctx)):
-        with patch("sauce.agents.market_context.run", new=AsyncMock()) as mock_market_context:
-            with patch("sauce.core.loop.get_account") as mock_account:
-                from sauce.core.loop import main
-                await main()
+    quotes = {"BTC/USD": make_fresh_quote("BTC/USD")}
 
-    mock_market_context.assert_not_called()
-    mock_account.assert_not_called()
+    with patch("sauce.agents.session_boot.run", new=AsyncMock(return_value=suppressed_boot_ctx)):
+        with patch("sauce.agents.market_context.run", new=AsyncMock(return_value=make_stub_market_ctx())) as mock_market_context:
+            with patch("sauce.core.loop.get_account", return_value=make_fake_account()):
+                with patch("sauce.core.loop.get_positions", return_value=[]):
+                    with patch("sauce.core.loop.get_universe_snapshot", return_value=quotes):
+                        with patch("sauce.agents.research.run", new=AsyncMock(return_value=make_stub_signal("BTC/USD"))) as mock_research:
+                            with patch("sauce.agents.risk.run", new=AsyncMock(return_value=make_stub_risk_result())):
+                                with patch("sauce.agents.portfolio.run", new=AsyncMock(return_value=make_stub_portfolio_review())):
+                                    with patch("sauce.agents.supervisor.run", new=AsyncMock(return_value=make_stub_supervisor_abort())):
+                                        with patch("sauce.agents.ops.run", new=AsyncMock()):
+                                            from sauce.core.loop import main
+                                            await main()
+
+    # CF-01: market context IS called now — suppression only filters equities.
+    mock_market_context.assert_called()
     assert count_events_by_type("loop_start") >= 1
     assert count_events_by_type("loop_end") >= 1
-    payload = get_latest_event_payload("safety_check")
-    assert payload["check"] == "macro_suppression"
-    assert payload["result"] is True
+    # Verify the macro_suppression safety_check was logged (may not be the
+    # latest safety_check since the loop continues and logs more events).
+    import json
+    from sqlalchemy import text
+    from sauce.adapters.db import get_session
+    session = get_session()
+    try:
+        rows = session.execute(
+            text(
+                "SELECT payload FROM audit_events WHERE event_type = 'safety_check' "
+                "ORDER BY id DESC"
+            ),
+        ).fetchall()
+        payloads = [json.loads(r[0]) for r in rows]
+        suppression_events = [p for p in payloads if p.get("check") == "macro_suppression"]
+        assert len(suppression_events) >= 1, "No macro_suppression safety_check logged"
+        assert suppression_events[0]["result"] is True
+    finally:
+        session.close()
 
 
 # ── Stale data is skipped ─────────────────────────────────────────────────────

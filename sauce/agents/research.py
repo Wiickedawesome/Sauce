@@ -44,6 +44,7 @@ async def run(
     *,
     regime: str | None = None,
     positions: list[dict] | None = None,
+    allowed_setups: list[str] | None = None,
 ) -> Signal:
     """
     Generate a trading signal for a single symbol.
@@ -259,6 +260,7 @@ async def run(
             narrative_text=_narrative_text,
             df_daily=df_daily if df_daily is not None and not df_daily.empty else None,
             as_of=as_of,
+            allowed_setups=allowed_setups,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("research[%s]: setup scan failed: %s", symbol, exc)
