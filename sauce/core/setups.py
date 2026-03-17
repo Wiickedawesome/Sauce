@@ -39,13 +39,15 @@ from sauce.memory.db import canonicalize_symbol
 
 SETUP_1_REGIMES: frozenset[str] = frozenset({"RANGING", "TRENDING_UP"})
 SETUP_2_REGIMES: frozenset[str] = frozenset({"TRENDING_UP"})
-SETUP_3_REGIMES: frozenset[str] = frozenset({"RANGING"})
+SETUP_3_REGIMES: frozenset[str] = frozenset({"RANGING", "TRENDING_UP"})
+SETUP_4_REGIMES: frozenset[str] = frozenset({"TRENDING_UP", "RANGING"})
 
 # ── Min scores per setup ─────────────────────────────────────────────────────
 
-SETUP_1_MIN_SCORE: float = 60.0
+SETUP_1_MIN_SCORE: float = 50.0
 SETUP_2_MIN_SCORE: float = 65.0
-SETUP_3_MIN_SCORE: float = 70.0
+SETUP_3_MIN_SCORE: float = 55.0
+SETUP_4_MIN_SCORE: float = 50.0
 
 # ── Minimum OHLCV bars required ──────────────────────────────────────────────
 
@@ -55,13 +57,13 @@ MIN_BARS_SETUP_3: int = 10
 
 # ── Setup 1 thresholds ───────────────────────────────────────────────────────
 
-S1_RSI_HARD: float = 42.0
-S1_BB_TOLERANCE: float = 0.01
-S1_DOWN_CANDLE_VOL_RATIO: float = 1.2
+S1_RSI_HARD: float = 48.0
+S1_BB_TOLERANCE: float = 0.025
+S1_DOWN_CANDLE_VOL_RATIO: float = 1.1
 S1_RSI_SOFT: float = 32.0
 S1_STOCH_K_SOFT: float = 20.0
 S1_WIN_RATE_THRESHOLD: float = 0.60
-S1_MAX_ATTEMPTS: int = 2
+S1_MAX_ATTEMPTS: int = 4
 
 # ── Setup 2 thresholds ───────────────────────────────────────────────────────
 
@@ -82,6 +84,16 @@ S3_VOLUME_3X: float = 3.0
 S3_REVERSAL_WICK_RATIO: float = 0.5
 S3_PRE_BREAKOUT_VOL_RATIO: float = 1.5
 S3_MAX_ATTEMPTS: int = 2
+
+# ── Setup 4 thresholds ───────────────────────────────────────────────────────
+
+S4_RSI_LOW: float = 40.0
+S4_RSI_HIGH: float = 65.0
+S4_VOLUME_RATIO_MIN: float = 1.0
+S4_STOCH_K_LOW: float = 30.0
+S4_STOCH_K_HIGH: float = 70.0
+S4_WIN_RATE_THRESHOLD: float = 0.50
+S4_MAX_ATTEMPTS: int = 3
 
 # ── Narrative keyword matching (Setup 1 disqualifier) ─────────────────────────
 
@@ -241,25 +253,39 @@ def evaluate_crypto_mean_reversion(
         detail = "BB lower or price unavailable"
     hard.append(HardConditionResult(label="Price near lower BB", passed=bb_ok, detail=detail))
 
-    # H3: 4hr price > 4hr SMA50 (buying a dip, not a downtrend)
-    if len(df) >= 200:
+    # H3: 4hr price > 4hr SMA30 (buying a dip, not a downtrend)
+    if len(df) >= 120:
         df_4h = _resample_4h(df)
-        if len(df_4h) >= 50:
-            sma50_4h = df_4h["close"].rolling(50).mean().iloc[-1]
+        if len(df_4h) >= 30:
+            sma30_4h = df_4h["close"].rolling(30).mean().iloc[-1]
             price_4h = float(df_4h["close"].iloc[-1])
-            if pd.notna(sma50_4h):
-                h3_ok = price_4h > sma50_4h
-                detail = f"4h_close={price_4h:.4f}, 4h_sma50={sma50_4h:.4f}"
+            if pd.notna(sma30_4h):
+                h3_ok = price_4h > sma30_4h
+                detail = f"4h_close={price_4h:.4f}, 4h_sma30={sma30_4h:.4f}"
             else:
                 h3_ok = False
-                detail = "4hr SMA50 is NaN"
+                detail = "4hr SMA30 is NaN"
         else:
             h3_ok = False
-            detail = f"Only {len(df_4h)} 4hr bars (need 50)"
+            detail = f"Only {len(df_4h)} 4hr bars (need 30)"
     else:
         h3_ok = False
-        detail = f"Only {len(df)} bars (need 200 for 4hr SMA50)"
-    hard.append(HardConditionResult(label="4hr price > 4hr SMA50", passed=h3_ok, detail=detail))
+        detail = f"Only {len(df)} bars (need 120 for 4hr SMA30)"
+    hard.append(HardConditionResult(label="4hr price > 4hr SMA30", passed=h3_ok, detail=detail))
+
+    # H5: MACD histogram curling up (momentum confirmation)
+    if len(df) >= 30:
+        hist = _compute_macd_histogram(df["close"])
+        if len(hist) >= 3 and pd.notna(hist.iloc[-1]) and pd.notna(hist.iloc[-3]):
+            h5_ok = float(hist.iloc[-1]) > float(hist.iloc[-3])
+            detail = f"macd_hist[-1]={float(hist.iloc[-1]):.6f}, macd_hist[-3]={float(hist.iloc[-3]):.6f}"
+        else:
+            h5_ok = False
+            detail = "MACD histogram unavailable"
+    else:
+        h5_ok = False
+        detail = "Insufficient bars for MACD"
+    hard.append(HardConditionResult(label="MACD histogram curling up", passed=h5_ok, detail=detail))
 
     # H4: Volume ratio on last 3 down candles > 1.5x average
     if len(df) >= 20:
@@ -305,16 +331,16 @@ def evaluate_crypto_mean_reversion(
         label="Strategic win rate > 60%", triggered=s5, points=10.0,
     ))
 
-    # S6: MACD histogram curling up (+15 pts — moved from hard condition)
+    # S6: MACD histogram positive (+15 pts — complementary to H5 curling)
     if len(df) >= 30:
         hist = _compute_macd_histogram(df["close"])
-        if len(hist) >= 3 and pd.notna(hist.iloc[-1]) and pd.notna(hist.iloc[-3]):
-            s6_triggered = float(hist.iloc[-1]) > float(hist.iloc[-3])
+        if len(hist) >= 1 and pd.notna(hist.iloc[-1]):
+            s6_triggered = float(hist.iloc[-1]) > 0
         else:
             s6_triggered = False
     else:
         s6_triggered = False
-    soft.append(SoftConditionResult(label="MACD histogram curling", triggered=s6_triggered, points=15.0))
+    soft.append(SoftConditionResult(label="MACD histogram positive", triggered=s6_triggered, points=15.0))
 
     # ── Disqualifiers ────────────────────────────────────────────────────────
 
@@ -338,12 +364,6 @@ def evaluate_crypto_mean_reversion(
 
     if regime == "TRENDING_DOWN":
         disqualifiers.append(Disqualification(reason="Regime is TRENDING_DOWN"))
-
-    narrative_lower = narrative_text.lower()
-    if any(kw in narrative_lower for kw in SELLING_PRESSURE_KEYWORDS):
-        disqualifiers.append(Disqualification(
-            reason="Narrative indicates sustained selling with no recovery",
-        ))
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
@@ -807,7 +827,7 @@ def evaluate_crypto_breakout(
 
     # ── Score and assemble ───────────────────────────────────────────────────
 
-    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_3_MIN_SCORE, min_hard_required=4)
+    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_3_MIN_SCORE, min_hard_required=3)
     narrative = _build_narrative(
         "crypto_breakout", symbol, hard, soft, disqualifiers, score, passed,
     )
@@ -820,6 +840,156 @@ def evaluate_crypto_breakout(
         disqualifiers=disqualifiers,
         score=score,
         min_score=SETUP_3_MIN_SCORE,
+        passed=passed,
+        evidence_narrative=narrative,
+        as_of=as_of,
+    )
+
+
+# ── Setup 4: Crypto Momentum ──────────────────────────────────────────────────
+
+
+def evaluate_crypto_momentum(
+    symbol: str,
+    indicators: Indicators,
+    df: pd.DataFrame,
+    regime: MarketRegime,
+    *,
+    has_open_position: bool = False,
+    momentum_attempts_today: int = 0,
+    strategic_win_rate: float | None = None,
+    as_of: datetime,
+) -> SetupResult:
+    """
+    Evaluate crypto momentum setup (Setup 4).
+
+    Looks for crypto in a healthy uptrend — price above SMA20, RSI in the
+    momentum sweet spot (40-65), and MACD confirmation. Broader conditions
+    than mean_reversion to catch trending moves.
+    """
+    hard: list[HardConditionResult] = []
+    soft: list[SoftConditionResult] = []
+    disqualifiers: list[Disqualification] = []
+    last_close = float(df["close"].iloc[-1]) if len(df) > 0 else 0.0
+
+    # ── Hard conditions (need 2 of 3) ────────────────────────────────────────
+
+    # H1: RSI between 40-65 (momentum sweet spot — not overbought, not oversold)
+    rsi_ok = (
+        indicators.rsi_14 is not None
+        and S4_RSI_LOW <= indicators.rsi_14 <= S4_RSI_HIGH
+    )
+    hard.append(HardConditionResult(
+        label=f"RSI {S4_RSI_LOW}-{S4_RSI_HIGH}",
+        passed=rsi_ok,
+        detail=f"RSI={indicators.rsi_14}" if indicators.rsi_14 is not None else "RSI unavailable",
+    ))
+
+    # H2: Price > SMA20 (short-term trend is up)
+    h2_ok = indicators.sma_20 is not None and last_close > indicators.sma_20
+    hard.append(HardConditionResult(
+        label="Price > SMA20",
+        passed=h2_ok,
+        detail=(
+            f"close={last_close:.4f}, sma20={indicators.sma_20:.4f}"
+            if indicators.sma_20 is not None else "SMA20 unavailable"
+        ),
+    ))
+
+    # H3: MACD histogram positive or rising (momentum confirmation)
+    if len(df) >= 30:
+        hist = _compute_macd_histogram(df["close"])
+        if len(hist) >= 3 and pd.notna(hist.iloc[-1]):
+            cur_hist = float(hist.iloc[-1])
+            prev_hist = float(hist.iloc[-3]) if pd.notna(hist.iloc[-3]) else 0.0
+            h3_ok = cur_hist > 0 or cur_hist > prev_hist
+            detail = f"macd_hist={cur_hist:.6f}, rising={cur_hist > prev_hist}"
+        else:
+            h3_ok = False
+            detail = "MACD histogram unavailable"
+    else:
+        h3_ok = False
+        detail = "Insufficient bars for MACD"
+    hard.append(HardConditionResult(
+        label="MACD positive or rising", passed=h3_ok, detail=detail,
+    ))
+
+    # ── Soft conditions ──────────────────────────────────────────────────────
+
+    # S1: Price > VWAP (+10 pts)
+    s1 = indicators.vwap is not None and last_close > indicators.vwap
+    soft.append(SoftConditionResult(label="Price > VWAP", triggered=s1, points=10.0))
+
+    # S2: Volume ratio > 1.0 — above average volume (+10 pts)
+    s2 = indicators.volume_ratio is not None and indicators.volume_ratio > S4_VOLUME_RATIO_MIN
+    soft.append(SoftConditionResult(
+        label="Volume above average", triggered=s2, points=10.0,
+    ))
+
+    # S3: Stochastic K in healthy range 30-70 (+5 pts)
+    s3 = (
+        indicators.stoch_k is not None
+        and S4_STOCH_K_LOW < indicators.stoch_k < S4_STOCH_K_HIGH
+    )
+    soft.append(SoftConditionResult(
+        label="StochK in healthy range", triggered=s3, points=5.0,
+    ))
+
+    # S4: RSI rising (current > previous bar) (+10 pts)
+    if len(df) >= 16:
+        rsi_series = _compute_rsi(df["close"], 14)
+        if len(rsi_series) >= 2 and pd.notna(rsi_series.iloc[-1]) and pd.notna(rsi_series.iloc[-2]):
+            s4_triggered = float(rsi_series.iloc[-1]) > float(rsi_series.iloc[-2])
+        else:
+            s4_triggered = False
+    else:
+        s4_triggered = False
+    soft.append(SoftConditionResult(label="RSI rising", triggered=s4_triggered, points=10.0))
+
+    # S5: Strategic memory win rate > 50% (+10 pts)
+    s5 = strategic_win_rate is not None and strategic_win_rate > S4_WIN_RATE_THRESHOLD
+    soft.append(SoftConditionResult(
+        label="Strategic win rate > 50%", triggered=s5, points=10.0,
+    ))
+
+    # ── Disqualifiers ────────────────────────────────────────────────────────
+
+    if has_open_position:
+        disqualifiers.append(Disqualification(
+            reason="Already have an open position in this symbol",
+        ))
+
+    if momentum_attempts_today >= S4_MAX_ATTEMPTS:
+        disqualifiers.append(Disqualification(
+            reason=f"Momentum already attempted {momentum_attempts_today}x today",
+        ))
+
+    if regime == "VOLATILE":
+        disqualifiers.append(Disqualification(reason="Regime is VOLATILE"))
+
+    if regime == "TRENDING_DOWN":
+        disqualifiers.append(Disqualification(reason="Regime is TRENDING_DOWN"))
+
+    if is_near_major_event(as_of, window_minutes=60):
+        disqualifiers.append(Disqualification(
+            reason="Major economic event within 60 minutes",
+        ))
+
+    # ── Score and assemble ───────────────────────────────────────────────────
+
+    score, passed = _compute_score(hard, soft, disqualifiers, SETUP_4_MIN_SCORE, min_hard_required=2)
+    narrative = _build_narrative(
+        "crypto_momentum", symbol, hard, soft, disqualifiers, score, passed,
+    )
+
+    return SetupResult(
+        setup_type="crypto_momentum",
+        symbol=symbol,
+        hard_conditions=hard,
+        soft_conditions=soft,
+        disqualifiers=disqualifiers,
+        score=score,
+        min_score=SETUP_4_MIN_SCORE,
         passed=passed,
         evidence_narrative=narrative,
         as_of=as_of,
@@ -898,6 +1068,19 @@ def scan_setups(
             has_open_position=canon_symbol in canon_open_syms,
             breakout_attempts_today=_count_attempts("crypto_breakout"),
             strategic_win_rate=win_rates.get("crypto_breakout"),
+            as_of=as_of,
+        ))
+
+    # Setup 4: Crypto Momentum
+    if _is_crypto(symbol) and regime in SETUP_4_REGIMES:
+        results.append(evaluate_crypto_momentum(
+            symbol=symbol,
+            indicators=indicators,
+            df=df,
+            regime=regime,
+            has_open_position=canon_symbol in canon_open_syms,
+            momentum_attempts_today=_count_attempts("crypto_momentum"),
+            strategic_win_rate=win_rates.get("crypto_momentum"),
             as_of=as_of,
         ))
 

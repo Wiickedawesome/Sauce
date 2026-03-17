@@ -83,7 +83,7 @@ class Settings(BaseSettings):
         description="Maximum fraction of equity that may be allocated to equity "
                     "positions combined (e.g. 0.70 = 70%).",
     )
-    min_confidence: float = Field(default=0.40, ge=0.0, le=1.0)
+    min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
     data_ttl_seconds: int = Field(default=120, ge=1)
     max_price_deviation: float = Field(default=0.01, ge=0.0, le=1.0)
 
@@ -92,10 +92,15 @@ class Settings(BaseSettings):
         default=0.08, ge=0.0,
         description="Maximum ATR/price ratio permitted before vetoing a trade (8%).",
     )
+    max_atr_ratio_crypto: float = Field(
+        default=0.15, ge=0.0,
+        description="Maximum ATR/price ratio for crypto pairs (15%). Crypto is "
+                    "inherently more volatile than equities.",
+    )
     allow_no_atr: bool = Field(
-        default=False,
+        default=True,
         description="If True, approve trades when ATR data is unavailable. "
-                    "Defaults to False (fail-closed) to prevent trading illiquid/new instruments.",
+                    "Defaults to True to avoid vetoing crypto pairs with short history.",
     )
     stop_loss_atr_multiple: float = Field(
         default=2.0, ge=0.0,
@@ -123,6 +128,11 @@ class Settings(BaseSettings):
         default=0.005, ge=0.0, le=1.0,
         description="Maximum permissible bid-ask spread as a fraction of mid price "
                     "(e.g. 0.005 = 0.5%). Trades on wider instruments are vetoed.",
+    )
+    max_spread_pct_crypto: float = Field(
+        default=0.015, ge=0.0, le=1.0,
+        description="Maximum permissible bid-ask spread for crypto pairs "
+                    "(e.g. 0.015 = 1.5%). Crypto spreads are wider than equities.",
     )
     max_volume_participation: float = Field(
         default=0.01, ge=0.0, le=1.0,

@@ -235,7 +235,7 @@ class AuditEvent(StrictModel):
         "options_signal",
         "options_order",
         "options_order_submitted",
-        "options_exit_stage",
+        "options_exit",
         "options_exit_stop",
         "options_position_opened",
         "options_position_closed",
@@ -315,7 +315,7 @@ MarketRegime = Literal[
 ]
 
 SetupType = Literal[
-    "crypto_mean_reversion", "equity_trend_pullback", "crypto_breakout"
+    "crypto_mean_reversion", "equity_trend_pullback", "crypto_breakout", "crypto_momentum"
 ]
 
 CapitalTier = Literal[

@@ -119,7 +119,7 @@ def test_max_daily_loss_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     s = Settings(_env_file=None)
-    assert s.min_confidence == 0.4
+    assert s.min_confidence == 0.3
 
 
 # ── Trading universe parsing ──────────────────────────────────────────────────

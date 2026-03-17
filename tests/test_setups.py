@@ -48,6 +48,11 @@ from sauce.core.setups import (
     S3_REVERSAL_WICK_RATIO,
     S3_PRE_BREAKOUT_VOL_RATIO,
     S3_MAX_ATTEMPTS,
+    SETUP_4_REGIMES,
+    SETUP_4_MIN_SCORE,
+    S4_RSI_LOW,
+    S4_RSI_HIGH,
+    S4_MAX_ATTEMPTS,
     SELLING_PRESSURE_KEYWORDS,
     _is_crypto,
     _compute_macd_histogram,
@@ -59,6 +64,7 @@ from sauce.core.setups import (
     evaluate_crypto_mean_reversion,
     evaluate_equity_trend_pullback,
     evaluate_crypto_breakout,
+    evaluate_crypto_momentum,
     scan_setups,
 )
 
@@ -286,12 +292,12 @@ class TestConstants:
         assert SETUP_2_REGIMES == frozenset({"TRENDING_UP"})
 
     def test_setup_3_regimes(self):
-        assert SETUP_3_REGIMES == frozenset({"RANGING"})
+        assert SETUP_3_REGIMES == frozenset({"RANGING", "TRENDING_UP"})
 
     def test_min_scores(self):
-        assert SETUP_1_MIN_SCORE == 60.0
+        assert SETUP_1_MIN_SCORE == 50.0
         assert SETUP_2_MIN_SCORE == 65.0
-        assert SETUP_3_MIN_SCORE == 70.0
+        assert SETUP_3_MIN_SCORE == 55.0
 
     def test_min_bars(self):
         assert MIN_BARS_SETUP_1 == 5
@@ -299,7 +305,7 @@ class TestConstants:
         assert MIN_BARS_SETUP_3 == 10
 
     def test_max_attempts(self):
-        assert S1_MAX_ATTEMPTS == 2
+        assert S1_MAX_ATTEMPTS == 4
         assert S3_MAX_ATTEMPTS == 2
 
 
@@ -359,7 +365,7 @@ class TestCryptoMeanReversion:
         assert isinstance(result, SetupResult)
         assert result.setup_type == "crypto_mean_reversion"
         assert result.symbol == "BTC/USD"
-        assert len(result.hard_conditions) == 4
+        assert len(result.hard_conditions) == 5
         assert all(h.passed for h in result.hard_conditions), (
             f"Failed hard: {[h.label for h in result.hard_conditions if not h.passed]}"
         )
@@ -374,7 +380,7 @@ class TestCryptoMeanReversion:
         h1 = result.hard_conditions[0]
         assert h1.label == f"RSI < {S1_RSI_HARD}"
         assert h1.passed is False
-        # With min_hard_required=3, failing just H1 still passes (3/4 >= 3)
+        # With min_hard_required=3, failing just H1 still passes (4/5 >= 3)
 
     def test_h1_rsi_none(self):
         df = _make_setup1_passing_df()
@@ -393,7 +399,7 @@ class TestCryptoMeanReversion:
         assert h2.passed is False
 
     def test_h3_insufficient_bars(self):
-        df = _make_df(50, close=100.0)  # <200 bars
+        df = _make_df(50, close=100.0)  # <120 bars
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion("BTC/USD", ind, df, "RANGING", as_of=_NOW)
         h3 = result.hard_conditions[2]
@@ -430,7 +436,7 @@ class TestCryptoMeanReversion:
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion(
             "BTC/USD", ind, df, "RANGING",
-            mean_reversion_attempts_today=2,
+            mean_reversion_attempts_today=4,
             as_of=_NOW,
         )
         reasons = [d.reason for d in result.disqualifiers]
@@ -449,6 +455,7 @@ class TestCryptoMeanReversion:
         assert result.passed is False
 
     def test_disqualifier_selling_pressure(self):
+        """Selling pressure disqualifier removed for crypto — should pass."""
         df = _make_setup1_passing_df()
         ind = _make_setup1_passing_indicators()
         result = evaluate_crypto_mean_reversion(
@@ -456,9 +463,9 @@ class TestCryptoMeanReversion:
             narrative_text="There is sustained selling in the market.",
             as_of=_NOW,
         )
-        reasons = [d.reason for d in result.disqualifiers]
-        assert any("selling" in r.lower() for r in reasons)
-        assert result.passed is False
+        # Selling pressure no longer disqualifies crypto setups
+        assert not any("selling" in d.reason.lower() for d in result.disqualifiers)
+        assert result.passed is True
 
     def test_soft_deep_oversold(self):
         df = _make_setup1_passing_df()
@@ -832,6 +839,157 @@ class TestCryptoBreakout:
         assert result.min_score == SETUP_3_MIN_SCORE
 
 
+# ── Setup 4: Crypto Momentum ────────────────────────────────────────────────
+
+
+def _make_setup4_passing_df(n_bars: int = 100) -> pd.DataFrame:
+    """Build a DF that satisfies H2 (price > SMA20) and H3 (MACD positive)."""
+    idx = pd.date_range(end=_NOW, periods=n_bars, freq="30min")
+    # Steady uptrend — price well above SMA20, MACD will be positive
+    closes = np.linspace(90.0, 105.0, n_bars)
+    opens = closes - 0.2
+    highs = closes + 1.0
+    lows = closes - 1.0
+    volumes = np.full(n_bars, 500.0)
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes},
+        index=idx,
+    )
+
+
+def _make_setup4_passing_indicators() -> Indicators:
+    """Indicators that satisfy H1 (RSI 40-65), H2 (price > SMA20), and soft conditions."""
+    return Indicators(
+        rsi_14=55.0,       # H1: 40-65
+        sma_20=100.0,      # H2: close(105.0) > 100.0
+        vwap=103.0,        # S1: close > vwap
+        volume_ratio=1.5,  # S2: > 1.0
+        stoch_k=50.0,      # S3: 30-70
+    )
+
+
+class TestCryptoMomentum:
+    def test_all_pass(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum(
+            "BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW,
+            strategic_win_rate=0.70,
+        )
+        assert isinstance(result, SetupResult)
+        assert result.setup_type == "crypto_momentum"
+        assert result.symbol == "BTC/USD"
+        assert len(result.hard_conditions) == 3
+        assert all(h.passed for h in result.hard_conditions), (
+            f"Failed hard: {[h.label for h in result.hard_conditions if not h.passed]}"
+        )
+        assert result.passed is True
+        assert result.score >= SETUP_4_MIN_SCORE
+
+    def test_h1_rsi_too_low(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        ind.rsi_14 = 35.0  # < 40; fails H1
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        h1 = result.hard_conditions[0]
+        assert h1.passed is False
+        # 2 of 3 hard still pass → still passes with min_hard_required=2
+        assert result.passed is True
+
+    def test_h1_rsi_too_high(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        ind.rsi_14 = 70.0  # > 65; fails H1
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        h1 = result.hard_conditions[0]
+        assert h1.passed is False
+
+    def test_h2_price_below_sma20(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        ind.sma_20 = 200.0  # close(~105) < 200; fails H2
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        h2 = result.hard_conditions[1]
+        assert h2.passed is False
+
+    def test_h3_insufficient_bars(self):
+        df = _make_df(20, close=105.0)  # < 30 bars
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        h3 = result.hard_conditions[2]
+        assert h3.passed is False
+
+    def test_two_hard_fail_means_setup_fails(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        ind.rsi_14 = 70.0   # H1 fails
+        ind.sma_20 = 200.0  # H2 fails → only 1 of 3 hard pass
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        assert result.passed is False
+
+    def test_disqualifier_open_position(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum(
+            "BTC/USD", ind, df, "TRENDING_UP", has_open_position=True, as_of=_NOW,
+        )
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("open" in r.lower() for r in reasons)
+        assert result.passed is False
+
+    def test_disqualifier_volatile(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "VOLATILE", as_of=_NOW)
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("VOLATILE" in r for r in reasons)
+        assert result.passed is False
+
+    def test_disqualifier_trending_down(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_DOWN", as_of=_NOW)
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("TRENDING_DOWN" in r for r in reasons)
+        assert result.passed is False
+
+    def test_disqualifier_max_attempts(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum(
+            "BTC/USD", ind, df, "TRENDING_UP",
+            momentum_attempts_today=S4_MAX_ATTEMPTS,
+            as_of=_NOW,
+        )
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("attempted" in r.lower() for r in reasons)
+        assert result.passed is False
+
+    def test_disqualifier_near_major_event(self, monkeypatch):
+        monkeypatch.setattr(
+            "sauce.core.setups.is_near_major_event", lambda *a, **kw: True,
+        )
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        reasons = [d.reason for d in result.disqualifiers]
+        assert any("Major economic event" in r for r in reasons)
+        assert result.passed is False
+
+    def test_setup4_regimes(self):
+        assert SETUP_4_REGIMES == frozenset({"TRENDING_UP", "RANGING"})
+
+    def test_setup4_min_score(self):
+        assert SETUP_4_MIN_SCORE == 50.0
+
+    def test_as_of_preserved(self):
+        df = _make_setup4_passing_df()
+        ind = _make_setup4_passing_indicators()
+        result = evaluate_crypto_momentum("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
+        assert result.as_of == _NOW
+        assert result.min_score == SETUP_4_MIN_SCORE
+
+
 # ── scan_setups ──────────────────────────────────────────────────────────────
 
 
@@ -853,7 +1011,8 @@ class TestScanSetups:
         results = scan_setups("BTC/USD", ind, df, "TRENDING_UP", as_of=_NOW)
         types = [r.setup_type for r in results]
         assert "crypto_mean_reversion" in types
-        assert "crypto_breakout" not in types
+        assert "crypto_breakout" in types  # TRENDING_UP now valid for breakout
+        assert "crypto_momentum" in types  # TRENDING_UP valid for momentum
 
     def test_spy_trending_up_gets_setup_2_only(self):
         df = _make_df(2800, close=450.0)
@@ -889,7 +1048,7 @@ class TestScanSetups:
     def test_attempt_counting(self):
         df = _make_df(250, close=100.0)
         ind = _make_indicators(rsi_14=30.0, bb_lower=101.0)
-        # Two prior mean reversion signals for BTC/USD
+        # Four prior mean reversion signals for BTC/USD (S1_MAX_ATTEMPTS=4)
         sigs = [
             SignalLogEntry(
                 timestamp=_NOW,
@@ -903,6 +1062,20 @@ class TestScanSetups:
                 symbol="BTC/USD",
                 setup_type="crypto_mean_reversion",
                 score=65.0,
+                claude_decision="approve",
+            ),
+            SignalLogEntry(
+                timestamp=_NOW,
+                symbol="BTC/USD",
+                setup_type="crypto_mean_reversion",
+                score=60.0,
+                claude_decision="approve",
+            ),
+            SignalLogEntry(
+                timestamp=_NOW,
+                symbol="BTC/USD",
+                setup_type="crypto_mean_reversion",
+                score=55.0,
                 claude_decision="approve",
             ),
         ]

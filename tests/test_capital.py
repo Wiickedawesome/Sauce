@@ -82,11 +82,11 @@ class TestGetTierParameters:
     def test_seed_parameters(self):
         p = get_tier_parameters(1_000.0)
         assert p.tier == "seed"
-        assert p.max_positions == 1
-        assert p.max_position_pct == 0.35
-        assert p.max_daily_loss_pct == 0.03
+        assert p.max_positions == 2
+        assert p.max_position_pct == 0.50
+        assert p.max_daily_loss_pct == 0.05
         assert p.cash_reserve_pct == 0.25
-        assert p.allowed_setups == ["crypto_mean_reversion"]
+        assert set(p.allowed_setups) == {"crypto_mean_reversion", "crypto_momentum"}
 
     def test_building_parameters(self):
         p = get_tier_parameters(3_000.0)
@@ -121,6 +121,7 @@ class TestGetTierParameters:
         assert "crypto_mean_reversion" in p.allowed_setups
         assert "equity_trend_pullback" in p.allowed_setups
         assert "crypto_breakout" in p.allowed_setups
+        assert "crypto_momentum" in p.allowed_setups
 
     def test_below_minimum_raises(self):
         with pytest.raises(ValueError, match="below the minimum tier threshold"):

@@ -161,12 +161,16 @@ async def run(
         return _veto("Mid price is zero — cannot size position.", checks)
 
     # ── Check 0: Bid-ask spread guard (Finding 2.5) ────────────────────────────
+    _is_crypto = is_crypto(signal.symbol)
     price_ref = signal.evidence.price_reference
     spread_too_wide = False
     bid_ask_spread = 0.0
+    effective_max_spread = (
+        settings.max_spread_pct_crypto if _is_crypto else settings.max_spread_pct
+    )
     if price_ref.bid > 0 and price_ref.ask > 0 and price_ref.mid > 0:
         bid_ask_spread = (price_ref.ask - price_ref.bid) / price_ref.mid
-        spread_too_wide = bid_ask_spread > settings.max_spread_pct
+        spread_too_wide = bid_ask_spread > effective_max_spread
 
     # ── Check 0b: Volume / liquidity guard (Finding 2.5) ─────────────────────
     # Estimate the maximum proposed order size (shares) and compare against
@@ -178,7 +182,6 @@ async def run(
     # with far deeper books). The check remains active for equities.
     volume_too_low = False
     volume_1d_avg = signal.evidence.indicators.volume_1d_avg
-    _is_crypto = is_crypto(signal.symbol)
     if not _is_crypto and volume_1d_avg is not None and volume_1d_avg > 0 and mid_price > 0:
         # Conservative upper-bound estimate: full remaining position capacity.
         max_proposed_qty = (equity * effective_max_position_pct) / mid_price
@@ -261,9 +264,12 @@ async def run(
     # ── Check 4: Volatility (ATR) guard ───────────────────────────────────────
     atr_14 = signal.evidence.indicators.atr_14
     atr_ratio: float | None = None
+    effective_max_atr = (
+        settings.max_atr_ratio_crypto if _is_crypto else settings.max_atr_ratio
+    )
     if atr_14 is not None and mid_price > 0:
         atr_ratio = atr_14 / mid_price
-        volatility_ok = atr_ratio < settings.max_atr_ratio
+        volatility_ok = atr_ratio < effective_max_atr
     else:
         # ATR unavailable — fail-closed unless operator has explicitly opted out
         # (Finding 2.4). Instruments with too-short history or data outages are
@@ -294,7 +300,7 @@ async def run(
     failed: list[str] = []
     if spread_too_wide:
         failed.append(
-            f"bid-ask spread too wide ({bid_ask_spread:.2%} > {settings.max_spread_pct:.2%})"
+            f"bid-ask spread too wide ({bid_ask_spread:.2%} > {effective_max_spread:.2%})"
         )
     if volume_too_low:
         max_proposed_qty_display = (equity * effective_max_position_pct) / mid_price
@@ -329,7 +335,7 @@ async def run(
     if not volatility_ok:
         if atr_ratio is not None:
             failed.append(
-                f"ATR/price too high ({atr_ratio:.2%} > {settings.max_atr_ratio:.0%})"
+                f"ATR/price too high ({atr_ratio:.2%} > {effective_max_atr:.0%})"
             )
         else:
             failed.append("ATR unavailable — cannot assess volatility (allow_no_atr=False)")
