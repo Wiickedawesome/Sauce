@@ -109,19 +109,27 @@ async def run(
         s.symbol.upper(): s for s in signals
     }
     stale_symbols: list[str] = []
-    _SELL_SOURCES = {"exit_research", "stop_loss", "options_exit", "options_stop"}
+    # Sources that bypass the research pipeline and have no matching signal —
+    # exempt them from the freshness check but verify the provenance tag.
+    _BYPASS_SELL_SOURCES = {"exit_research", "stop_loss", "options_exit", "options_stop"}
     for order in orders:
-        # Sell orders from exit_research/stop_loss bypass the research pipeline
-        # and may not have a matching signal — exempt them from freshness, but
-        # verify they carry a recognized provenance tag.
         if order.side == "sell":
-            if order.source not in _SELL_SOURCES:
+            if order.source in _BYPASS_SELL_SOURCES:
+                # These orders come from exit/stop pipelines with no matching
+                # research signal — skip freshness check but allow them through.
+                continue
+            if order.source not in ("execution", None):
+                # Truly unrecognized provenance — reject as a safety measure.
+                # None is accepted for backwards-compat with legacy or test orders
+                # that pre-date the source field; execution always sets "execution".
                 return _abort(
                     f"Sell order for {order.symbol} has unrecognized source "
-                    f"'{order.source}' — expected one of {_SELL_SOURCES}.",
+                    f"'{order.source}'.",
                     vetoes=[order.symbol],
                 )
-            continue
+            # Execution-sourced sell orders come from the normal research
+            # pipeline and have a matching signal — fall through to the
+            # freshness check below (same as buy orders).
         sig = signal_by_symbol.get(order.symbol.upper())
         if sig is None:
             stale_symbols.append(order.symbol)
