@@ -771,6 +771,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                 remaining_buying_power=_loop_buying_power,
                 max_position_pct=tier_params.max_position_pct,
                 max_daily_loss_pct=tier_params.max_daily_loss_pct,
+                min_confidence=tier_params.min_confidence,
             )
             risk_results.append(risk_result)
             # Deduct committed notional from the running buying-power pool so

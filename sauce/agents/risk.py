@@ -41,6 +41,7 @@ async def run(
     remaining_buying_power: float | None = None,
     max_position_pct: float | None = None,
     max_daily_loss_pct: float | None = None,
+    min_confidence: float | None = None,
 ) -> RiskCheckResult:
     """
     Evaluate a signal against all configured risk limits.
@@ -70,6 +71,9 @@ async def run(
     )
     effective_max_daily_loss_pct = (
         max_daily_loss_pct if max_daily_loss_pct is not None else settings.max_daily_loss_pct
+    )
+    effective_min_confidence = (
+        min_confidence if min_confidence is not None else settings.min_confidence
     )
     db_path = str(settings.db_path)
     as_of = datetime.now(timezone.utc)
@@ -188,7 +192,7 @@ async def run(
         volume_too_low = max_proposed_qty > volume_1d_avg * settings.max_volume_participation
 
     # ── Check 1: Confidence floor ─────────────────────────────────────────────
-    confidence_ok = signal.confidence >= settings.min_confidence
+    confidence_ok = signal.confidence >= effective_min_confidence
 
     # ── Check 2: Max position per symbol ──────────────────────────────────────
     # Find existing position value for this symbol (if any)
@@ -311,7 +315,7 @@ async def run(
         )
     if not confidence_ok:
         failed.append(
-            f"confidence {signal.confidence:.2f} < min {settings.min_confidence}"
+            f"confidence {signal.confidence:.2f} < min {effective_min_confidence}"
         )
     if not max_position_pct_ok:
         failed.append(
