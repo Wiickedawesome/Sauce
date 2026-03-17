@@ -49,6 +49,11 @@ async def run(
     regime: MarketRegime,
     loop_id: str,
     entry_time: datetime | None = None,
+    *,
+    trailing_stop_pct: float | None = None,
+    stale_hold_hours: float | None = None,
+    stop_loss_atr_multiple: float | None = None,
+    profit_target_atr_multiple: float | None = None,
 ) -> ExitSignal:
     """
     Evaluate a single open position for exit conditions.
@@ -113,6 +118,12 @@ async def run(
             prompt_version=settings.prompt_version,
         )
 
+    # Resolve tier overrides vs module defaults
+    _trailing_stop_pct = trailing_stop_pct if trailing_stop_pct is not None else TRAILING_STOP_PULLBACK_PCT
+    _stale_hold_hours = stale_hold_hours if stale_hold_hours is not None else STALE_HOLD_HOURS
+    _stop_loss_atr = stop_loss_atr_multiple if stop_loss_atr_multiple is not None else settings.stop_loss_atr_multiple
+    _profit_target_atr = profit_target_atr_multiple if profit_target_atr_multiple is not None else settings.profit_target_atr_multiple
+
     # Skip if position has no meaningful size
     if qty == 0:
         return _hold("Zero-qty position — nothing to exit")
@@ -134,10 +145,10 @@ async def run(
 
     # ── Condition 1: Trailing stop ────────────────────────────────────────────
     # Only fire if we've been profitable (peak > 0) and pulled back significantly
-    if current_peak > 0 and unrealized_pnl < current_peak * (1.0 - TRAILING_STOP_PULLBACK_PCT):
+    if current_peak > 0 and unrealized_pnl < current_peak * (1.0 - _trailing_stop_pct):
         return _exit(
             f"Trailing stop: P&L pulled back to ${unrealized_pnl:.2f} from "
-            f"peak ${current_peak:.2f} (>{TRAILING_STOP_PULLBACK_PCT:.0%} drawdown)",
+            f"peak ${current_peak:.2f} (>{_trailing_stop_pct:.0%} drawdown)",
             urgency="high",
         )
 
@@ -159,16 +170,16 @@ async def run(
     if entry_time is not None and avg_entry_price > 0:
         hold_hours = (as_of - entry_time).total_seconds() / 3600.0
         gain_pct = unrealized_pnl / (avg_entry_price * abs(qty)) if abs(qty) > 0 else 0.0
-        if hold_hours > STALE_HOLD_HOURS and gain_pct < STALE_HOLD_MIN_GAIN_PCT:
+        if hold_hours > _stale_hold_hours and gain_pct < STALE_HOLD_MIN_GAIN_PCT:
             return _exit(
                 f"Stale position: held {hold_hours:.1f}h with {gain_pct:.2%} gain "
-                f"(threshold: >{STALE_HOLD_HOURS}h, <{STALE_HOLD_MIN_GAIN_PCT:.0%})",
+                f"(threshold: >{_stale_hold_hours}h, <{STALE_HOLD_MIN_GAIN_PCT:.0%})",
                 urgency="normal",
             )
 
     # ── Condition 5: ATR stop-loss breach ─────────────────────────────────────
     if avg_entry_price > 0 and indicators.atr_14 is not None and indicators.atr_14 > 0:
-        stop_price = avg_entry_price - settings.stop_loss_atr_multiple * indicators.atr_14
+        stop_price = avg_entry_price - _stop_loss_atr * indicators.atr_14
         if qty > 0 and quote.mid <= stop_price:
             return _exit(
                 f"ATR stop hit: mid={quote.mid:.4f} <= stop={stop_price:.4f} "
@@ -178,12 +189,12 @@ async def run(
 
     # ── Condition 6: Profit target hit ────────────────────────────────────────
     if avg_entry_price > 0 and indicators.atr_14 is not None and indicators.atr_14 > 0:
-        target_price = avg_entry_price + settings.profit_target_atr_multiple * indicators.atr_14
+        target_price = avg_entry_price + _profit_target_atr * indicators.atr_14
         if qty > 0 and quote.mid >= target_price:
             return _exit(
                 f"Profit target hit: mid={quote.mid:.4f} >= target={target_price:.4f} "
                 f"(entry={avg_entry_price:.4f}, ATR={indicators.atr_14:.4f}, "
-                f"multiple={settings.profit_target_atr_multiple}x)",
+                f"multiple={_profit_target_atr}x)",
                 urgency="normal",
             )
 

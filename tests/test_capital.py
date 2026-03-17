@@ -82,39 +82,56 @@ class TestGetTierParameters:
     def test_seed_parameters(self):
         p = get_tier_parameters(1_000.0)
         assert p.tier == "seed"
-        assert p.max_positions == 2
+        assert p.max_positions == 20
         assert p.max_position_pct == 0.50
-        assert p.max_daily_loss_pct == 0.05
-        assert p.cash_reserve_pct == 0.25
-        assert set(p.allowed_setups) == {"crypto_mean_reversion", "crypto_momentum"}
+        assert p.max_daily_loss_pct == 0.08
+        assert p.cash_reserve_pct == 0.10
+        assert set(p.allowed_setups) == {"crypto_mean_reversion", "equity_trend_pullback", "crypto_momentum"}
+        assert p.min_confidence == 0.20
+        assert p.stop_loss_atr_multiple == 1.5
+        assert p.profit_target_atr_multiple == 4.0
+        assert p.min_setup_score_offset == -10.0
+        assert p.stale_hold_hours == 24.0
+        assert p.trailing_stop_pct == 0.40
 
     def test_building_parameters(self):
         p = get_tier_parameters(3_000.0)
         assert p.tier == "building"
-        assert p.max_positions == 2
-        assert p.max_position_pct == 0.25
-        assert p.max_daily_loss_pct == 0.03
+        assert p.max_positions == 10
+        assert p.max_position_pct == 0.35
+        assert p.max_daily_loss_pct == 0.05
+        assert p.min_confidence == 0.25
+        assert p.stop_loss_atr_multiple == 1.5
+        assert p.min_setup_score_offset == -5.0
 
     def test_growing_parameters(self):
         p = get_tier_parameters(7_000.0)
         assert p.tier == "growing"
-        assert p.max_positions == 3
-        assert p.max_position_pct == 0.18
-        assert p.max_daily_loss_pct == 0.025
+        assert p.max_positions == 6
+        assert p.max_position_pct == 0.25
+        assert p.max_daily_loss_pct == 0.03
+        assert p.min_confidence == 0.25
+        assert p.min_setup_score_offset == 0.0
+        assert p.crypto_regime_filter == ["TRENDING_UP", "RANGING"]
 
     def test_scaling_parameters(self):
         p = get_tier_parameters(15_000.0)
         assert p.tier == "scaling"
-        assert p.max_positions == 5
-        assert p.max_position_pct == 0.12
+        assert p.max_positions == 8
+        assert p.max_position_pct == 0.15
         assert p.max_daily_loss_pct == 0.02
+        assert p.min_confidence == 0.30
 
     def test_operating_parameters(self):
         p = get_tier_parameters(50_000.0)
         assert p.tier == "operating"
-        assert p.max_positions == 8
+        assert p.max_positions == 12
         assert p.max_position_pct == 0.10
         assert p.max_daily_loss_pct == 0.02
+        assert p.min_confidence == 0.30
+        assert p.trailing_stop_pct == 0.25
+        assert p.stale_hold_hours == 72.0
+        assert p.min_setup_score_offset == 5.0
 
     def test_operating_has_all_setups(self):
         p = get_tier_parameters(50_000.0)
@@ -152,9 +169,9 @@ class TestDetectTierTransition:
         assert result["from_tier"] == "seed"
         assert result["to_tier"] == "building"
         assert result["equity"] == 2_500.0
-        assert result["new_max_position_pct"] == 0.25
-        assert result["new_max_daily_loss_pct"] == 0.03
-        assert result["new_max_positions"] == 2
+        assert result["new_max_position_pct"] == 0.35
+        assert result["new_max_daily_loss_pct"] == 0.05
+        assert result["new_max_positions"] == 10
 
     def test_transition_building_to_growing(self):
         result = detect_tier_transition("building", 5_000.0)
@@ -220,3 +237,56 @@ class TestTierTable:
         for t in TIER_TABLE[:-1]:
             assert t.equity_max is not None
         assert TIER_TABLE[-1].equity_max is None
+
+
+class TestTierParametersSafetyFloors:
+    """Verify model_validator clamps dangerous values to safe floors."""
+
+    def test_min_confidence_floor(self):
+        p = TierParameters(
+            tier="seed", equity_min=500.0, equity_max=2_499.99,
+            allowed_setups=["crypto_mean_reversion"],
+            max_positions=2, max_position_pct=0.50, cash_reserve_pct=0.10,
+            max_daily_loss_pct=0.05, min_confidence=0.05,
+        )
+        assert p.min_confidence == 0.15
+
+    def test_stop_loss_floor(self):
+        p = TierParameters(
+            tier="seed", equity_min=500.0, equity_max=2_499.99,
+            allowed_setups=["crypto_mean_reversion"],
+            max_positions=2, max_position_pct=0.50, cash_reserve_pct=0.10,
+            max_daily_loss_pct=0.05, stop_loss_atr_multiple=0.5,
+        )
+        assert p.stop_loss_atr_multiple == 1.0
+
+    def test_score_offset_floor(self):
+        p = TierParameters(
+            tier="seed", equity_min=500.0, equity_max=2_499.99,
+            allowed_setups=["crypto_mean_reversion"],
+            max_positions=2, max_position_pct=0.50, cash_reserve_pct=0.10,
+            max_daily_loss_pct=0.05, min_setup_score_offset=-20.0,
+        )
+        assert p.min_setup_score_offset == -15.0
+
+    def test_max_daily_loss_ceiling(self):
+        p = TierParameters(
+            tier="seed", equity_min=500.0, equity_max=2_499.99,
+            allowed_setups=["crypto_mean_reversion"],
+            max_positions=2, max_position_pct=0.50, cash_reserve_pct=0.10,
+            max_daily_loss_pct=0.15,
+        )
+        assert p.max_daily_loss_pct == 0.10
+
+    def test_valid_values_unchanged(self):
+        p = TierParameters(
+            tier="seed", equity_min=500.0, equity_max=2_499.99,
+            allowed_setups=["crypto_mean_reversion"],
+            max_positions=2, max_position_pct=0.50, cash_reserve_pct=0.10,
+            max_daily_loss_pct=0.05, min_confidence=0.30,
+            stop_loss_atr_multiple=2.0, min_setup_score_offset=-5.0,
+        )
+        assert p.min_confidence == 0.30
+        assert p.stop_loss_atr_multiple == 2.0
+        assert p.min_setup_score_offset == -5.0
+        assert p.max_daily_loss_pct == 0.05

@@ -1000,6 +1000,8 @@ def scan_setups(
     df_daily: pd.DataFrame | None = None,
     as_of: datetime,
     allowed_setups: list[str] | None = None,
+    score_offset: float = 0.0,
+    crypto_regime_filter: list[str] | None = None,
 ) -> list[SetupResult]:
     """
     Run all eligible setup evaluations for a single symbol.
@@ -1036,10 +1038,16 @@ def scan_setups(
     # skip evaluators for disallowed setup types entirely.
     _allowed: set[str] | None = set(allowed_setups) if allowed_setups else None
 
+    # FH-02: When a crypto regime filter is active, skip crypto evaluators
+    # if the current regime is not in the allowed list.
+    _crypto_regime_ok = (
+        crypto_regime_filter is None or regime in crypto_regime_filter
+    )
+
     # Setup 1: Crypto Mean Reversion
     # CF-02: Crypto setups are no longer gated by SPY regime — crypto markets
     # operate independently of equity market conditions.
-    if _is_crypto(symbol) and (_allowed is None or "crypto_mean_reversion" in _allowed):
+    if _is_crypto(symbol) and _crypto_regime_ok and (_allowed is None or "crypto_mean_reversion" in _allowed):
         results.append(evaluate_crypto_mean_reversion(
             symbol=symbol,
             indicators=indicators,
@@ -1065,7 +1073,7 @@ def scan_setups(
         ))
 
     # Setup 3: Crypto Breakout
-    if _is_crypto(symbol) and (_allowed is None or "crypto_breakout" in _allowed):
+    if _is_crypto(symbol) and _crypto_regime_ok and (_allowed is None or "crypto_breakout" in _allowed):
         results.append(evaluate_crypto_breakout(
             symbol=symbol,
             indicators=indicators,
@@ -1078,7 +1086,7 @@ def scan_setups(
         ))
 
     # Setup 4: Crypto Momentum
-    if _is_crypto(symbol) and (_allowed is None or "crypto_momentum" in _allowed):
+    if _is_crypto(symbol) and _crypto_regime_ok and (_allowed is None or "crypto_momentum" in _allowed):
         results.append(evaluate_crypto_momentum(
             symbol=symbol,
             indicators=indicators,
@@ -1089,5 +1097,16 @@ def scan_setups(
             strategic_win_rate=win_rates.get("crypto_momentum"),
             as_of=as_of,
         ))
+
+    # FH-03: Apply tier score offset — lower the bar for aggressive tiers,
+    # raise it for conservative tiers.  Floor at 20 to prevent trivial passes.
+    if score_offset != 0.0:
+        for r in results:
+            effective_min = max(r.min_score + score_offset, 20.0)
+            n_hard = len(r.hard_conditions)
+            n_passed = sum(1 for h in r.hard_conditions if h.passed)
+            enough_hard = n_passed >= (n_hard if n_hard > 0 else 0)
+            r.passed = enough_hard and len(r.disqualifiers) == 0 and r.score >= effective_min
+            r.min_score = round(effective_min, 2)
 
     return results

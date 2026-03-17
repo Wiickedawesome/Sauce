@@ -400,11 +400,15 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
         loop_id, mkt_ctx.regime.regime_type, mkt_ctx.is_dead,
     )
 
-    # Gate: if market context signals DEAD regime, abort loop early.
-    # A DEAD regime means SPY data is unavailable or catastrophically stale.
+    # Gate: if market context signals DEAD regime, exclude equities but allow
+    # crypto to continue.  Crypto trades 24/7 and should never be blocked by
+    # SPY data being unavailable.  The per-symbol regime pre-filter (below)
+    # already blocks equities outside TRENDING_UP, so we only need to flag
+    # the dead state for the universe-building step.
     if mkt_ctx.is_dead:
         logger.warning(
-            "Market context is DEAD — aborting loop [loop_id=%s]", loop_id,
+            "Market context is DEAD — excluding equities, crypto continues [loop_id=%s]",
+            loop_id,
         )
         log_event(AuditEvent(
             loop_id=loop_id,
@@ -412,10 +416,9 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             payload={
                 "check": "market_dead",
                 "result": True,
-                "reason": "Market context regime is DEAD — no reliable data",
+                "reason": "Market context regime is DEAD — equities excluded, crypto continues",
             },
         ))
-        return
 
     # ── Step 3: Account + positions ───────────────────────────────────────────
     try:
@@ -525,6 +528,16 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             )
             return
 
+    # When SPY regime is DEAD, exclude equities — crypto continues trading.
+    if mkt_ctx.is_dead:
+        universe = [s for s in universe if _is_crypto(s)]
+        if not universe:
+            logger.warning(
+                "DEAD regime and no crypto symbols in universe — aborting [loop_id=%s]",
+                loop_id,
+            )
+            return
+
     logger.info(
         "Universe: %d symbols (%s) [loop_id=%s]",
         len(universe), "screener" if settings.screener_enabled else "static", loop_id,
@@ -612,6 +625,8 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                     regime=mkt_ctx.regime.regime_type,
                     positions=positions,
                     allowed_setups=tier_params.allowed_setups,
+                    score_offset=tier_params.min_setup_score_offset,
+                    crypto_regime_filter=tier_params.crypto_regime_filter,
                 )
                 for sym, q in _eligible
             ],
@@ -647,7 +662,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
     for signal in signals:
         if signal.side == "hold":
             continue
-        if signal.confidence < settings.min_confidence:
+        if signal.confidence < tier_params.min_confidence:
             continue
         try:
             debate = run_debate(signal)
@@ -715,10 +730,10 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
             ))
             continue
 
-        if signal.confidence < settings.min_confidence:
+        if signal.confidence < tier_params.min_confidence:
             logger.debug(
                 "Signal for %s below min_confidence (%.2f < %.2f) — skipping",
-                signal.symbol, signal.confidence, settings.min_confidence,
+                signal.symbol, signal.confidence, tier_params.min_confidence,
             )
             log_event(AuditEvent(
                 loop_id=loop_id,
@@ -728,7 +743,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                     "check": "confidence_floor",
                     "result": False,
                     "confidence": signal.confidence,
-                    "min_confidence": settings.min_confidence,
+                    "min_confidence": tier_params.min_confidence,
                 },
             ))
             continue
@@ -742,7 +757,7 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                 "check": "confidence_floor",
                 "result": True,
                 "confidence": signal.confidence,
-                "min_confidence": settings.min_confidence,
+                "min_confidence": tier_params.min_confidence,
             },
         ))
 
@@ -945,6 +960,10 @@ async def _run_loop(loop_id: str, settings: Settings, boot_ctx: BootContext) -> 
                     regime=mkt_ctx.regime.regime_type,
                     loop_id=loop_id,
                     entry_time=entry_time,
+                    trailing_stop_pct=tier_params.trailing_stop_pct,
+                    stale_hold_hours=tier_params.stale_hold_hours,
+                    stop_loss_atr_multiple=tier_params.stop_loss_atr_multiple,
+                    profit_target_atr_multiple=tier_params.profit_target_atr_multiple,
                 )
             except Exception as exc:
                 logger.error(

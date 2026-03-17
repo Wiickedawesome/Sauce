@@ -581,14 +581,15 @@ def has_earnings_risk(symbol: str, loop_id: str = "unset") -> bool:
         return False
 
     except ImportError:
-        # alpaca-py NewsClient not available in this SDK version — fail closed.
-        # Missing dependency means we cannot verify earnings safety, so block
-        # the symbol as a precaution until the SDK is installed.
+        # alpaca-py NewsClient not available in this SDK version — log warning
+        # but allow the trade.  The earnings check is a soft safety net; blocking
+        # ALL equity trading because of a missing optional dependency is worse
+        # than the small risk of trading around an earnings announcement.
         logger.warning(
-            "has_earnings_risk[%s]: NewsClient not available — blocking symbol as precaution [loop_id=%s]",
+            "has_earnings_risk[%s]: NewsClient not available — allowing trade (install alpaca-py[news] for earnings checks) [loop_id=%s]",
             symbol, loop_id,
         )
-        return True
+        return False
     except Exception as exc:
         # Any infrastructure failure → fail closed (block trading until check succeeds)
         logger.warning(
