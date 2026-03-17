@@ -48,7 +48,7 @@ Every 15 minutes, the loop orchestrator (`core/loop.py`) executes this sequence:
 ├──────────────┼───────────────────────────────────────────────────────────┤
 │  Step 8c     │  Options Pipeline (feature-flagged via OPTIONS_ENABLED)  │
 │              │  Research → safety gates (IV, DTE, spread, delta,        │
-│              │  exposure, max loss) → entry/exit → compound stage mgmt  │
+│              │  exposure, max loss) → entry/exit → Momentum Snipe mgmt  │
 ├──────────────┼───────────────────────────────────────────────────────────┤
 │  Broker      │  Place orders only if Supervisor says "execute"          │
 │              │  Companion stop-loss placed immediately                  │
@@ -82,7 +82,7 @@ sauce/
 │   ├── exit_research.py Exit signal evaluation for open positions
 │   ├── options_research.py  Options signal generation (Claude)
 │   ├── options_execution.py Options order construction
-│   ├── options_exit.py  Options compound-stage exit engine
+│   ├── options_exit.py  Options Momentum Snipe exit engine
 │   ├── portfolio.py     Portfolio analysis + rebalance suggestions
 │   ├── supervisor.py    Final veto gate (Claude)
 │   └── ops.py           Operational health + anomaly detection

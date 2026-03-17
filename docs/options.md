@@ -1,24 +1,30 @@
 # Options Trading
 
-Sauce includes a feature-flagged options trading module that runs alongside the equity/crypto pipeline. It implements a "Double Up & Take Gains" compounding strategy with multi-stage profit targets and a dedicated safety gauntlet.
+Sauce includes a feature-flagged options trading module that runs alongside the equity/crypto pipeline. It implements a **Momentum Snipe** strategy — quick-strike directional calls with defined profit targets, a trailing stop, and 7 priority-ordered exit conditions.
 
 **Status:** Feature-flagged. Set `OPTIONS_ENABLED=true` in `.env` to activate.
 
 ---
 
-## Strategy: Double Up & Take Gains
+## Strategy: Momentum Snipe
 
-The compounding strategy works through profit stages:
+The strategy targets short-duration momentum plays on high-liquidity names with affordable contracts (≤ $500 per contract). Positions are sized dynamically based on `max_position_cost` and closed through a structured exit ladder:
 
 ```
-Entry → 2x gain → sell 50% → 4x gain → sell 50% of remainder → 8x gain → sell/trail
+Entry → monitor 7 exit conditions every loop iteration
 
-Stage 1:  Position doubles  →  sell 50%  →  activate trailing stop
-Stage 2:  Remaining doubles →  sell 50%  →  tighten trailing stop
-Stage 3:  Remaining doubles →  sell rest  →  or ride with tight trail
+  +35% gain, qty ≥ 2  →  sell half (PARTIAL_CLOSE)  →  activate trailing stop on remainder
+  +35% gain, qty = 1  →  can't split → activate trailing stop instead
+  +60% gain           →  sell all  (FULL_CLOSE — stretch target)
+  Trailing stop hit   →  sell all  (FULL_CLOSE — trailing stop)
+  -25% from entry     →  sell all  (FULL_CLOSE — hard stop)
+  Regime turns hostile →  sell all  (FULL_CLOSE — regime stop)
+  DTE ≤ 5             →  sell all  (FULL_CLOSE — DTE stop)
+  Held > 5 days with   →  sell all  (FULL_CLOSE — time stop)
+    < 10% gain
 ```
 
-Each stage's trigger multiplier, sell fraction, and trailing stop tightness are configurable. The system tracks compound stages per position in the database and evaluates exits every loop iteration.
+The trailing stop activates at +20% gain and trails at 12% below the high-water mark. Once active, it ratchets up with new highs and never moves down.
 
 ---
 
@@ -29,7 +35,7 @@ The options pipeline runs as **Step 8c** in the main loop, gated by `OPTIONS_ENA
 ```
 Step 8c — Options Pipeline (runs only if OPTIONS_ENABLED=true)
 ├── 1. Load open options positions from DB
-├── 2. Evaluate each position for exit (compound stage triggers, hard stop, trailing stop)
+├── 2. Evaluate each position for exit (7-condition priority check)
 ├── 3. Execute exits through Supervisor approval
 ├── 4. Run options research (Claude) for new entry signals
 ├── 5. Run 7-layer safety gauntlet on each signal
@@ -46,13 +52,13 @@ All options orders go through the same Supervisor approval gate as equity orders
 ```
 sauce/
 ├── core/
-│   ├── options_schemas.py    8 Pydantic models (Position, ExitDecision, ...)
+│   ├── options_schemas.py    Pydantic models (Position, ExitDecision, ...)
 │   ├── options_config.py     OptionsSettings (all thresholds from .env)
 │   └── options_safety.py     7 entry safety gates
 ├── agents/
-│   ├── options_research.py   Signal generation via Claude
-│   ├── options_execution.py  Limit order construction
-│   └── options_exit.py       Compound-stage exit evaluation engine
+│   ├── options_research.py   Signal generation via Claude + affordability filter
+│   ├── options_execution.py  Limit order construction + dynamic qty sizing
+│   └── options_exit.py       Momentum Snipe 7-condition exit engine
 ├── adapters/
 │   ├── options_data.py       Options chain + quote fetcher (Alpaca)
 │   └── db.py                 OptionsPositionRow ORM + CRUD
@@ -64,7 +70,7 @@ sauce/
 │   ├── options_models.py     Backtest dataclasses + exit reasons
 │   └── options_engine.py     Bar-replay engine (delta+theta pricing model)
 └── prompts/
-    └── options_research.py   Options research agent prompt templates
+    └── options_research.py   Options research agent prompt (v2 — Momentum Snipe)
 ```
 
 ---
@@ -76,7 +82,7 @@ Every options entry passes through 7 sequential safety checks. The pipeline stop
 | # | Gate | What it checks |
 |---|---|---|
 | 1 | `check_options_enabled` | Master switch — `OPTIONS_ENABLED` must be `true` |
-| 2 | `check_iv_rank` | IV rank must be below `OPTION_MAX_IV_RANK` (default 0.70) |
+| 2 | `check_iv_rank` | IV rank must be below `OPTION_MAX_IV_RANK` (default 0.60) |
 | 3 | `check_dte` | Days to expiry within `[OPTION_MIN_DTE, OPTION_MAX_DTE]` range |
 | 4 | `check_spread` | Bid-ask spread < `OPTION_MAX_SPREAD_PCT` of mid price |
 | 5 | `check_delta` | Absolute delta within `[OPTION_MIN_DELTA, OPTION_MAX_DELTA]` |
@@ -89,13 +95,32 @@ Each gate returns a typed `(passed, reason)` result. All results are logged to t
 
 ## Exit Engine
 
-The exit engine (`options_exit.py`) evaluates each open position every loop:
+The exit engine (`options_exit.py`) evaluates each open position every loop iteration using 7 priority-ordered conditions. The first triggered condition wins:
 
-1. **Compound stage check** — Has the position reached the next profit target? If so, sell the configured fraction and advance the stage counter.
-2. **Hard stop** — Has the position lost more than `OPTION_MAX_LOSS_PCT` from entry? Exit immediately.
-3. **Trailing stop** — After any compound stage triggers, a trailing stop activates. It ratchets up with new highs and never moves down. Tightness increases with each stage.
+| Priority | Condition | Exit Type | Action |
+|---|---|---|---|
+| 1 | Loss ≥ 25% from entry | `hard_stop` | FULL_CLOSE |
+| 2 | Regime turned hostile | `regime_stop` | FULL_CLOSE |
+| 3 | DTE ≤ 5 days | `dte_stop` | FULL_CLOSE |
+| 4 | Held > 5 days with < 10% gain | `time_stop` | FULL_CLOSE |
+| 5 | Trailing stop hit (after activation) | `trailing_stop` | FULL_CLOSE |
+| 6 | Gain ≥ 60% | `stretch_target` | FULL_CLOSE |
+| 7 | Gain ≥ 35% (qty ≥ 2) | `profit_target` | PARTIAL_CLOSE (sell half) |
+| 7 | Gain ≥ 35% (qty = 1) | `profit_target` | Activate trailing stop |
 
-Exit decisions are one of: `HOLD`, `PARTIAL_CLOSE` (compound stage), `FULL_CLOSE` (stop hit), or `CLOSE` (expiry/DTE).
+If no condition triggers, the decision is `HOLD`. On HOLD, the engine still updates the high-water mark and checks whether the trailing stop should activate (gain ≥ 20%).
+
+Exit decisions are one of: `HOLD`, `PARTIAL_CLOSE` (profit target), or `FULL_CLOSE` (any stop or stretch target).
+
+---
+
+## Trailing Stop Mechanics
+
+- **Activation:** Trailing stop activates when unrealized gain reaches +20% (`trail_activation_pct`)
+- **Trail distance:** 12% below the high-water mark (`trail_pct`)
+- **Ratcheting:** High-water mark updates on every HOLD when mid price exceeds the previous high
+- **One-way:** Trailing stop price only moves up, never down
+- **Trigger:** Position closed when mid price falls below the trailing stop price
 
 ---
 
@@ -103,9 +128,10 @@ Exit decisions are one of: `HOLD`, `PARTIAL_CLOSE` (compound stage), `FULL_CLOSE
 
 Options positions are persisted to SQLite via `OptionsPositionRow` in `adapters/db.py`:
 
-- **On entry:** Position saved with compound stages serialized as JSON
-- **On partial exit:** `remaining_qty`, `stages_completed`, `trailing_stop_price` updated
-- **On full exit:** Position marked `status="closed"` with realized PnL and timestamp
+- **On entry:** Position saved with `high_water_price` (= entry price), `trailing_active=False`
+- **On partial exit:** `remaining_qty` updated, `trailing_active` may be set to `True`
+- **On HOLD:** `high_water_price`, `trailing_active`, `trailing_stop_price` updated if changed
+- **On full exit:** Position marked `status="closed"` with realized PnL, `exit_type`, and timestamp
 
 This allows the exit engine to track positions across loop iterations and container restarts.
 
@@ -118,22 +144,24 @@ All options settings live in `.env` and are loaded via `OptionsSettings` (Pydant
 | Variable | Default | Description |
 |---|---|---|
 | `OPTIONS_ENABLED` | `false` | Master switch for entire options module |
-| `OPTIONS_UNIVERSE` | `SPY,QQQ,AAPL,TSLA,NVDA` | Eligible tickers for options |
-| `OPTION_PROFIT_MULTIPLIER` | `2.0` | Gain trigger per stage (2.0 = 100% gain) |
-| `OPTION_COMPOUND_STAGES` | `3` | Number of take-profit stages |
-| `OPTION_SELL_FRACTION` | `0.5` | Fraction to sell at each stage |
-| `OPTION_MAX_DTE` | `45` | Max days to expiry at entry |
-| `OPTION_MIN_DTE` | `7` | Min days to expiry at entry |
-| `OPTION_MAX_IV_RANK` | `0.70` | Max IV rank (above = IV too expensive) |
+| `OPTIONS_UNIVERSE` | `AAPL,AMD,PLTR,SOFI,COIN,MARA` | Eligible tickers for options |
+| `OPTION_PROFIT_TARGET_PCT` | `0.35` | Profit target — partial close at +35% |
+| `OPTION_STRETCH_TARGET_PCT` | `0.60` | Stretch target — full close at +60% |
+| `OPTION_TRAIL_ACTIVATION_PCT` | `0.20` | Trailing stop activates at +20% gain |
+| `OPTION_TRAIL_PCT` | `0.12` | Trail distance: 12% below high-water |
+| `OPTION_MAX_LOSS_PCT` | `0.25` | Hard stop: max loss per position (25%) |
+| `OPTION_TIME_STOP_DAYS` | `5` | Time stop: close if held > N days with weak gain |
+| `OPTION_DTE_EXIT_DAYS` | `5` | DTE stop: close if ≤ N days to expiry |
+| `OPTION_MAX_CONTRACT_COST` | `500.0` | Max cost per contract (affordability filter) |
+| `OPTION_MAX_CONTRACTS` | `5` | Max contracts per position |
+| `OPTION_MAX_DTE` | `35` | Max days to expiry at entry |
+| `OPTION_MIN_DTE` | `14` | Min days to expiry at entry |
+| `OPTION_MAX_IV_RANK` | `0.60` | Max IV rank (above = IV too expensive) |
 | `OPTION_MIN_DELTA` | `0.30` | Min absolute delta |
 | `OPTION_MAX_DELTA` | `0.60` | Max absolute delta |
-| `OPTION_MAX_POSITION_PCT` | `0.05` | Max NAV fraction per position (5%) |
+| `OPTION_MAX_POSITION_PCT` | `0.10` | Max NAV fraction per position (10%) |
 | `OPTION_MAX_TOTAL_EXPOSURE` | `0.20` | Max NAV across all options (20%) |
 | `OPTION_MAX_SPREAD_PCT` | `0.05` | Max bid-ask spread as pct of mid |
-| `OPTION_MAX_LOSS_PCT` | `0.50` | Hard stop: max loss per position |
-| `OPTION_TRAILING_STOP_STAGE1` | `0.20` | Trailing stop after stage 1 |
-| `OPTION_TRAILING_STOP_STAGE2` | `0.15` | Trailing stop after stage 2 |
-| `OPTION_TRAILING_STOP_STAGE3` | `0.10` | Trailing stop after stage 3 |
 
 ---
 
@@ -141,16 +169,17 @@ All options settings live in `.env` and are loaded via `OptionsSettings` (Pydant
 
 The options backtest engine (`backtest/options_engine.py`) provides bar-replay simulation:
 
+- **Initial capital:** $5,000 (matches sub-$5K account target)
 - **Pricing model:** Delta approximation + theta decay (no full Black-Scholes needed)
 - **Entry signals:** RSI-based (RSI < 35 → long call, RSI > 65 → long put)
-- **Exit simulation:** Full compound stage logic, hard stops, trailing stops, theta decay
+- **Exit simulation:** Full Momentum Snipe logic — 5 exit conditions (hard stop, trailing stop, profit/stretch targets, expiry), affordability filter, dynamic qty sizing
 - **Metrics:** Win rate, Sharpe ratio, max drawdown, profit factor, equity curve
 
 ```python
 from sauce.backtest.options_engine import run_options_backtest
 from sauce.backtest.options_models import OptionsBacktestConfig
 
-result = run_options_backtest("SPY", df, OptionsBacktestConfig())
+result = run_options_backtest("AAPL", df, OptionsBacktestConfig())
 print(f"Win rate: {result.win_rate:.1%}, Sharpe: {result.sharpe_ratio:.2f}")
 ```
 
@@ -162,5 +191,5 @@ Post-trade analytics (`memory/options_learning.py`) tracks:
 
 - **Trade outcomes:** PnL, hold duration, exit reason per position
 - **Win rate drift:** Detects when recent win rate drops below threshold
-- **Stage performance:** Groups closed trades by stages_completed (how far through the compounding ladder)
+- **Exit type performance:** Groups closed trades by `exit_type` (profit_target, stretch_target, trailing_stop, hard_stop, time_stop, dte_stop, regime_stop)
 - **Underlying performance:** Aggregates results by ticker symbol

@@ -1529,11 +1529,7 @@ async def _run_options_pipeline(
         update_options_position,
         close_options_position,
     )
-    from sauce.core.options_schemas import CompoundStage, OptionsContract
-
-    # Save newly created positions (after entry orders are built)
-    # Position objects will be persisted after supervisor approval in step 10,
-    # but we prepare them here for exit management on subsequent loops.
+    from sauce.core.options_schemas import OptionsContract
 
     # Load persisted open positions and evaluate exits
     try:
@@ -1541,18 +1537,21 @@ async def _run_options_pipeline(
     except Exception:  # noqa: BLE001
         open_pos_rows = []
 
+    # Determine if regime is hostile for regime_stop condition
+    regime_hostile = getattr(mkt_ctx, "regime", None) is not None and getattr(
+        mkt_ctx.regime, "regime_type", ""
+    ) in ("crisis", "high_volatility")
+
     for pos_data in open_pos_rows:
         if _shutdown_requested:
             break
         try:
             # Reconstruct OptionsPosition from DB row
-            stages_raw = json.loads(pos_data["compound_stages_json"])
-            compound_stages = [CompoundStage(**s) for s in stages_raw]
             contract = OptionsContract(
                 contract_symbol=pos_data["contract_symbol"],
                 underlying=pos_data["underlying"],
-                expiration="2099-12-31",  # placeholder — not used by exit engine
-                strike=0.0,  # placeholder — not used by exit engine
+                expiration=pos_data.get("expiration", "2099-12-31"),
+                strike=pos_data.get("strike", 0.0),
                 option_type="call" if "call" in pos_data["direction"] else "put",
             )
             position = OptionsPosition(
@@ -1563,8 +1562,8 @@ async def _run_options_pipeline(
                 remaining_qty=pos_data["remaining_qty"],
                 direction=pos_data["direction"],
                 strategy_type=pos_data["strategy_type"],
-                compound_stages=compound_stages,
-                stages_completed=pos_data["stages_completed"],
+                high_water_price=pos_data.get("high_water_price"),
+                trailing_active=pos_data.get("trailing_active", False),
                 realized_pnl=pos_data["realized_pnl"],
                 trailing_stop_price=pos_data["trailing_stop_price"],
                 entry_time=pos_data["entry_time"],
@@ -1583,23 +1582,28 @@ async def _run_options_pipeline(
                 continue
 
             # Evaluate exit
-            decision = exit_engine.evaluate_position(position, opt_quote, loop_id)
+            decision = exit_engine.evaluate_position(
+                position, opt_quote, loop_id,
+                regime_hostile=regime_hostile,
+            )
 
             if decision.action == "HOLD":
-                # Update trailing stop if it changed
+                # Update high-water / trailing state if changed
+                update_fields: dict[str, Any] = {}
+                if position.high_water_price != pos_data.get("high_water_price"):
+                    update_fields["high_water_price"] = position.high_water_price
+                if position.trailing_active != pos_data.get("trailing_active", False):
+                    update_fields["trailing_active"] = position.trailing_active
                 if position.trailing_stop_price != pos_data["trailing_stop_price"]:
-                    update_options_position(
-                        pos_data["position_id"],
-                        trailing_stop_price=position.trailing_stop_price,
-                    )
+                    update_fields["trailing_stop_price"] = position.trailing_stop_price
+                if update_fields:
+                    update_options_position(pos_data["position_id"], **update_fields)
                 continue
-
-            # Apply decision to position state
-            exit_engine.apply_exit_decision(position, decision)
 
             # Set trailing stop after partial close (needs current price)
             if decision.set_trailing_stop and decision.trailing_stop_pct > 0:
                 position.trailing_stop_price = opt_quote.mid * (1 - decision.trailing_stop_pct)
+                position.trailing_active = True
 
             # Build exit order
             exit_order = await options_execution.build_exit_order(
@@ -1607,7 +1611,7 @@ async def _run_options_pipeline(
                 underlying=pos_data["underlying"],
                 qty=decision.qty,
                 quote=opt_quote,
-                stage=decision.stage,
+                exit_type=decision.exit_type,
                 loop_id=loop_id,
             )
 
@@ -1616,8 +1620,8 @@ async def _run_options_pipeline(
                 result_orders.append(mapped)
 
             # Update DB state
-            stages_json = json.dumps([s.model_dump() for s in position.compound_stages])
-            if position.remaining_qty <= 0:
+            new_remaining = position.remaining_qty - decision.qty
+            if new_remaining <= 0:
                 close_options_position(
                     pos_data["position_id"],
                     realized_pnl=position.realized_pnl,
@@ -1625,11 +1629,12 @@ async def _run_options_pipeline(
             else:
                 update_options_position(
                     pos_data["position_id"],
-                    remaining_qty=position.remaining_qty,
-                    stages_completed=position.stages_completed,
+                    remaining_qty=new_remaining,
+                    high_water_price=position.high_water_price,
+                    trailing_active=position.trailing_active,
                     trailing_stop_price=position.trailing_stop_price,
-                    compound_stages_json=stages_json,
                     realized_pnl=position.realized_pnl,
+                    exit_type=decision.exit_type,
                 )
 
         except Exception as exc:  # noqa: BLE001

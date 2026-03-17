@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 
 
-PROMPT_VERSION = "options-v1"
+PROMPT_VERSION = "options-v2"
 
 
 SYSTEM_PROMPT = """\
@@ -25,15 +25,21 @@ bias, or recommend NO TRADE if no suitable contract exists.
 CRITICAL RULES — FOLLOW EXACTLY:
 - Only use the data provided in this prompt. Do not invent or extrapolate.
 - If no contract meets the criteria, return action="no_trade" with confidence=0.0.
-- NEVER recommend a contract with DTE < 7 or DTE > 45.
+- NEVER recommend a contract with DTE < 14 or DTE > 35.
 - NEVER recommend a contract with absolute delta outside [0.30, 0.60].
 - NEVER recommend a contract with bid/ask spread > 5% of mid price.
 - NEVER recommend market orders on options. All orders are LIMIT only.
 - confidence is a strict float between 0.0 and 1.0.
 - Return ONLY valid JSON. No prose, no explanation, no markdown fences.
 
-STRATEGY: "Double Up & Take Gains" compounding ladder.
-- Entry at mid price → 2x → sell 50% → 4x → sell 50% of rest → 8x → sell/trail.
+STRATEGY: "Momentum Snipe" — single-leg directional options.
+- Profit target at +35%: sell half (if qty >= 2) and activate trailing stop.
+- Stretch target at +60%: close all remaining contracts.
+- Trailing stop: activated at +20% gain, trails at 12% below high-water mark.
+- Hard stop: close at -25% loss.
+- Time stop: close after 5 days if gain < 10%.
+- DTE stop: close when <= 5 DTE remaining.
+- Prefer affordable contracts under max_position_cost to allow multi-contract entries.
 - Your job is ONLY contract selection, not exit management.
 
 OUTPUT SCHEMA:

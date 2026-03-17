@@ -4,12 +4,10 @@ memory/options_learning.py — Learning loop for options trades.
 Mirrors the equity learning.py pattern:
   - Record options trade outcomes to strategic memory.
   - Detect options-specific win rate drift.
-  - Analyze performance by IV rank bucket, delta bucket, and stage reached.
+  - Analyze performance by exit type and underlying.
 """
 
-import json
 import logging
-import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,7 +25,7 @@ def record_options_trade_outcome(
     position_id: str,
     exit_price: float,
     exit_reason: str,
-    stages_completed: int,
+    exit_type: str = "",
     db_path: str | None = None,
 ) -> dict[str, Any] | None:
     """Compute and log outcome stats for a closed options position.
@@ -67,14 +65,14 @@ def record_options_trade_outcome(
             "pnl_pct": round(pnl_pct, 4),
             "win": win,
             "exit_reason": exit_reason,
-            "stages_completed": stages_completed,
+            "exit_type": exit_type,
             "hold_duration_minutes": round(hold_minutes, 1),
         }
 
         logger.info(
-            "Options trade outcome: %s %s pnl=%.2f (%.1f%%) stages=%d reason=%s",
+            "Options trade outcome: %s %s pnl=%.2f (%.1f%%) exit_type=%s reason=%s",
             row.underlying, row.direction, pnl, pnl_pct * 100,
-            stages_completed, exit_reason,
+            exit_type, exit_reason,
         )
 
         return outcome
@@ -123,12 +121,12 @@ def detect_options_win_rate_drift(
         session.close()
 
 
-def get_options_performance_by_stage(
+def get_options_performance_by_exit_type(
     db_path: str | None = None,
 ) -> dict[str, Any]:
-    """Analyze closed options trades grouped by max stages_completed.
+    """Analyze closed options trades grouped by exit_type.
 
-    Returns e.g. {0: {count: 5, avg_pnl: -42.0}, 1: {count: 3, avg_pnl: 120.0}, ...}
+    Returns e.g. {"profit_target": {count: 3, avg_pnl: 120.0}, ...}
     """
     session = get_session(db_path)
     try:
@@ -138,17 +136,18 @@ def get_options_performance_by_stage(
             .all()
         )
         if not rows:
-            return {"by_stage": {}, "total": 0}
+            return {"by_exit_type": {}, "total": 0}
 
-        by_stage: dict[int, list[float]] = {}
+        by_exit: dict[str, list[float]] = {}
         for r in rows:
-            by_stage.setdefault(r.stages_completed, []).append(r.realized_pnl)
+            key = r.exit_type or "unknown"
+            by_exit.setdefault(key, []).append(r.realized_pnl)
 
-        report: dict[str, Any] = {"by_stage": {}, "total": len(rows)}
-        for stage, pnls in sorted(by_stage.items()):
+        report: dict[str, Any] = {"by_exit_type": {}, "total": len(rows)}
+        for exit_type, pnls in sorted(by_exit.items()):
             avg = sum(pnls) / len(pnls) if pnls else 0.0
             wins = sum(1 for p in pnls if p > 0)
-            report["by_stage"][stage] = {
+            report["by_exit_type"][exit_type] = {
                 "count": len(pnls),
                 "avg_pnl": round(avg, 2),
                 "win_rate": round(wins / len(pnls), 4) if pnls else 0.0,

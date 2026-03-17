@@ -32,7 +32,6 @@ from sauce.adapters.options_data import (
 from sauce.core.config import get_settings
 from sauce.core.options_config import get_options_settings
 from sauce.core.options_schemas import (
-    CompoundStage,
     OptionsBias,
     OptionsContract,
     OptionsSignal,
@@ -115,6 +114,19 @@ async def run(
     if not enriched:
         logger.info("options_research[%s]: no snapshots available", symbol)
         return None
+
+    # ── Dynamic affordability filter ──────────────────────────────────────
+    affordable = [
+        c for c in enriched
+        if (c.mid or 0) * 100 <= cfg.option_max_contract_cost
+    ]
+    if not affordable:
+        logger.info(
+            "options_research[%s]: no contracts under $%.0f cost limit",
+            symbol, cfg.option_max_contract_cost,
+        )
+        return None
+    enriched = affordable
 
     # ── Position sizing ───────────────────────────────────────────────────
     max_position_cost = nav * cfg.option_max_position_pct
@@ -223,17 +235,13 @@ async def run(
         )
         return None
 
-    # ── Build compound stages ─────────────────────────────────────────────
-    stages = _build_default_stages(cfg)
-
     direction_str = "long_call" if action == "buy_call" else "long_put"
 
     signal = OptionsSignal(
         symbol=symbol,
         contract=selected,
         direction=direction_str,
-        target_multiplier=cfg.option_profit_multiplier,
-        compound_stages=cfg.option_compound_stages,
+        max_position_cost=max_position_cost,
         confidence=confidence,
         reasoning=parsed.get("reasoning", ""),
         bear_case=parsed.get("bear_case", ""),
@@ -257,23 +265,3 @@ async def run(
 
     return signal
 
-
-def _build_default_stages(cfg) -> list[CompoundStage]:
-    """Build the default compounding ladder from config."""
-    stages = []
-    multiplier = cfg.option_profit_multiplier
-    trailing_stops = [
-        cfg.option_trailing_stop_stage1,
-        cfg.option_trailing_stop_stage2,
-        cfg.option_trailing_stop_stage3,
-    ]
-
-    for i in range(cfg.option_compound_stages):
-        stages.append(CompoundStage(
-            stage_num=i + 1,
-            trigger_multiplier=multiplier ** (i + 1),
-            sell_fraction=cfg.option_sell_fraction,
-            trailing_stop_pct=trailing_stops[i] if i < len(trailing_stops) else 0.10,
-        ))
-
-    return stages

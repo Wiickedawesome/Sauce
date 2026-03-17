@@ -1,9 +1,16 @@
 """
 backtest/options_engine.py — Bar-replay backtesting engine for options.
 
-Simulates the "Double Up & Take Gains" compounding strategy on historical
-underlying price data. Uses a simplified options pricing model (delta-based
-proxy + theta decay) since full option chain history is rarely available.
+Simulates the "Momentum Snipe" strategy on historical underlying price data.
+Uses a simplified options pricing model (delta-based proxy + theta decay)
+since full option chain history is rarely available.
+
+Exit conditions (priority order):
+  1. hard_stop      — loss exceeds max_loss_pct
+  2. time_stop      — held > time_stop_days with low gain
+  3. trailing_stop  — price fell below trailing stop
+  4. stretch_target — gain >= stretch_target_pct → full close
+  5. profit_target  — gain >= profit_target_pct → partial / activate trail
 
 No LLM calls — purely deterministic simulation.
 
@@ -36,8 +43,9 @@ class _OptionsPosition:
 
     __slots__ = (
         "symbol", "direction", "entry_time", "entry_price", "underlying_entry",
-        "qty", "remaining_qty", "delta", "stages_completed", "realized_pnl",
-        "trailing_stop_price", "stage_triggers", "entry_bar_idx",
+        "qty", "remaining_qty", "delta", "realized_pnl",
+        "high_water_price", "trailing_active", "trailing_stop_price",
+        "entry_bar_idx",
     )
 
     def __init__(
@@ -49,7 +57,6 @@ class _OptionsPosition:
         underlying_entry: float,
         qty: int,
         delta: float,
-        stage_triggers: list[float],
         entry_bar_idx: int,
     ) -> None:
         self.symbol = symbol
@@ -60,10 +67,10 @@ class _OptionsPosition:
         self.qty = qty
         self.remaining_qty = qty
         self.delta = delta
-        self.stages_completed = 0
         self.realized_pnl = 0.0
+        self.high_water_price: float | None = None
+        self.trailing_active = False
         self.trailing_stop_price: float | None = None
-        self.stage_triggers = stage_triggers
         self.entry_bar_idx = entry_bar_idx
 
 
@@ -103,7 +110,6 @@ def _compute_metrics(result: OptionsBacktestResult) -> None:
     result.win_rate = len(wins) / len(trades)
     result.avg_pnl = sum(t.pnl for t in trades) / len(trades)
     result.avg_bars_held = sum(t.bars_held for t in trades) / len(trades)
-    result.avg_stages_completed = sum(t.stages_completed for t in trades) / len(trades)
 
     gross_profit = sum(t.pnl for t in wins) if wins else 0.0
     gross_loss = abs(sum(t.pnl for t in losses)) if losses else 0.0
@@ -186,12 +192,6 @@ def run_options_backtest(
 
     bars_per_day = 26  # ~15 min bars for a 6.5h trading day
 
-    # Build stage trigger multipliers
-    stage_multipliers = [
-        config.profit_multiplier ** (i + 1)
-        for i in range(config.compound_stages)
-    ]
-
     # Simple entry signal: RSI-based (compute inline to avoid heavy deps)
     closes = df[close_col].values
     rsi = _simple_rsi(closes, 14)
@@ -216,9 +216,11 @@ def run_options_backtest(
                 config.theta_decay_annual / 252, bars_per_day,
             )
 
-            # Hard stop
-            loss_pct = (opt_price - pos.entry_price) / pos.entry_price
-            if loss_pct <= -config.max_loss_pct:
+            gain_pct = (opt_price - pos.entry_price) / pos.entry_price
+            days_held = (bar_idx - pos.entry_bar_idx) / bars_per_day
+
+            # 1. Hard stop
+            if gain_pct <= -config.max_loss_pct:
                 pnl = (opt_price - pos.entry_price) * pos.remaining_qty * 100
                 pnl -= config.commission_per_contract * pos.remaining_qty
                 capital += pnl
@@ -227,79 +229,99 @@ def run_options_backtest(
                     entry_time=pos.entry_time, exit_time=bar_time,
                     entry_price=pos.entry_price, exit_price=opt_price,
                     qty=pos.remaining_qty, pnl=round(pnl, 2),
-                    pnl_pct=round(loss_pct, 4),
+                    pnl_pct=round(gain_pct, 4),
                     exit_reason=OptionsExitReason.HARD_STOP,
-                    stages_completed=pos.stages_completed,
                     bars_held=bar_idx - pos.entry_bar_idx,
                 ))
                 closed_positions.append(pos)
                 continue
 
-            # Trailing stop
-            if pos.trailing_stop_price is not None and opt_price <= pos.trailing_stop_price:
+            # 2. Time stop
+            if days_held >= config.time_stop_days and gain_pct < config.time_stop_min_gain_pct:
                 pnl = (opt_price - pos.entry_price) * pos.remaining_qty * 100
                 pnl -= config.commission_per_contract * pos.remaining_qty
                 capital += pnl
-                pnl_pct = (opt_price - pos.entry_price) / pos.entry_price
                 trades.append(OptionsBacktestTrade(
                     symbol=symbol, direction=pos.direction,
                     entry_time=pos.entry_time, exit_time=bar_time,
                     entry_price=pos.entry_price, exit_price=opt_price,
                     qty=pos.remaining_qty, pnl=round(pnl, 2),
-                    pnl_pct=round(pnl_pct, 4),
-                    exit_reason=OptionsExitReason.TRAILING_STOP,
-                    stages_completed=pos.stages_completed,
+                    pnl_pct=round(gain_pct, 4),
+                    exit_reason=OptionsExitReason.TIME_STOP,
                     bars_held=bar_idx - pos.entry_bar_idx,
                 ))
                 closed_positions.append(pos)
                 continue
 
-            # Walk compound stages
-            for stage_idx in range(pos.stages_completed, len(pos.stage_triggers)):
-                trigger = pos.entry_price * pos.stage_triggers[stage_idx]
-                if opt_price >= trigger:
-                    sell_qty = max(1, int(pos.remaining_qty * config.sell_fraction))
-                    sell_qty = min(sell_qty, pos.remaining_qty)
-
-                    pnl = (opt_price - pos.entry_price) * sell_qty * 100
-                    pnl -= config.commission_per_contract * sell_qty
+            # 3. Trailing stop
+            if pos.trailing_active and pos.trailing_stop_price is not None:
+                if opt_price <= pos.trailing_stop_price:
+                    pnl = (opt_price - pos.entry_price) * pos.remaining_qty * 100
+                    pnl -= config.commission_per_contract * pos.remaining_qty
                     capital += pnl
-                    pos.remaining_qty -= sell_qty
-                    pos.stages_completed += 1
-                    pos.realized_pnl += pnl
+                    trades.append(OptionsBacktestTrade(
+                        symbol=symbol, direction=pos.direction,
+                        entry_time=pos.entry_time, exit_time=bar_time,
+                        entry_price=pos.entry_price, exit_price=opt_price,
+                        qty=pos.remaining_qty, pnl=round(pnl, 2),
+                        pnl_pct=round(gain_pct, 4),
+                        exit_reason=OptionsExitReason.TRAILING_STOP,
+                        bars_held=bar_idx - pos.entry_bar_idx,
+                    ))
+                    closed_positions.append(pos)
+                    continue
 
-                    # Set trailing stop
-                    pos.trailing_stop_price = opt_price * (1 - config.trailing_stop_pct)
+            # Update high-water mark
+            if pos.high_water_price is None or opt_price > pos.high_water_price:
+                pos.high_water_price = opt_price
 
-                    if pos.remaining_qty <= 0:
-                        pnl_pct = (opt_price - pos.entry_price) / pos.entry_price
-                        reason_map = {
-                            1: OptionsExitReason.STAGE_1,
-                            2: OptionsExitReason.STAGE_2,
-                            3: OptionsExitReason.STAGE_3,
-                        }
-                        trades.append(OptionsBacktestTrade(
-                            symbol=symbol, direction=pos.direction,
-                            entry_time=pos.entry_time, exit_time=bar_time,
-                            entry_price=pos.entry_price, exit_price=opt_price,
-                            qty=pos.qty, pnl=round(pos.realized_pnl, 2),
-                            pnl_pct=round(pnl_pct, 4),
-                            exit_reason=reason_map.get(
-                                pos.stages_completed, OptionsExitReason.STAGE_3,
-                            ),
-                            stages_completed=pos.stages_completed,
-                            bars_held=bar_idx - pos.entry_bar_idx,
-                        ))
-                        closed_positions.append(pos)
-                        break
-                else:
-                    break
+            # Activate trailing if gain threshold met
+            if not pos.trailing_active and gain_pct >= config.trail_activation_pct:
+                pos.trailing_active = True
+                pos.trailing_stop_price = opt_price * (1 - config.trail_pct)
 
-            # Update trailing stop if price rose
-            if pos.trailing_stop_price is not None and pos not in closed_positions:
-                new_stop = opt_price * (1 - config.trailing_stop_pct)
-                if new_stop > pos.trailing_stop_price:
+            # Ratchet trailing stop upward
+            if pos.trailing_active and pos.high_water_price is not None:
+                new_stop = pos.high_water_price * (1 - config.trail_pct)
+                if pos.trailing_stop_price is None or new_stop > pos.trailing_stop_price:
                     pos.trailing_stop_price = new_stop
+
+            # 4. Stretch target — full close
+            if gain_pct >= config.stretch_target_pct:
+                pnl = (opt_price - pos.entry_price) * pos.remaining_qty * 100
+                pnl -= config.commission_per_contract * pos.remaining_qty
+                pnl += pos.realized_pnl
+                capital += (opt_price - pos.entry_price) * pos.remaining_qty * 100
+                capital -= config.commission_per_contract * pos.remaining_qty
+                trades.append(OptionsBacktestTrade(
+                    symbol=symbol, direction=pos.direction,
+                    entry_time=pos.entry_time, exit_time=bar_time,
+                    entry_price=pos.entry_price, exit_price=opt_price,
+                    qty=pos.qty, pnl=round(pnl, 2),
+                    pnl_pct=round(gain_pct, 4),
+                    exit_reason=OptionsExitReason.STRETCH_TARGET,
+                    bars_held=bar_idx - pos.entry_bar_idx,
+                ))
+                closed_positions.append(pos)
+                continue
+
+            # 5. Profit target — partial close if qty >= 2
+            if gain_pct >= config.profit_target_pct:
+                if pos.remaining_qty >= 2:
+                    sell_qty = pos.remaining_qty // 2
+                    pnl_partial = (opt_price - pos.entry_price) * sell_qty * 100
+                    pnl_partial -= config.commission_per_contract * sell_qty
+                    capital += pnl_partial
+                    pos.remaining_qty -= sell_qty
+                    pos.realized_pnl += pnl_partial
+                    # Activate trailing on remainder
+                    pos.trailing_active = True
+                    pos.trailing_stop_price = opt_price * (1 - config.trail_pct)
+                else:
+                    # qty=1: just activate trailing
+                    if not pos.trailing_active:
+                        pos.trailing_active = True
+                        pos.trailing_stop_price = opt_price * (1 - config.trail_pct)
 
         for cp in closed_positions:
             positions.remove(cp)
@@ -330,23 +352,28 @@ def run_options_backtest(
                     opt_entry_price = max(opt_entry_price, 0.10)
                     # Apply slippage
                     opt_entry_price *= (1 + config.slippage_pct)
-                    qty = max(1, int(position_cost / (opt_entry_price * 100)))
-                    cost = opt_entry_price * qty * 100
-                    cost += config.commission_per_contract * qty
-
-                    if cost <= capital * config.position_size_pct * 1.5:
-                        capital -= cost
-                        positions.append(_OptionsPosition(
-                            symbol=symbol,
-                            direction=direction,
-                            entry_time=bar_time,
-                            entry_price=opt_entry_price,
-                            underlying_entry=current_close,
-                            qty=qty,
-                            delta=abs(delta),
-                            stage_triggers=stage_multipliers,
-                            entry_bar_idx=bar_idx,
+                    # Affordability filter
+                    cost_per = opt_entry_price * 100
+                    if cost_per <= config.max_contract_cost:
+                        qty = max(1, min(
+                            config.max_contracts,
+                            int(position_cost / cost_per),
                         ))
+                        cost = cost_per * qty
+                        cost += config.commission_per_contract * qty
+
+                        if cost <= capital * config.position_size_pct * 1.5:
+                            capital -= cost
+                            positions.append(_OptionsPosition(
+                                symbol=symbol,
+                                direction=direction,
+                                entry_time=bar_time,
+                                entry_price=opt_entry_price,
+                                underlying_entry=current_close,
+                                qty=qty,
+                                delta=abs(delta),
+                                entry_bar_idx=bar_idx,
+                            ))
 
         # Mark-to-market for equity curve
         mtm = capital
@@ -384,7 +411,6 @@ def run_options_backtest(
                 entry_price=pos.entry_price, exit_price=opt_price,
                 qty=pos.qty, pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 4),
                 exit_reason=OptionsExitReason.EXPIRY,
-                stages_completed=pos.stages_completed,
                 bars_held=len(df) - 1 - pos.entry_bar_idx,
             ))
 

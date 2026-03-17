@@ -68,11 +68,15 @@ async def build_entry_order(
         _log_veto(loop_id, signal, f"Invalid limit price: {limit_price}")
         return None
 
-    # ── Qty from signal contract ───────────────────────────────────────
-    # The research agent already calculated qty via position sizing.
-    # We use qty=1 as minimum; research sets actual qty in the signal context.
-    # For now, use 1 contract per signal (position sizing is done upstream).
-    qty = 1
+    # ── Qty from affordable sizing ─────────────────────────────────────
+    cost_per_contract = limit_price * 100  # options = 100 shares
+    if signal.max_position_cost > 0 and cost_per_contract > 0:
+        qty = max(1, min(
+            cfg.option_max_contracts,
+            int(signal.max_position_cost / cost_per_contract),
+        ))
+    else:
+        qty = 1
 
     order = OptionsOrder(
         contract_symbol=signal.contract.contract_symbol,
@@ -80,7 +84,6 @@ async def build_entry_order(
         qty=qty,
         side="buy",
         limit_price=limit_price,
-        stage=0,
         source="options_entry",
         as_of=datetime.now(timezone.utc),
         prompt_version=signal.prompt_version,
@@ -108,9 +111,9 @@ async def build_exit_order(
     underlying: str,
     qty: int,
     quote: OptionsQuote,
-    stage: int,
+    exit_type: str = "",
     loop_id: str = "unset",
-    prompt_version: str = "exit-engine-v1",
+    prompt_version: str = "exit-engine-v2",
 ) -> OptionsOrder | None:
     """
     Build a limit sell order for an exit decision.
@@ -136,7 +139,7 @@ async def build_exit_order(
     if limit_price <= 0:
         return None
 
-    source = "options_stop" if stage == 0 else "options_exit"
+    source = "options_stop" if exit_type == "hard_stop" else "options_exit"
 
     order = OptionsOrder(
         contract_symbol=contract_symbol,
@@ -144,8 +147,8 @@ async def build_exit_order(
         qty=qty,
         side="sell",
         limit_price=limit_price,
-        stage=stage,
         source=source,
+        exit_type=exit_type,
         as_of=datetime.now(timezone.utc),
         prompt_version=prompt_version,
     )
@@ -161,7 +164,7 @@ async def build_exit_order(
             "side": "sell",
             "qty": qty,
             "limit_price": limit_price,
-            "stage": stage,
+            "exit_type": exit_type,
         },
     ))
 

@@ -5,6 +5,10 @@ All options settings are loaded from .env alongside the main Settings.
 OPTIONS_ENABLED defaults to False — the entire options module is a no-op
 until explicitly enabled.
 
+Strategy: "Momentum Snipe" — high-conviction directional plays with
+realistic profit targets (+35%/+60%), strict time/DTE stops, and
+trailing-stop activation. No compounding ladder.
+
 Access via get_options_settings().
 """
 
@@ -33,37 +37,63 @@ class OptionsSettings(BaseSettings):
 
     # ── Universe ──────────────────────────────────────────────────────────────
     options_universe: str = Field(
-        default="SPY,QQQ,AAPL,TSLA,NVDA",
+        default="AAPL,AMD,PLTR,SOFI,COIN,MARA",
         description="Comma-separated tickers eligible for options trades.",
     )
+    option_max_contract_cost: float = Field(
+        default=500.0, gt=0.0,
+        description="Max cost per contract (mid × 100) for dynamic universe "
+                    "filtering. Contracts above this are skipped at research time.",
+    )
 
-    # ── Compounding Strategy ──────────────────────────────────────────────────
-    option_profit_multiplier: float = Field(
-        default=2.0, gt=1.0,
-        description="Trigger to take gains at each stage (2.0 = 100% gain).",
+    # ── Profit Targets ────────────────────────────────────────────────────────
+    option_profit_target_pct: float = Field(
+        default=0.35, gt=0.0, le=5.0,
+        description="First profit target: close 50% (if qty≥2) or activate "
+                    "trailing stop (if qty=1) at +35%.",
     )
-    option_compound_stages: int = Field(
-        default=3, ge=1, le=10,
-        description="Number of take-profit stages in the compounding ladder.",
+    option_stretch_target_pct: float = Field(
+        default=0.60, gt=0.0, le=5.0,
+        description="Stretch profit target: close everything at +60%.",
     )
-    option_sell_fraction: float = Field(
-        default=0.5, gt=0.0, le=1.0,
-        description="Fraction of remaining qty to sell at each compounding stage.",
+
+    # ── Trailing Stop ─────────────────────────────────────────────────────────
+    option_trail_activation_pct: float = Field(
+        default=0.20, ge=0.0, le=1.0,
+        description="Activate trailing stop when gain reaches +20%.",
+    )
+    option_trail_pct: float = Field(
+        default=0.12, ge=0.01, le=1.0,
+        description="Trail 12% below high-water mark once activated.",
+    )
+
+    # ── Time / DTE Stops ──────────────────────────────────────────────────────
+    option_time_stop_days: int = Field(
+        default=5, ge=1,
+        description="Close if held > N trading days AND gain < time_stop_min_gain.",
+    )
+    option_time_stop_min_gain_pct: float = Field(
+        default=0.10, ge=0.0, le=1.0,
+        description="Minimum gain to survive the time stop.",
+    )
+    option_dte_exit_days: int = Field(
+        default=5, ge=1,
+        description="Close if remaining DTE falls below this.",
     )
 
     # ── DTE Limits ────────────────────────────────────────────────────────────
     option_max_dte: int = Field(
-        default=45, ge=1,
+        default=35, ge=1,
         description="Maximum days-to-expiry at entry.",
     )
     option_min_dte: int = Field(
-        default=7, ge=1,
+        default=14, ge=1,
         description="Minimum days-to-expiry at entry. No buying inside this window.",
     )
 
     # ── IV / Greeks ───────────────────────────────────────────────────────────
     option_max_iv_rank: float = Field(
-        default=0.70, ge=0.0, le=1.0,
+        default=0.60, ge=0.0, le=1.0,
         description="Max IV rank for buying options. Above this, IV is expensive.",
     )
     option_min_delta: float = Field(
@@ -77,12 +107,16 @@ class OptionsSettings(BaseSettings):
 
     # ── Position Sizing ───────────────────────────────────────────────────────
     option_max_position_pct: float = Field(
-        default=0.05, ge=0.0, le=1.0,
-        description="Max fraction of NAV per single options position (5%).",
+        default=0.10, ge=0.0, le=1.0,
+        description="Max fraction of NAV per single options position (10%).",
     )
     option_max_total_exposure: float = Field(
         default=0.20, ge=0.0, le=1.0,
         description="Max fraction of NAV across ALL options positions (20%).",
+    )
+    option_max_contracts: int = Field(
+        default=5, ge=1,
+        description="Max contracts per position (small-account guardrail).",
     )
 
     # ── Execution ─────────────────────────────────────────────────────────────
@@ -91,22 +125,8 @@ class OptionsSettings(BaseSettings):
         description="Max bid/ask spread as fraction of mid price (5%).",
     )
     option_max_loss_pct: float = Field(
-        default=0.50, ge=0.0, le=1.0,
+        default=0.25, ge=0.0, le=1.0,
         description="Hard stop: exit if position loses more than this from entry.",
-    )
-
-    # ── Trailing Stop (post-compound) ─────────────────────────────────────────
-    option_trailing_stop_stage1: float = Field(
-        default=0.20, ge=0.0, le=1.0,
-        description="Trailing stop % after stage 1 triggers.",
-    )
-    option_trailing_stop_stage2: float = Field(
-        default=0.15, ge=0.0, le=1.0,
-        description="Trailing stop % after stage 2 triggers.",
-    )
-    option_trailing_stop_stage3: float = Field(
-        default=0.10, ge=0.0, le=1.0,
-        description="Trailing stop % after stage 3 triggers.",
     )
 
     # ── Computed helpers ──────────────────────────────────────────────────────
@@ -120,8 +140,6 @@ class OptionsSettings(BaseSettings):
     @classmethod
     def min_dte_less_than_max(cls, v: int, info: object) -> int:
         """Validate min_dte < max_dte (when max is available)."""
-        # Pydantic v2 field_validator doesn't easily cross-validate;
-        # we rely on model_validator below instead.
         return v
 
 

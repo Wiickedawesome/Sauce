@@ -1,29 +1,28 @@
 """
-agents/options_exit.py — Compounding exit engine for options positions.
+agents/options_exit.py — Momentum Snipe exit engine for options positions.
 
-Implements the "Double Up & Take Gains" strategy:
-  Entry → 2x → sell 50% → 4x → sell 50% of rest → 8x → sell/trail.
+Implements a 7-condition deterministic exit evaluator (no LLM).
 
-This is a DETERMINISTIC engine (no LLM). All exit decisions are based on
-the compound stage ladder defined at entry time.
+Priority order (first match wins):
+  1. hard_stop      — loss exceeds max_loss_pct
+  2. regime_stop    — market regime turned hostile (caller signals via kwarg)
+  3. dte_stop       — remaining DTE below option_dte_exit_days
+  4. time_stop      — held > option_time_stop_days with gain < min threshold
+  5. trailing_stop  — price fell below trailing stop (activated at +20%)
+  6. stretch_target — gain >= option_stretch_target_pct → FULL_CLOSE
+  7. profit_target  — gain >= option_profit_target_pct → PARTIAL/FULL_CLOSE
 
-Sequence for each open options position:
-  1. Fetch live quote for the contract.
-  2. Check hard stop (max loss).
-  3. Walk the compound stage ladder — trigger next stage if reached.
-  4. If all stages completed, manage trailing stop.
-  5. Return an ExitDecision (HOLD / PARTIAL_CLOSE / FULL_CLOSE).
+If none match → HOLD.  High-water mark and trailing activation are updated
+on every evaluation so the position tracks its peak.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sauce.adapters.db import log_event
 from sauce.core.options_config import get_options_settings
 from sauce.core.options_schemas import (
-    CompoundStage,
     ExitDecision,
-    OptionsOrder,
     OptionsPosition,
     OptionsQuote,
 )
@@ -37,15 +36,18 @@ def evaluate_position(
     position: OptionsPosition,
     quote: OptionsQuote,
     loop_id: str = "unset",
+    *,
+    regime_hostile: bool = False,
 ) -> ExitDecision:
     """
     Evaluate an open options position and return an exit decision.
 
     Parameters
     ----------
-    position:  The tracked options position with its compound stage ladder.
-    quote:     Live quote for the position's contract.
-    loop_id:   Current loop UUID for audit correlation.
+    position:        The tracked options position.
+    quote:           Live quote for the position's contract.
+    loop_id:         Current loop UUID for audit correlation.
+    regime_hostile:  True if the market regime engine signals danger.
 
     Returns
     -------
@@ -60,145 +62,160 @@ def evaluate_position(
     if current_price <= 0:
         return ExitDecision(action="HOLD", reason="Quote mid price is zero")
 
-    # ── Hard stop: max loss ───────────────────────────────────────────────
+    gain_pct = (current_price - position.entry_price) / position.entry_price
+
+    # ── 1. Hard stop: max loss ────────────────────────────────────────────
     passed, reason = check_max_loss(position, current_price, loop_id)
     if not passed:
-        _log_exit(loop_id, position, "FULL_CLOSE", reason, 0)
+        _log_exit(loop_id, position, "FULL_CLOSE", reason, "hard_stop")
         return ExitDecision(
             action="FULL_CLOSE",
             qty=position.remaining_qty,
             reason=reason,
-            stage=0,
+            exit_type="hard_stop",
         )
 
-    # ── Trailing stop check (if active) ───────────────────────────────────
-    if position.trailing_stop_price is not None:
+    # ── 2. Regime stop ────────────────────────────────────────────────────
+    if regime_hostile:
+        reason = "Market regime turned hostile — closing options position"
+        _log_exit(loop_id, position, "FULL_CLOSE", reason, "regime_stop")
+        return ExitDecision(
+            action="FULL_CLOSE",
+            qty=position.remaining_qty,
+            reason=reason,
+            exit_type="regime_stop",
+        )
+
+    # ── 3. DTE stop ──────────────────────────────────────────────────────
+    try:
+        expiration = date.fromisoformat(position.contract.expiration)
+        remaining_dte = (expiration - date.today()).days
+        if remaining_dte <= cfg.option_dte_exit_days:
+            reason = (
+                f"DTE stop: {remaining_dte} days remaining "
+                f"<= {cfg.option_dte_exit_days} threshold"
+            )
+            _log_exit(loop_id, position, "FULL_CLOSE", reason, "dte_stop")
+            return ExitDecision(
+                action="FULL_CLOSE",
+                qty=position.remaining_qty,
+                reason=reason,
+                exit_type="dte_stop",
+            )
+    except (ValueError, TypeError):
+        pass  # If expiration is invalid/placeholder, skip DTE check
+
+    # ── 4. Time stop ─────────────────────────────────────────────────────
+    if position.entry_time is not None:
+        entry = position.entry_time
+        if entry.tzinfo is None:
+            entry = entry.replace(tzinfo=timezone.utc)
+        days_held = (datetime.now(timezone.utc) - entry).days
+        if days_held >= cfg.option_time_stop_days and gain_pct < cfg.option_time_stop_min_gain_pct:
+            reason = (
+                f"Time stop: held {days_held} days with gain "
+                f"{gain_pct:.1%} < {cfg.option_time_stop_min_gain_pct:.0%} threshold"
+            )
+            _log_exit(loop_id, position, "FULL_CLOSE", reason, "time_stop")
+            return ExitDecision(
+                action="FULL_CLOSE",
+                qty=position.remaining_qty,
+                reason=reason,
+                exit_type="time_stop",
+            )
+
+    # ── 5. Trailing stop check (if active) ────────────────────────────────
+    if position.trailing_active and position.trailing_stop_price is not None:
         if current_price <= position.trailing_stop_price:
             reason = (
                 f"Trailing stop hit: {current_price:.4f} <= "
                 f"stop {position.trailing_stop_price:.4f}"
             )
-            _log_exit(loop_id, position, "FULL_CLOSE", reason, position.stages_completed)
+            _log_exit(loop_id, position, "FULL_CLOSE", reason, "trailing_stop")
             return ExitDecision(
                 action="FULL_CLOSE",
                 qty=position.remaining_qty,
                 reason=reason,
-                stage=position.stages_completed,
+                exit_type="trailing_stop",
             )
 
-        # Update trailing stop if price has risen
-        # trailing_stop_pct comes from the last completed stage
-        last_stage = _get_last_completed_stage(position)
-        if last_stage:
-            new_stop = current_price * (1 - last_stage.trailing_stop_pct)
-            if new_stop > position.trailing_stop_price:
-                position.trailing_stop_price = new_stop
+    # ── Update high-water mark & activate trailing if threshold met ───────
+    if position.high_water_price is None or current_price > position.high_water_price:
+        position.high_water_price = current_price
 
-    # ── Walk compound stages ──────────────────────────────────────────────
-    for stage in position.compound_stages:
-        if stage.completed:
-            continue
+    if not position.trailing_active and gain_pct >= cfg.option_trail_activation_pct:
+        position.trailing_active = True
+        position.trailing_stop_price = current_price * (1 - cfg.option_trail_pct)
 
-        trigger_price = position.entry_price * stage.trigger_multiplier
+    if position.trailing_active and position.high_water_price is not None:
+        new_stop = position.high_water_price * (1 - cfg.option_trail_pct)
+        if position.trailing_stop_price is None or new_stop > position.trailing_stop_price:
+            position.trailing_stop_price = new_stop
 
-        if current_price >= trigger_price:
-            # Stage triggered!
-            sell_qty = max(1, int(position.remaining_qty * stage.sell_fraction))
+    # ── 6. Stretch target: close everything at +60% ──────────────────────
+    if gain_pct >= cfg.option_stretch_target_pct:
+        reason = (
+            f"Stretch target hit: gain {gain_pct:.1%} >= "
+            f"{cfg.option_stretch_target_pct:.0%}"
+        )
+        _log_exit(loop_id, position, "FULL_CLOSE", reason, "stretch_target")
+        return ExitDecision(
+            action="FULL_CLOSE",
+            qty=position.remaining_qty,
+            reason=reason,
+            exit_type="stretch_target",
+        )
 
-            # Don't sell more than remaining
-            sell_qty = min(sell_qty, position.remaining_qty)
-
-            # Is this the last stage or would we have 0 remaining?
-            remaining_after = position.remaining_qty - sell_qty
-            if remaining_after <= 0:
-                # Full close on final stage
-                _log_exit(
-                    loop_id, position, "FULL_CLOSE",
-                    f"Stage {stage.stage_num} triggered at {current_price:.4f} "
-                    f"(target {trigger_price:.4f}), closing all",
-                    stage.stage_num,
-                )
-                return ExitDecision(
-                    action="FULL_CLOSE",
-                    qty=position.remaining_qty,
-                    reason=f"Stage {stage.stage_num}: {stage.trigger_multiplier}x target hit, closing remaining",
-                    stage=stage.stage_num,
-                    set_trailing_stop=False,
-                )
-
-            # Partial close
-            _log_exit(
-                loop_id, position, "PARTIAL_CLOSE",
-                f"Stage {stage.stage_num} triggered at {current_price:.4f} "
-                f"(target {trigger_price:.4f}), selling {sell_qty}",
-                stage.stage_num,
+    # ── 7. Profit target: partial if qty>=2, else activate trail ─────────
+    if gain_pct >= cfg.option_profit_target_pct:
+        if position.remaining_qty >= 2:
+            sell_qty = position.remaining_qty // 2
+            reason = (
+                f"Profit target hit: gain {gain_pct:.1%} >= "
+                f"{cfg.option_profit_target_pct:.0%}, selling {sell_qty} of "
+                f"{position.remaining_qty}"
             )
+            _log_exit(loop_id, position, "PARTIAL_CLOSE", reason, "profit_target")
             return ExitDecision(
                 action="PARTIAL_CLOSE",
                 qty=sell_qty,
-                reason=(
-                    f"Stage {stage.stage_num}: {stage.trigger_multiplier}x target hit, "
-                    f"selling {sell_qty} of {position.remaining_qty}"
-                ),
-                stage=stage.stage_num,
+                reason=reason,
+                exit_type="profit_target",
                 set_trailing_stop=True,
-                trailing_stop_pct=stage.trailing_stop_pct,
+                trailing_stop_pct=cfg.option_trail_pct,
+            )
+        else:
+            # qty=1: just activate trailing stop, don't close yet
+            if not position.trailing_active:
+                position.trailing_active = True
+                position.trailing_stop_price = current_price * (1 - cfg.option_trail_pct)
+            return ExitDecision(
+                action="HOLD",
+                reason=(
+                    f"Profit target hit at {gain_pct:.1%} with qty=1 "
+                    "— activating trailing stop instead of partial close"
+                ),
             )
 
-        # Price hasn't reached this stage yet — stop checking further stages
-        break
-
     return ExitDecision(action="HOLD", reason="No exit condition met")
-
-
-def apply_exit_decision(
-    position: OptionsPosition,
-    decision: ExitDecision,
-) -> OptionsPosition:
-    """
-    Apply an ExitDecision to a position, updating its state.
-
-    Returns the updated OptionsPosition (mutated in place).
-    This is called after the broker confirms the exit order.
-    """
-    if decision.action == "HOLD":
-        return position
-
-    if decision.action in ("PARTIAL_CLOSE", "FULL_CLOSE"):
-        sold_qty = decision.qty
-        position.remaining_qty = max(0, position.remaining_qty - sold_qty)
-
-        # Mark the stage as completed
-        if decision.stage > 0:
-            for stage in position.compound_stages:
-                if stage.stage_num == decision.stage and not stage.completed:
-                    stage.completed = True
-                    position.stages_completed += 1
-                    break
-
-        # Set trailing stop after partial close
-        if decision.set_trailing_stop and decision.trailing_stop_pct > 0:
-            # We don't have current_price here, so the caller must set it
-            # after this method returns. We store the percentage for reference.
-            pass
-
-    return position
 
 
 def build_exit_order(
     position: OptionsPosition,
     decision: ExitDecision,
     limit_price: float,
-) -> OptionsOrder | None:
+) -> "OptionsOrder | None":
     """
     Build an OptionsOrder from an exit decision.
 
     Returns None if decision is HOLD or qty is 0.
     """
+    from sauce.core.options_schemas import OptionsOrder
+
     if decision.action == "HOLD" or decision.qty <= 0:
         return None
 
-    source = "options_stop" if decision.stage == 0 else "options_exit"
+    source = "options_stop" if decision.exit_type == "hard_stop" else "options_exit"
 
     return OptionsOrder(
         contract_symbol=position.contract.contract_symbol,
@@ -206,21 +223,11 @@ def build_exit_order(
         qty=decision.qty,
         side="sell",
         limit_price=limit_price,
-        stage=decision.stage,
         source=source,
+        exit_type=decision.exit_type,
         as_of=datetime.now(timezone.utc),
-        prompt_version="exit-engine-v1",
+        prompt_version="exit-engine-v2",
     )
-
-
-def _get_last_completed_stage(
-    position: OptionsPosition,
-) -> CompoundStage | None:
-    """Return the most recently completed stage, or None."""
-    completed = [s for s in position.compound_stages if s.completed]
-    if not completed:
-        return None
-    return max(completed, key=lambda s: s.stage_num)
 
 
 def _log_exit(
@@ -228,10 +235,10 @@ def _log_exit(
     position: OptionsPosition,
     action: str,
     reason: str,
-    stage: int,
+    exit_type: str,
 ) -> None:
     """Log an exit decision as an AuditEvent."""
-    event_type = "options_exit_stop" if stage == 0 else "options_exit_stage"
+    event_type = "options_exit_stop" if exit_type == "hard_stop" else "options_exit"
     log_event(AuditEvent(
         loop_id=loop_id,
         event_type=event_type,
@@ -241,7 +248,7 @@ def _log_exit(
             "contract": position.contract.contract_symbol,
             "action": action,
             "reason": reason,
-            "stage": stage,
+            "exit_type": exit_type,
             "remaining_qty": position.remaining_qty,
         },
     ))

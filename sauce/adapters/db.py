@@ -100,11 +100,11 @@ class SignalRow(Base):
 
 
 class OptionsPositionRow(Base):
-    """Tracked options positions for the compounding exit engine.
+    """Tracked options positions for the Momentum Snipe exit engine.
 
-    Unlike audit tables, this table supports UPDATE (remaining_qty, stages,
-    trailing_stop, status) because exit management mutates position state
-    across loop iterations.
+    Unlike audit tables, this table supports UPDATE (remaining_qty, trailing
+    stop, status) because exit management mutates position state across
+    loop iterations.
     """
 
     __tablename__ = "options_positions"
@@ -113,15 +113,18 @@ class OptionsPositionRow(Base):
     position_id: str = Column(String(36), nullable=False, unique=True, index=True)
     contract_symbol: str = Column(String(40), nullable=False, index=True)
     underlying: str = Column(String(20), nullable=False, index=True)
+    expiration: str = Column(String(10), nullable=False, default="")  # YYYY-MM-DD
+    strike: float = Column(Float, nullable=False, default=0.0)
     entry_price: float = Column(Float, nullable=False)
     qty: int = Column(Integer, nullable=False)
     remaining_qty: int = Column(Integer, nullable=False)
     direction: str = Column(String(16), nullable=False)  # long_call / long_put
     strategy_type: str = Column(String(24), nullable=False, default="directional")
-    stages_completed: int = Column(Integer, nullable=False, default=0)
+    high_water_price: float | None = Column(Float, nullable=True)
+    trailing_active: bool = Column(Boolean, nullable=False, default=False)
     realized_pnl: float = Column(Float, nullable=False, default=0.0)
     trailing_stop_price: float | None = Column(Float, nullable=True)
-    compound_stages_json: str = Column(Text, nullable=False, default="[]")  # JSON
+    exit_type: str = Column(String(24), nullable=False, default="")
     status: str = Column(String(12), nullable=False, default="open", index=True)  # open/closed
     entry_time: datetime = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     closed_at: datetime | None = Column(DateTime, nullable=True)
@@ -377,20 +380,21 @@ def save_options_position(
     """Persist a new OptionsPosition to the DB. Never raises."""
     session = get_session(db_path)
     try:
-        stages_json = json.dumps([s.model_dump() for s in position.compound_stages])  # type: ignore[union-attr]
         row = OptionsPositionRow(
             position_id=position.position_id,  # type: ignore[union-attr]
             contract_symbol=position.contract.contract_symbol,  # type: ignore[union-attr]
             underlying=position.contract.underlying,  # type: ignore[union-attr]
+            expiration=position.contract.expiration,  # type: ignore[union-attr]
+            strike=position.contract.strike,  # type: ignore[union-attr]
             entry_price=position.entry_price,  # type: ignore[union-attr]
             qty=position.qty,  # type: ignore[union-attr]
             remaining_qty=position.remaining_qty,  # type: ignore[union-attr]
             direction=position.direction,  # type: ignore[union-attr]
             strategy_type=position.strategy_type,  # type: ignore[union-attr]
-            stages_completed=position.stages_completed,  # type: ignore[union-attr]
+            high_water_price=position.high_water_price,  # type: ignore[union-attr]
+            trailing_active=position.trailing_active,  # type: ignore[union-attr]
             realized_pnl=position.realized_pnl,  # type: ignore[union-attr]
             trailing_stop_price=position.trailing_stop_price,  # type: ignore[union-attr]
-            compound_stages_json=stages_json,
             status="open",
             entry_time=position.entry_time or datetime.now(timezone.utc),  # type: ignore[union-attr]
             loop_id=loop_id,
@@ -423,15 +427,17 @@ def load_open_options_positions(db_path: str | None = None) -> list[dict]:
                 "position_id": row.position_id,
                 "contract_symbol": row.contract_symbol,
                 "underlying": row.underlying,
+                "expiration": row.expiration,
+                "strike": row.strike,
                 "entry_price": row.entry_price,
                 "qty": row.qty,
                 "remaining_qty": row.remaining_qty,
                 "direction": row.direction,
                 "strategy_type": row.strategy_type,
-                "stages_completed": row.stages_completed,
+                "high_water_price": row.high_water_price,
+                "trailing_active": row.trailing_active,
                 "realized_pnl": row.realized_pnl,
                 "trailing_stop_price": row.trailing_stop_price,
-                "compound_stages_json": row.compound_stages_json,
                 "entry_time": row.entry_time,
                 "loop_id": row.loop_id,
             })

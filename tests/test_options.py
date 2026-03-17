@@ -4,9 +4,9 @@ tests/test_options.py — Comprehensive test suite for options trading module.
 Covers:
   - Options schemas (construction, validation, edge cases)
   - Options safety checks (all 7 guards)
-  - Options exit engine (stage triggers, trailing stops, hard stop)
+  - Options exit engine (Momentum Snipe: 7 exit conditions)
   - Options execution (entry/exit order building)
-  - Options config (defaults, overrides)
+  - Options config (Momentum Snipe defaults, overrides)
   - Options position persistence (save/load/update/close round-trip)
   - Options learning (drift detection, performance analytics)
   - Options backtest (engine, models)
@@ -14,14 +14,12 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from sauce.core.options_schemas import (
-    CompoundStage,
     ExitDecision,
     OptionsContract,
     OptionsBias,
@@ -35,28 +33,6 @@ from sauce.core.options_schemas import (
 # ═══════════════════════════════════════════════════════════════════════════════
 # region: Schema Tests
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestCompoundStage:
-    def test_basic_construction(self):
-        s = CompoundStage(stage_num=1, trigger_multiplier=2.0, sell_fraction=0.5)
-        assert s.stage_num == 1
-        assert s.trigger_multiplier == 2.0
-        assert s.sell_fraction == 0.5
-        assert s.trailing_stop_pct == 0.15
-        assert s.completed is False
-
-    def test_rejects_trigger_below_1(self):
-        with pytest.raises(Exception):
-            CompoundStage(stage_num=1, trigger_multiplier=0.5, sell_fraction=0.5)
-
-    def test_rejects_sell_fraction_above_1(self):
-        with pytest.raises(Exception):
-            CompoundStage(stage_num=1, trigger_multiplier=2.0, sell_fraction=1.5)
-
-    def test_rejects_stage_num_zero(self):
-        with pytest.raises(Exception):
-            CompoundStage(stage_num=0, trigger_multiplier=2.0, sell_fraction=0.5)
 
 
 class TestOptionsContract:
@@ -113,7 +89,8 @@ class TestOptionsPosition:
         assert pos.entry_price == 5.0
         assert pos.qty == 2
         assert pos.remaining_qty == 2
-        assert pos.stages_completed == 0
+        assert pos.high_water_price is None
+        assert pos.trailing_active is False
         assert pos.realized_pnl == 0.0
         assert pos.trailing_stop_price is None
 
@@ -128,17 +105,14 @@ class TestOptionsPosition:
         )
         assert p1.position_id != p2.position_id
 
-    def test_with_compound_stages(self):
-        stages = [
-            CompoundStage(stage_num=1, trigger_multiplier=2.0, sell_fraction=0.5),
-            CompoundStage(stage_num=2, trigger_multiplier=4.0, sell_fraction=0.5),
-        ]
+    def test_with_trailing_fields(self):
         pos = OptionsPosition(
             contract=self._make_contract(), entry_price=5.0,
             qty=4, remaining_qty=4, direction="long_call",
-            compound_stages=stages,
+            high_water_price=7.0, trailing_active=True,
         )
-        assert len(pos.compound_stages) == 2
+        assert pos.high_water_price == 7.0
+        assert pos.trailing_active is True
 
     def test_rejects_negative_entry_price(self):
         with pytest.raises(Exception):
@@ -185,13 +159,20 @@ class TestExitDecision:
     def test_hold(self):
         d = ExitDecision(action="HOLD")
         assert d.qty == 0
-        assert d.stage == 0
+        assert d.exit_type == ""
 
-    def test_partial_close(self):
-        d = ExitDecision(action="PARTIAL_CLOSE", qty=2, stage=1, set_trailing_stop=True,
-                         trailing_stop_pct=0.15)
+    def test_full_close(self):
+        d = ExitDecision(action="FULL_CLOSE", qty=2, exit_type="hard_stop",
+                         reason="Loss exceeded threshold")
+        assert d.action == "FULL_CLOSE"
+        assert d.exit_type == "hard_stop"
+
+    def test_partial_close_with_trailing(self):
+        d = ExitDecision(action="PARTIAL_CLOSE", qty=2, exit_type="profit_target",
+                         set_trailing_stop=True, trailing_stop_pct=0.12)
         assert d.action == "PARTIAL_CLOSE"
         assert d.set_trailing_stop is True
+        assert d.exit_type == "profit_target"
 
 
 class TestOptionsOrder:
@@ -203,6 +184,16 @@ class TestOptionsOrder:
         )
         assert o.order_type == "limit"
         assert o.source == "options_entry"
+        assert o.exit_type == ""
+
+    def test_exit_order_with_exit_type(self):
+        o = OptionsOrder(
+            contract_symbol="SPY250418C00500000", underlying="SPY",
+            qty=1, side="sell", limit_price=5.0, source="options_exit",
+            exit_type="profit_target",
+            as_of=datetime.now(timezone.utc), prompt_version="v2",
+        )
+        assert o.exit_type == "profit_target"
 
     def test_rejects_market_order(self):
         with pytest.raises(Exception):
@@ -226,12 +217,17 @@ class TestOptionsConfig:
         from sauce.core.options_config import OptionsSettings
         s = OptionsSettings()
         assert s.options_enabled is False
-        assert s.option_profit_multiplier == 2.0
-        assert s.option_compound_stages == 3
-        assert s.option_sell_fraction == 0.5
-        assert s.option_max_dte == 45
-        assert s.option_min_dte == 7
-        assert s.option_max_loss_pct == 0.50
+        assert s.option_profit_target_pct == 0.35
+        assert s.option_stretch_target_pct == 0.60
+        assert s.option_trail_activation_pct == 0.20
+        assert s.option_trail_pct == 0.12
+        assert s.option_time_stop_days == 5
+        assert s.option_dte_exit_days == 5
+        assert s.option_max_dte == 35
+        assert s.option_min_dte == 14
+        assert s.option_max_loss_pct == 0.25
+        assert s.option_max_contract_cost == 500.0
+        assert s.option_max_contracts == 5
 
     def test_universe_parsed(self):
         from sauce.core.options_config import OptionsSettings
@@ -240,9 +236,9 @@ class TestOptionsConfig:
 
     def test_override_via_constructor(self):
         from sauce.core.options_config import OptionsSettings
-        s = OptionsSettings(option_profit_multiplier=3.0, option_compound_stages=5)
-        assert s.option_profit_multiplier == 3.0
-        assert s.option_compound_stages == 5
+        s = OptionsSettings(option_profit_target_pct=0.50, option_max_contracts=10)
+        assert s.option_profit_target_pct == 0.50
+        assert s.option_max_contracts == 10
 
 
 # endregion
@@ -473,9 +469,9 @@ class TestOptionsSafety:
 
 
 class TestOptionsExitEngine:
-    """Test the deterministic exit engine."""
+    """Test the Momentum Snipe 7-condition exit evaluator."""
 
-    def _make_position(self, entry_price=5.0, qty=4, stages=None):
+    def _make_position(self, entry_price=5.0, qty=4, **kw):
         contract = OptionsContract(
             contract_symbol="SPY250418C00500000",
             underlying="SPY",
@@ -483,17 +479,12 @@ class TestOptionsExitEngine:
             strike=500.0,
             option_type="call",
         )
-        if stages is None:
-            stages = [
-                CompoundStage(stage_num=1, trigger_multiplier=2.0, sell_fraction=0.5),
-                CompoundStage(stage_num=2, trigger_multiplier=4.0, sell_fraction=0.5),
-                CompoundStage(stage_num=3, trigger_multiplier=8.0, sell_fraction=1.0),
-            ]
-        return OptionsPosition(
+        defaults = dict(
             contract=contract, entry_price=entry_price,
             qty=qty, remaining_qty=qty, direction="long_call",
-            compound_stages=stages,
         )
+        defaults.update(kw)
+        return OptionsPosition(**defaults)
 
     def _make_quote(self, mid):
         return OptionsQuote(
@@ -509,23 +500,9 @@ class TestOptionsExitEngine:
         from sauce.agents.options_exit import evaluate_position
 
         pos = self._make_position(entry_price=5.0)
-        quote = self._make_quote(mid=6.0)  # Up 20%, below 2x trigger
+        quote = self._make_quote(mid=5.5)  # Up 10%, below all targets
         decision = evaluate_position(pos, quote)
         assert decision.action == "HOLD"
-        get_options_settings.cache_clear()
-
-    def test_stage_1_trigger(self, monkeypatch):
-        from sauce.core.options_config import get_options_settings
-        get_options_settings.cache_clear()
-        monkeypatch.setenv("OPTIONS_ENABLED", "true")
-        from sauce.agents.options_exit import evaluate_position
-
-        pos = self._make_position(entry_price=5.0, qty=4)
-        quote = self._make_quote(mid=10.0)  # 2x entry → stage 1
-        decision = evaluate_position(pos, quote)
-        assert decision.action == "PARTIAL_CLOSE"
-        assert decision.stage == 1
-        assert decision.qty == 2  # 50% of 4
         get_options_settings.cache_clear()
 
     def test_hard_stop_exit(self, monkeypatch):
@@ -535,10 +512,90 @@ class TestOptionsExitEngine:
         from sauce.agents.options_exit import evaluate_position
 
         pos = self._make_position(entry_price=5.0)
-        quote = self._make_quote(mid=2.0)  # 60% loss > 50% hard stop
+        quote = self._make_quote(mid=3.5)  # 30% loss > 25% hard stop
         decision = evaluate_position(pos, quote)
         assert decision.action == "FULL_CLOSE"
-        assert decision.stage == 0  # hard stop = stage 0
+        assert decision.exit_type == "hard_stop"
+        assert decision.qty == 4
+        get_options_settings.cache_clear()
+
+    def test_regime_stop_exit(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        pos = self._make_position(entry_price=5.0)
+        quote = self._make_quote(mid=5.5)  # In the money, but regime hostile
+        decision = evaluate_position(pos, quote, regime_hostile=True)
+        assert decision.action == "FULL_CLOSE"
+        assert decision.exit_type == "regime_stop"
+        get_options_settings.cache_clear()
+
+    def test_dte_stop_exit(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        contract = OptionsContract(
+            contract_symbol="SPY250418C00500000",
+            underlying="SPY",
+            expiration=(date.today() + timedelta(days=3)).isoformat(),
+            strike=500.0, option_type="call",
+        )
+        pos = OptionsPosition(
+            contract=contract, entry_price=5.0,
+            qty=4, remaining_qty=4, direction="long_call",
+        )
+        quote = self._make_quote(mid=5.5)
+        decision = evaluate_position(pos, quote)
+        assert decision.action == "FULL_CLOSE"
+        assert decision.exit_type == "dte_stop"
+        get_options_settings.cache_clear()
+
+    def test_time_stop_exit(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        # Position held for 6 days with only 5% gain (< 10% threshold)
+        pos = self._make_position(entry_price=5.0)
+        pos.entry_time = datetime.now(timezone.utc) - timedelta(days=6)
+        quote = self._make_quote(mid=5.25)  # 5% gain
+        decision = evaluate_position(pos, quote)
+        assert decision.action == "FULL_CLOSE"
+        assert decision.exit_type == "time_stop"
+        get_options_settings.cache_clear()
+
+    def test_time_stop_not_triggered_with_good_gain(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        # Held for 6 days but with 15% gain (> 10% threshold)
+        pos = self._make_position(entry_price=5.0)
+        pos.entry_time = datetime.now(timezone.utc) - timedelta(days=6)
+        quote = self._make_quote(mid=5.75)  # 15% gain
+        decision = evaluate_position(pos, quote)
+        assert decision.action == "HOLD"
+        get_options_settings.cache_clear()
+
+    def test_trailing_stop_activation_at_20pct(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        pos = self._make_position(entry_price=5.0)
+        quote = self._make_quote(mid=6.1)  # +22% → should activate trailing
+        decision = evaluate_position(pos, quote)
+        assert decision.action == "HOLD"
+        assert pos.trailing_active is True
+        assert pos.trailing_stop_price is not None
+        assert pos.trailing_stop_price > 0
         get_options_settings.cache_clear()
 
     def test_trailing_stop_exit(self, monkeypatch):
@@ -548,30 +605,73 @@ class TestOptionsExitEngine:
         from sauce.agents.options_exit import evaluate_position
 
         pos = self._make_position(entry_price=5.0)
-        pos.trailing_stop_price = 8.0
-        pos.stages_completed = 1
-        pos.compound_stages[0].completed = True
-        quote = self._make_quote(mid=7.5)  # Below trailing stop of 8.0
+        pos.trailing_active = True
+        pos.high_water_price = 7.0
+        pos.trailing_stop_price = 6.16  # 7.0 * (1 - 0.12)
+        quote = self._make_quote(mid=6.0)  # Below trailing stop
         decision = evaluate_position(pos, quote)
         assert decision.action == "FULL_CLOSE"
+        assert decision.exit_type == "trailing_stop"
         get_options_settings.cache_clear()
 
-    def test_trailing_stop_updates_upward(self, monkeypatch):
+    def test_trailing_stop_ratchets_up(self, monkeypatch):
         from sauce.core.options_config import get_options_settings
         get_options_settings.cache_clear()
         monkeypatch.setenv("OPTIONS_ENABLED", "true")
         from sauce.agents.options_exit import evaluate_position
 
         pos = self._make_position(entry_price=5.0)
-        pos.trailing_stop_price = 8.0
-        pos.stages_completed = 1
-        pos.compound_stages[0].completed = True
-        quote = self._make_quote(mid=12.0)  # Well above trailing stop
+        pos.trailing_active = True
+        pos.high_water_price = 6.0
+        pos.trailing_stop_price = 5.28  # 6.0 * 0.88
+        quote = self._make_quote(mid=6.5)  # +30%, below 35% profit target, new high
         decision = evaluate_position(pos, quote)
-        # Should HOLD but update the trailing stop
         assert decision.action == "HOLD"
-        # The trailing stop should have moved up
-        assert pos.trailing_stop_price > 8.0
+        assert pos.high_water_price == 6.5
+        assert pos.trailing_stop_price > 5.28
+        get_options_settings.cache_clear()
+
+    def test_stretch_target_full_close(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        pos = self._make_position(entry_price=5.0)
+        quote = self._make_quote(mid=8.1)  # +62% >= 60% stretch
+        decision = evaluate_position(pos, quote)
+        assert decision.action == "FULL_CLOSE"
+        assert decision.exit_type == "stretch_target"
+        assert decision.qty == 4
+        get_options_settings.cache_clear()
+
+    def test_profit_target_partial_close(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        pos = self._make_position(entry_price=5.0, qty=4)
+        quote = self._make_quote(mid=6.8)  # +36% >= 35% profit target
+        decision = evaluate_position(pos, quote)
+        assert decision.action == "PARTIAL_CLOSE"
+        assert decision.exit_type == "profit_target"
+        assert decision.qty == 2  # 50% of 4
+        assert decision.set_trailing_stop is True
+        get_options_settings.cache_clear()
+
+    def test_profit_target_qty1_activates_trailing(self, monkeypatch):
+        from sauce.core.options_config import get_options_settings
+        get_options_settings.cache_clear()
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        from sauce.agents.options_exit import evaluate_position
+
+        pos = self._make_position(entry_price=5.0, qty=1, remaining_qty=1)
+        quote = self._make_quote(mid=6.8)  # +36% >= 35%
+        decision = evaluate_position(pos, quote)
+        # qty=1 can't partial close, activates trailing instead
+        assert decision.action == "HOLD"
+        assert pos.trailing_active is True
         get_options_settings.cache_clear()
 
     def test_zero_remaining_qty_returns_hold(self, monkeypatch):
@@ -587,34 +687,6 @@ class TestOptionsExitEngine:
         assert decision.action == "HOLD"
         get_options_settings.cache_clear()
 
-    def test_apply_exit_decision_partial(self, monkeypatch):
-        from sauce.core.options_config import get_options_settings
-        get_options_settings.cache_clear()
-        monkeypatch.setenv("OPTIONS_ENABLED", "true")
-        from sauce.agents.options_exit import apply_exit_decision
-
-        pos = self._make_position(entry_price=5.0, qty=4)
-        decision = ExitDecision(action="PARTIAL_CLOSE", qty=2, stage=1,
-                                set_trailing_stop=True, trailing_stop_pct=0.20)
-        result = apply_exit_decision(pos, decision)
-        assert result.remaining_qty == 2
-        assert result.stages_completed == 1
-        assert result.compound_stages[0].completed is True
-        get_options_settings.cache_clear()
-
-    def test_apply_exit_decision_hold_no_mutation(self, monkeypatch):
-        from sauce.core.options_config import get_options_settings
-        get_options_settings.cache_clear()
-        monkeypatch.setenv("OPTIONS_ENABLED", "true")
-        from sauce.agents.options_exit import apply_exit_decision
-
-        pos = self._make_position(entry_price=5.0, qty=4)
-        decision = ExitDecision(action="HOLD")
-        result = apply_exit_decision(pos, decision)
-        assert result.remaining_qty == 4
-        assert result.stages_completed == 0
-        get_options_settings.cache_clear()
-
     def test_build_exit_order_returns_order(self, monkeypatch):
         from sauce.core.options_config import get_options_settings
         get_options_settings.cache_clear()
@@ -622,12 +694,13 @@ class TestOptionsExitEngine:
         from sauce.agents.options_exit import build_exit_order
 
         pos = self._make_position(entry_price=5.0)
-        decision = ExitDecision(action="PARTIAL_CLOSE", qty=2, stage=1)
+        decision = ExitDecision(action="FULL_CLOSE", qty=4, exit_type="stretch_target")
         order = build_exit_order(pos, decision, limit_price=9.80)
         assert order is not None
         assert order.side == "sell"
-        assert order.qty == 2
+        assert order.qty == 4
         assert order.source == "options_exit"
+        assert order.exit_type == "stretch_target"
         get_options_settings.cache_clear()
 
     def test_build_exit_order_none_on_hold(self, monkeypatch):
@@ -649,10 +722,11 @@ class TestOptionsExitEngine:
         from sauce.agents.options_exit import build_exit_order
 
         pos = self._make_position()
-        decision = ExitDecision(action="FULL_CLOSE", qty=4, stage=0)
+        decision = ExitDecision(action="FULL_CLOSE", qty=4, exit_type="hard_stop")
         order = build_exit_order(pos, decision, limit_price=2.0)
         assert order is not None
         assert order.source == "options_stop"
+        assert order.exit_type == "hard_stop"
         get_options_settings.cache_clear()
 
 
@@ -737,7 +811,7 @@ class TestOptionsExecution:
         quote = self._make_quote(mid=10.0)
         order = await build_exit_order(
             contract_symbol="SPY250418C00500000", underlying="SPY",
-            qty=2, quote=quote, stage=1, loop_id="test",
+            qty=2, quote=quote, exit_type="profit_target", loop_id="test",
         )
         assert order is not None
         assert order.side == "sell"
@@ -750,7 +824,7 @@ class TestOptionsExecution:
         quote = self._make_quote()
         order = await build_exit_order(
             contract_symbol="SPY250418C00500000", underlying="SPY",
-            qty=0, quote=quote, stage=1,
+            qty=0, quote=quote, exit_type="profit_target",
         )
         assert order is None
 
@@ -774,10 +848,6 @@ class TestOptionsPersistence:
         return OptionsPosition(
             contract=contract, entry_price=5.0,
             qty=4, remaining_qty=4, direction="long_call",
-            compound_stages=[
-                CompoundStage(stage_num=1, trigger_multiplier=2.0, sell_fraction=0.5),
-                CompoundStage(stage_num=2, trigger_multiplier=4.0, sell_fraction=0.5),
-            ],
         )
 
     def test_save_and_load(self, tmp_path):
@@ -796,11 +866,8 @@ class TestOptionsPersistence:
         assert row["remaining_qty"] == 4
         assert row["direction"] == "long_call"
         assert row["position_id"] == pos.position_id
-
-        # Compound stages deserialized correctly
-        stages = json.loads(row["compound_stages_json"])
-        assert len(stages) == 2
-        assert stages[0]["trigger_multiplier"] == 2.0
+        assert row["high_water_price"] is None
+        assert row["trailing_active"] in (False, 0)
 
     def test_update_position(self, tmp_path):
         from sauce.adapters.db import save_options_position, update_options_position, load_open_options_positions
@@ -811,14 +878,17 @@ class TestOptionsPersistence:
 
         update_options_position(
             pos.position_id, db_path=db,
-            remaining_qty=2, stages_completed=1, trailing_stop_price=9.0,
+            remaining_qty=2, high_water_price=7.0,
+            trailing_active=True, trailing_stop_price=6.16,
+            exit_type="profit_target",
         )
 
         loaded = load_open_options_positions(db_path=db)
         assert len(loaded) == 1
         assert loaded[0]["remaining_qty"] == 2
-        assert loaded[0]["stages_completed"] == 1
-        assert loaded[0]["trailing_stop_price"] == 9.0
+        assert loaded[0]["high_water_price"] == 7.0
+        assert loaded[0]["trailing_active"] in (True, 1)
+        assert loaded[0]["trailing_stop_price"] == 6.16
 
     def test_close_position(self, tmp_path):
         from sauce.adapters.db import save_options_position, close_options_position, load_open_options_positions
@@ -904,7 +974,7 @@ class TestOptionsLearning:
 
         outcome = record_options_trade_outcome(
             pos.position_id, exit_price=10.0,
-            exit_reason="stage_1", stages_completed=1, db_path=db,
+            exit_reason="profit_target", exit_type="profit_target", db_path=db,
         )
         assert outcome is not None
         assert outcome["pnl"] == 1000.0  # (10 - 5) * 2 * 100
@@ -920,7 +990,7 @@ class TestOptionsLearning:
 
         outcome = record_options_trade_outcome(
             "nonexistent", exit_price=10.0,
-            exit_reason="stage_1", stages_completed=1, db_path=db,
+            exit_reason="profit_target", exit_type="profit_target", db_path=db,
         )
         assert outcome is None
 
@@ -950,16 +1020,16 @@ class TestOptionsLearning:
         result = detect_options_win_rate_drift(db_path=db, window=10, threshold=0.40)
         assert result is None  # Not enough data
 
-    def test_performance_by_stage(self, tmp_path):
-        from sauce.memory.options_learning import get_options_performance_by_stage
+    def test_performance_by_exit_type(self, tmp_path):
+        from sauce.memory.options_learning import get_options_performance_by_exit_type
         from sauce.adapters.db import save_options_position, close_options_position, get_session, OptionsPositionRow
 
         db = str(tmp_path / "test.db")
 
-        # Create positions with different stages_completed
-        for stages in [0, 0, 1, 1, 2]:
+        # Create positions with different exit types
+        for exit_type in ["hard_stop", "hard_stop", "profit_target", "profit_target", "stretch_target"]:
             contract = OptionsContract(
-                contract_symbol=f"SPY{stages:06d}C00500000",
+                contract_symbol=f"SPY{hash(exit_type) % 999999:06d}C00500000",
                 underlying="SPY", expiration="2025-04-18",
                 strike=500.0, option_type="call",
             )
@@ -968,21 +1038,21 @@ class TestOptionsLearning:
                 qty=2, remaining_qty=2, direction="long_call",
             )
             save_options_position(pos, loop_id="L1", db_path=db)
-            pnl = 100.0 if stages > 0 else -50.0
+            pnl = 100.0 if exit_type != "hard_stop" else -50.0
             close_options_position(pos.position_id, realized_pnl=pnl, db_path=db)
-            # Set stages_completed on the DB row
+            # Set exit_type on the DB row
             session = get_session(db)
             try:
                 row = session.query(OptionsPositionRow).filter_by(position_id=pos.position_id).first()
-                row.stages_completed = stages
+                row.exit_type = exit_type
                 session.commit()
             finally:
                 session.close()
 
-        report = get_options_performance_by_stage(db_path=db)
+        report = get_options_performance_by_exit_type(db_path=db)
         assert report["total"] == 5
-        assert 0 in report["by_stage"]
-        assert report["by_stage"][0]["count"] == 2
+        assert "hard_stop" in report["by_exit_type"]
+        assert report["by_exit_type"]["hard_stop"]["count"] == 2
 
     def test_performance_by_underlying(self, tmp_path):
         from sauce.memory.options_learning import get_options_performance_by_underlying
@@ -1021,9 +1091,12 @@ class TestOptionsBacktestModels:
     def test_config_defaults(self):
         from sauce.backtest.options_models import OptionsBacktestConfig
         cfg = OptionsBacktestConfig()
-        assert cfg.initial_capital == 10_000.0
-        assert cfg.compound_stages == 3
-        assert cfg.profit_multiplier == 2.0
+        assert cfg.initial_capital == 5_000.0
+        assert cfg.profit_target_pct == 0.35
+        assert cfg.stretch_target_pct == 0.60
+        assert cfg.trail_activation_pct == 0.20
+        assert cfg.trail_pct == 0.12
+        assert cfg.max_loss_pct == 0.25
         assert cfg.commission_per_contract == 0.65
 
     def test_result_init(self):
@@ -1042,8 +1115,8 @@ class TestOptionsBacktestModels:
             exit_time=datetime.now(timezone.utc),
             entry_price=5.0, exit_price=10.0, qty=1,
             pnl=500.0, pnl_pct=1.0,
-            exit_reason=OptionsExitReason.STAGE_1,
-            stages_completed=1, bars_held=50,
+            exit_reason=OptionsExitReason.PROFIT_TARGET,
+            bars_held=50,
         )
         with pytest.raises(Exception):
             t.pnl = 999.0  # frozen
@@ -1106,12 +1179,12 @@ class TestOptionsBacktestEngine:
         from sauce.backtest.options_models import OptionsBacktestConfig
         cfg = OptionsBacktestConfig(
             initial_capital=50_000, position_size_pct=0.10,
-            compound_stages=2, profit_multiplier=3.0,
+            profit_target_pct=0.40, stretch_target_pct=0.70,
         )
         df = self._make_df(200, "up")
         result = run_options_backtest("SPY", df, config=cfg)
         assert result.config.initial_capital == 50_000
-        assert result.config.compound_stages == 2
+        assert result.config.profit_target_pct == 0.40
 
     def test_metrics_computed(self):
         from sauce.backtest.options_engine import run_options_backtest
@@ -1124,10 +1197,10 @@ class TestOptionsBacktestEngine:
     def test_equity_curve_starts_at_capital(self):
         from sauce.backtest.options_engine import run_options_backtest
         from sauce.backtest.options_models import OptionsBacktestConfig
-        cfg = OptionsBacktestConfig(initial_capital=10_000)
+        cfg = OptionsBacktestConfig(initial_capital=5_000)
         df = self._make_df(200)
         result = run_options_backtest("SPY", df, config=cfg)
-        assert result.equity_curve[0] == 10_000.0
+        assert result.equity_curve[0] == 5_000.0
 
     def test_rsi_simple(self):
         """Test the internal RSI computation."""

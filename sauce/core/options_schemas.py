@@ -4,8 +4,9 @@ core/options_schemas.py — Pydantic v2 models for the options trading module.
 All models inherit from StrictModel (extra="forbid").
 All include as_of: datetime and prompt_version: str where they cross agent boundaries.
 
-These schemas support the "Double Up & Take Gains" compounding strategy:
-  Entry → Nx profit → close fraction → let rest ride → repeat.
+Strategy: "Momentum Snipe" — high-conviction directional plays with
+realistic profit targets (+35%/+60%), trailing stop, time/DTE stops.
+No compounding ladder.
 """
 
 from __future__ import annotations
@@ -17,31 +18,6 @@ from typing import Literal
 from pydantic import Field, field_validator
 
 from sauce.core.schemas import StrictModel
-
-
-# ── Compound Stage Ladder ─────────────────────────────────────────────────────
-
-class CompoundStage(StrictModel):
-    """
-    One rung of the take-profit ladder.
-
-    stage_num=1, trigger_multiplier=2.0 → sell sell_fraction at 2x entry price.
-    """
-
-    stage_num: int = Field(..., ge=1)
-    trigger_multiplier: float = Field(
-        ..., gt=1.0,
-        description="Price multiplier that triggers this stage (e.g. 2.0 = 100% gain).",
-    )
-    sell_fraction: float = Field(
-        ..., gt=0.0, le=1.0,
-        description="Fraction of remaining qty to sell at this stage.",
-    )
-    trailing_stop_pct: float = Field(
-        default=0.15, ge=0.0, le=1.0,
-        description="Trailing stop as a fraction of current price after this stage triggers.",
-    )
-    completed: bool = Field(default=False)
 
 
 # ── Contract / Position ───────────────────────────────────────────────────────
@@ -68,7 +44,7 @@ class OptionsContract(StrictModel):
 
 
 class OptionsPosition(StrictModel):
-    """Tracks an open options position through the compounding ladder."""
+    """Tracks an open options position through the Momentum Snipe strategy."""
 
     position_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     contract: OptionsContract
@@ -77,8 +53,14 @@ class OptionsPosition(StrictModel):
     remaining_qty: int = Field(..., ge=0, description="Contracts still held")
     direction: Literal["long_call", "long_put"]
     strategy_type: Literal["directional", "debit_spread", "credit_spread"] = "directional"
-    compound_stages: list[CompoundStage] = Field(default_factory=list)
-    stages_completed: int = Field(default=0, ge=0)
+    high_water_price: float | None = Field(
+        default=None,
+        description="Highest mid price observed since entry (for trailing stop).",
+    )
+    trailing_active: bool = Field(
+        default=False,
+        description="Whether the trailing stop has been activated.",
+    )
     realized_pnl: float = Field(default=0.0)
     trailing_stop_price: float | None = None
     entry_time: datetime | None = None
@@ -119,11 +101,10 @@ class OptionsSignal(StrictModel):
     contract: OptionsContract
     direction: Literal["long_call", "long_put"]
     strategy_type: Literal["directional", "debit_spread", "credit_spread"] = "directional"
-    target_multiplier: float = Field(
-        default=2.0, gt=1.0,
-        description="Profit multiplier target per compound stage.",
+    max_position_cost: float = Field(
+        default=0.0, ge=0.0,
+        description="Max $ to spend on this position (used for qty sizing).",
     )
-    compound_stages: int = Field(default=3, ge=1)
     confidence: float = Field(..., ge=0.0, le=1.0)
     reasoning: str = ""
     bear_case: str = ""
@@ -145,11 +126,14 @@ class OptionsOrder(StrictModel):
     order_type: Literal["limit"] = "limit"  # NEVER market orders on options
     limit_price: float = Field(..., gt=0.0)
     time_in_force: Literal["day", "gtc"] = "day"
-    stage: int = Field(
-        default=0, ge=0,
-        description="0 = initial entry, 1+ = compounding exit stage.",
+    source: Literal[
+        "options_entry", "options_exit", "options_stop",
+    ] = "options_entry"
+    exit_type: str = Field(
+        default="",
+        description="Exit reason when source is options_exit/options_stop "
+                    "(e.g. profit_target, trailing_stop, hard_stop).",
     )
-    source: Literal["options_entry", "options_exit", "options_stop"] = "options_entry"
     as_of: datetime
     prompt_version: str
 
@@ -157,14 +141,18 @@ class OptionsOrder(StrictModel):
 # ── Exit Decision ─────────────────────────────────────────────────────────────
 
 class ExitDecision(StrictModel):
-    """Output of the compounding exit engine for a single position."""
+    """Output of the exit engine for a single position."""
 
     action: Literal["HOLD", "PARTIAL_CLOSE", "FULL_CLOSE"]
     qty: int = Field(default=0, ge=0)
     reason: str = ""
+    exit_type: str = Field(
+        default="",
+        description="Machine-readable exit type: profit_target, stretch_target, "
+                    "trailing_stop, hard_stop, time_stop, dte_stop, regime_stop.",
+    )
     set_trailing_stop: bool = False
     trailing_stop_pct: float = Field(default=0.0, ge=0.0, le=1.0)
-    stage: int = Field(default=0, ge=0)
 
 
 # ── Options Quote (from broker) ───────────────────────────────────────────────
