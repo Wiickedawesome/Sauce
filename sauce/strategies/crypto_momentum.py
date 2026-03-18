@@ -3,21 +3,25 @@ strategies/crypto_momentum.py — Crypto Momentum Reversion strategy.
 
 Phase 1 strategy ($1K–$10K). Trades BTC/USD, ETH/USD, SOL/USD on 5-minute cadence.
 
-Four scoring conditions (max 100 points):
-  1. RSI(14) below 35              → 30 pts  (oversold bounce setup)
-  2. Price at/below lower BB(2.5)  → 25 pts  (statistical support zone)
-  3. MACD histogram rising vs 3 bars ago → 25 pts  (momentum confirming reversal)
-  4. Volume ratio above 1.5×       → 20 pts  (above-average participation)
+Five scoring conditions (max 100 points):
+  1. RSI(14) below 42              → 25 pts  (oversold bounce setup)
+  2. Price in lower 25% of BB(2.0) → 20 pts  (statistical support zone)
+  3. MACD histogram negative       → 15 pts  (confirms dip — aligned with mean reversion)
+  4. MACD momentum shift           → 20 pts  (MACD line > signal, or histogram > 0)
+  5. Volume ratio above 1.3×       → 20 pts  (above-average participation)
 
-Threshold: base 65, shifted by regime (bullish -10, bearish +10).
+Threshold: base 50, shifted by regime (bullish -5, bearish +10).
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sauce.core.schemas import Indicators, Order
 from sauce.strategy import ExitPlan, Position, SignalResult, TierParams
+
+logger = logging.getLogger(__name__)
 
 
 class CryptoMomentumReversion:
@@ -27,26 +31,27 @@ class CryptoMomentumReversion:
     instruments: list[str] = ["BTC/USD", "ETH/USD", "SOL/USD"]
 
     # Scoring condition thresholds
-    RSI_OVERSOLD = 35
-    RSI_POINTS = 30
+    RSI_OVERSOLD = 42
+    RSI_POINTS = 25
 
-    BB_STD = 2.5  # Bollinger Band width in std devs
-    BB_POINTS = 25
+    BB_PROXIMITY = 0.25  # price in lower 25% of Bollinger Band range
+    BB_POINTS = 20
 
-    MACD_POINTS = 25
+    MACD_DIP_POINTS = 15       # histogram negative (confirms oversold dip)
+    MACD_MOMENTUM_POINTS = 20  # histogram positive or MACD line > signal (reversal confirmed)
 
-    VOLUME_RATIO_MIN = 1.5
+    VOLUME_RATIO_MIN = 1.3
     VOLUME_POINTS = 20
 
-    BASE_THRESHOLD = 65
-    REGIME_SHIFT = {"bullish": -10, "neutral": 0, "bearish": 10}
+    BASE_THRESHOLD = 50
+    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 10}
 
     def eligible(self, instrument: str, regime: str) -> bool:
         """Crypto trades 24/7 in all regimes."""
         return instrument in self.instruments
 
     def score(self, indicators: Indicators, instrument: str, regime: str, current_price: float) -> SignalResult:
-        """Score the signal from 0–100 based on four conditions."""
+        """Score the signal from 0–100 based on five conditions."""
         points = 0
 
         # Condition 1: RSI(14) below oversold threshold
@@ -54,19 +59,21 @@ class CryptoMomentumReversion:
         if rsi_14 is not None and rsi_14 < self.RSI_OVERSOLD:
             points += self.RSI_POINTS
 
-        # Condition 2: Price at or below lower Bollinger Band
-        # bb_pct: 0.0 when price is at the lower band, 1.0 at the upper band
+        # Condition 2: Price in lower portion of Bollinger Bands
         bb_pct = _compute_bb_pct(indicators, current_price)
-        if bb_pct is not None and bb_pct <= 0.0:
+        if bb_pct is not None and bb_pct <= self.BB_PROXIMITY:
             points += self.BB_POINTS
 
-        # Condition 3: MACD histogram positive or rising
-        # We use the histogram value directly — positive means momentum shifting up
+        # Condition 3: MACD histogram negative (confirms we're in a dip — aligns with mean reversion)
         macd_hist = indicators.macd_histogram
-        if macd_hist is not None and macd_hist > 0:
-            points += self.MACD_POINTS
+        if macd_hist is not None and macd_hist < 0:
+            points += self.MACD_DIP_POINTS
 
-        # Condition 4: Volume ratio above 1.5× average
+        # Condition 4: Momentum shift — MACD line crossing above signal (or histogram turned positive)
+        if macd_hist is not None and macd_hist > 0:
+            points += self.MACD_MOMENTUM_POINTS
+
+        # Condition 5: Volume ratio above average (participation confirming the move)
         vol_ratio = indicators.volume_ratio
         if vol_ratio is not None and vol_ratio >= self.VOLUME_RATIO_MIN:
             points += self.VOLUME_POINTS
@@ -77,6 +84,13 @@ class CryptoMomentumReversion:
 
         fired = points >= threshold
         side = "buy" if fired else "hold"
+
+        logger.info(
+            "SCORE %s: %d/%d (RSI=%.1f BB=%.2f MACD=%.2f Vol=%.2f) regime=%s",
+            instrument, points, threshold,
+            rsi_14 or 0, bb_pct if bb_pct is not None else -1,
+            macd_hist or 0, vol_ratio or 0, regime,
+        )
 
         return SignalResult(
             symbol=instrument,

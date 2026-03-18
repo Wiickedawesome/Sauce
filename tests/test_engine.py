@@ -119,56 +119,72 @@ class TestCryptoMomentumReversion:
 
     def test_no_conditions_met(self):
         """No scoring conditions met → score 0, not fired."""
-        ind = _make_indicators(rsi_14=50, volume_ratio=1.0, macd_histogram=-1.0)
+        ind = _make_indicators(rsi_14=50, volume_ratio=1.0, macd_histogram=0.0)
         result = self.strategy.score(ind, "BTC/USD", "neutral", 100.0)
         assert result.score == 0
         assert not result.fired
         assert result.side == "hold"
 
     def test_rsi_oversold_only(self):
-        """RSI < 35 → 30 pts, below threshold → not fired."""
+        """RSI < 42 → 25 pts + MACD dip 15 pts = 40, below threshold 50 → not fired."""
         ind = _make_indicators(rsi_14=30, volume_ratio=1.0, macd_histogram=-1.0)
         result = self.strategy.score(ind, "BTC/USD", "neutral", 100.0)
-        assert result.score == 30
+        assert result.score == 40  # RSI 25 + MACD dip 15
         assert not result.fired
 
     def test_all_conditions_met(self):
-        """All 4 conditions → 100 pts, definitely fired."""
+        """All non-contradictory conditions → max pts, definitely fired."""
         ind = _make_indicators(
             rsi_14=20,
             bb_upper=110.0,
             bb_lower=95.0,
-            macd_histogram=0.5,
+            macd_histogram=-0.5,  # negative = dip confirmed (15 pts)
             volume_ratio=2.0,
         )
-        # Price at lower band → bb_pct ≤ 0
+        # Price below lower band → bb_pct < 0 (in lower 25%)
         result = self.strategy.score(ind, "ETH/USD", "neutral", 90.0)
-        assert result.score == 100
+        # RSI 25 + BB 20 + MACD dip 15 + Vol 20 = 80
+        assert result.score == 80
+        assert result.fired
+        assert result.side == "buy"
+
+    def test_all_conditions_with_momentum_shift(self):
+        """MACD positive = momentum shift (20 pts), not dip (0 pts)."""
+        ind = _make_indicators(
+            rsi_14=20,
+            bb_upper=110.0,
+            bb_lower=95.0,
+            macd_histogram=0.5,  # positive = momentum shift (20 pts)
+            volume_ratio=2.0,
+        )
+        result = self.strategy.score(ind, "ETH/USD", "neutral", 90.0)
+        # RSI 25 + BB 20 + MACD momentum 20 + Vol 20 = 85
+        assert result.score == 85
         assert result.fired
         assert result.side == "buy"
 
     def test_regime_bullish_lowers_threshold(self):
-        """Bullish regime → threshold 55, easier to fire."""
+        """Bullish regime → threshold 45, easier to fire."""
         ind = _make_indicators(
-            rsi_14=30,          # 30 pts
-            macd_histogram=0.5,  # 25 pts → total 55
+            rsi_14=30,           # 25 pts (RSI < 42)
+            macd_histogram=0.5,  # 20 pts (momentum shift)
             volume_ratio=1.0,
         )
         result = self.strategy.score(ind, "BTC/USD", "bullish", 100.0)
-        assert result.threshold == 55
-        assert result.score == 55
+        assert result.threshold == 45
+        assert result.score == 45
         assert result.fired
 
     def test_regime_bearish_raises_threshold(self):
-        """Bearish regime → threshold 75, harder to fire."""
+        """Bearish regime → threshold 60, harder to fire."""
         ind = _make_indicators(
-            rsi_14=30,          # 30 pts
-            macd_histogram=0.5,  # 25 pts → total 55
+            rsi_14=30,           # 25 pts (RSI < 42)
+            macd_histogram=0.5,  # 20 pts (momentum shift)
             volume_ratio=1.0,
         )
         result = self.strategy.score(ind, "BTC/USD", "bearish", 100.0)
-        assert result.threshold == 75
-        assert result.score == 55
+        assert result.threshold == 60
+        assert result.score == 45
         assert not result.fired
 
     def test_bb_pct_at_lower(self):
@@ -202,6 +218,21 @@ class TestCryptoMomentumReversion:
         assert result.strategy_name == "crypto_momentum_reversion"
         assert result.rsi_14 == 25
         assert result.volume_ratio == 2.0
+
+    def test_mean_reversion_typical_scenario(self):
+        """Typical mean reversion setup: oversold + dip confirmed + volume."""
+        ind = _make_indicators(
+            rsi_14=38,           # 25 pts (below 42)
+            bb_upper=110.0,
+            bb_lower=95.0,
+            macd_histogram=-2.0,  # 15 pts (dip confirmed)
+            volume_ratio=1.5,     # 20 pts (volume spike)
+        )
+        # Price at lower band area → bb_pct ~ 0.0
+        result = self.strategy.score(ind, "BTC/USD", "bearish", 95.0)
+        # RSI 25 + BB 20 + MACD dip 15 + Vol 20 = 80, threshold 60
+        assert result.score == 80
+        assert result.fired
 
     def test_build_order_sizing(self):
         """Order size = tier.max_position_pct × equity / ask."""
