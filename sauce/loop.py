@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
-from sauce.adapters.market_data import get_history, get_quote
+from sauce.adapters.market_data import MarketDataError, get_history, get_quote
 from sauce.core.config import get_settings
 from sauce.core.schemas import Order
 from sauce.exit_monitor import evaluate_exit
@@ -85,6 +85,72 @@ def _fetch_indicators(symbol: str, is_crypto: bool):
     if df is None or df.empty:
         return None
     return compute_all(df, is_crypto=is_crypto)
+
+
+def _gather_brief_data() -> dict:
+    """Fetch real market data for the morning brief.
+
+    Returns dict with keys: btc_change, eth_change, spy_change, vix, btc_rsi.
+    Each value has a sensible fallback if its specific API call fails.
+    """
+    result: dict = {
+        "btc_change": 0.0,
+        "eth_change": 0.0,
+        "spy_change": 0.0,
+        "vix": 0.0,
+        "btc_rsi": 50.0,
+    }
+
+    # BTC 24h % change
+    try:
+        df = get_history("BTC/USD", timeframe="1Hour", bars=24)
+        if df is not None and len(df) >= 2:
+            first_close = float(df["close"].iloc[0])
+            last_close = float(df["close"].iloc[-1])
+            if first_close > 0:
+                result["btc_change"] = (last_close - first_close) / first_close
+    except MarketDataError:
+        logger.warning("Failed to fetch BTC history for morning brief")
+
+    # ETH 24h % change
+    try:
+        df = get_history("ETH/USD", timeframe="1Hour", bars=24)
+        if df is not None and len(df) >= 2:
+            first_close = float(df["close"].iloc[0])
+            last_close = float(df["close"].iloc[-1])
+            if first_close > 0:
+                result["eth_change"] = (last_close - first_close) / first_close
+    except MarketDataError:
+        logger.warning("Failed to fetch ETH history for morning brief")
+
+    # SPY daily % change (equity — may fail outside market hours, that's okay)
+    try:
+        df = get_history("SPY", timeframe="1Day", bars=2)
+        if df is not None and len(df) >= 2:
+            prev_close = float(df["close"].iloc[-2])
+            last_close = float(df["close"].iloc[-1])
+            if prev_close > 0:
+                result["spy_change"] = (last_close - prev_close) / prev_close
+    except MarketDataError:
+        logger.warning("Failed to fetch SPY history for morning brief")
+
+    # VIX — use CBOE VIX ETN (VIXY) mid-price as proxy if direct VIX unavailable
+    try:
+        quote = get_quote("VIXY")
+        if quote and quote.mid > 0:
+            result["vix"] = quote.mid
+    except MarketDataError:
+        logger.warning("Failed to fetch VIX proxy for morning brief")
+
+    # BTC RSI(14) from hourly bars
+    try:
+        indicators = _fetch_indicators("BTC/USD", is_crypto=True)
+        if indicators and indicators.rsi_14 is not None:
+            result["btc_rsi"] = indicators.rsi_14
+    except MarketDataError:
+        logger.warning("Failed to fetch BTC RSI for morning brief")
+
+    return result
 
 
 # ── Entry Scan ────────────────────────────────────────────────────────────────
@@ -181,9 +247,10 @@ def _scan_entries(regime: str, account: dict, open_positions: list[Position]) ->
 # ── Exit Scan ─────────────────────────────────────────────────────────────────
 
 
-def _scan_exits(open_positions: list[Position]) -> None:
+def _scan_exits(open_positions: list[Position], equity: float) -> None:
     """Check exit conditions for each open position."""
     today = _today()
+    tier = get_tier_params(equity)
 
     for position in open_positions:
         if _shutdown:
@@ -202,7 +269,6 @@ def _scan_exits(open_positions: list[Position]) -> None:
             strategy = _find_strategy(position.strategy_name)
             if strategy is None:
                 continue
-            tier = get_tier_params(0)  # use seed defaults for exit params
             plan = strategy.build_exit_plan(position, tier)
 
             exit_signal, updated_pos = evaluate_exit(
@@ -275,9 +341,13 @@ async def run_loop() -> None:
         try:
             # Morning brief: once per day
             if today != last_brief_date and _hour_et() >= 7:
+                brief_data = _gather_brief_data()
                 regime = await get_regime(
-                    btc_change=0.0, eth_change=0.0, spy_change=0.0,
-                    vix=20.0, btc_rsi=50.0,
+                    btc_change=brief_data["btc_change"],
+                    eth_change=brief_data["eth_change"],
+                    spy_change=brief_data["spy_change"],
+                    vix=brief_data["vix"],
+                    btc_rsi=brief_data["btc_rsi"],
                     loop_id=cycle_id,
                 )
                 last_brief_date = today
@@ -302,7 +372,7 @@ async def run_loop() -> None:
 
             # Exit scan
             if open_positions:
-                _scan_exits(open_positions)
+                _scan_exits(open_positions, equity)
 
             logger.info(
                 "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",
