@@ -5,7 +5,7 @@
 # Run:    docker compose -f docker/docker-compose.yml up -d
 #
 # The image installs cron and sets up the loop schedule from
-# LOOP_INTERVAL_MINUTES (default 30) at container start.
+# LOOP_INTERVAL_MINUTES (default 5) at container start.
 # All output goes to /app/data/logs/cron.log (mounted volume).
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ RUN touch /etc/cron.d/sauce && chmod 0644 /etc/cron.d/sauce
 RUN chmod +x /app/scripts/run_loop.sh
 
 # ── Health check ──────────────────────────────────────────────────────────────
-# Confirm cron is running AND that a loop has completed within the last 35
+# Confirm cron is running AND that a loop has completed within the last 15
 # minutes (just over 2 cron cycles). Queries the audit DB for the most recent
 # loop_end event.
 HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \
@@ -61,4 +61,4 @@ HEALTHCHECK --interval=5m --timeout=10s --start-period=5m --retries=3 \
 # Cron does NOT inherit the container's environment variables. We dump them to
 # a file that run_loop.sh sources before running the Python process.
 # Only whitelisted variable names are exported to avoid leaking shell internals.
-CMD ["sh", "-c", "env | grep -E '^(ALPACA_|LLM_|ANTHROPIC_|DB_PATH|TRADING_|DATA_|HEARTBEAT_|WEBHOOK_|LOOP_INTERVAL|TZ=|MAX_|MIN_|SCREENER_|PROMPT_|CONFIRM_|ALLOW_|STOP_|PROFIT_|OVER_|ANNUAL_|PERFORMANCE_|EARNINGS_|OPTIONS_)' > /etc/environment.sauce && INTERVAL=${LOOP_INTERVAL_MINUTES:-30} && printf \"*/${INTERVAL} * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1\n\" > /etc/cron.d/sauce && chmod 0644 /etc/cron.d/sauce && /app/.venv/bin/python /app/scripts/log_container_start.py && cron && tail -F /app/data/logs/cron.log"]
+CMD ["sh", "-c", "env | grep -E '^(ALPACA_|LLM_|ANTHROPIC_|DB_PATH|TRADING_|DATA_|HEARTBEAT_|WEBHOOK_|LOOP_INTERVAL|TZ=|MAX_|MIN_|SCREENER_|PROMPT_|CONFIRM_|ALLOW_|STOP_|PROFIT_|OVER_|ANNUAL_|PERFORMANCE_|EARNINGS_|OPTIONS_|SIGNAL_|TRAIL_|RSI_EXHAUSTION|HOLD_|TIME_STOP_)' > /etc/environment.sauce && INTERVAL=${LOOP_INTERVAL_MINUTES:-5} && printf \"*/${INTERVAL} * * * * root /app/scripts/run_loop.sh >> /app/data/logs/cron.log 2>&1\n\" > /etc/cron.d/sauce && chmod 0644 /etc/cron.d/sauce && /app/.venv/bin/python /app/scripts/log_container_start.py && cron && tail -F /app/data/logs/cron.log"]

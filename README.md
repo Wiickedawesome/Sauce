@@ -2,7 +2,7 @@
 
 # SAUCE
 
-**Personal multi-agent AI-driven trading system**
+**Personal AI-driven trading system**
 
 <br/>
 
@@ -12,7 +12,7 @@
 ![DB](https://img.shields.io/badge/Database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)
 ![Docker](https://img.shields.io/badge/Deploy-Docker-2496ed?style=flat-square&logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPLv3-22c55e?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-976%20passed-22c55e?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-168%20passed-22c55e?style=flat-square)
 ![Paper](https://img.shields.io/badge/Mode-Paper%20First-f59e0b?style=flat-square)
 
 <br/>
@@ -21,22 +21,18 @@
 
 ---
 
-Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 15-minute cron cadence. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities, crypto, and options, and SQLite as an append-only audit database. No machine learning. No training.
+Sauce is an autonomous trading system that runs on a VPS on a cron cadence. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities and crypto, and SQLite for trade logging and audit. No machine learning. No training.
 
 ---
 
 ## Key Features
 
-- **8-layer safety gauntlet** — data freshness, market hours, regime gate, setup scanner, Claude audit, risk check, bull/bear debate, supervisor veto
-- **Claude as auditor** — the rule engine generates trade theses; Claude reviews them for contradictions
-- **Multi-timeframe signal engine** — confluence scoring across 5m, 15m, 1h, 4h, 1d with weighted S1–S4 signal tiers
 - **Technical indicator library** — RSI, MACD, Bollinger Bands, ATR, VWAP, SMA, Stochastic, volume ratio (via pandas-ta)
-- **Bull/Bear debate layer** — deterministic adversarial arguments for/against every trade, forwarded to the Supervisor
-- **Options trading** — "Double Up & Take Gains" compounding strategy with multi-stage profit targets, IV/delta/DTE safety gates, and dedicated exit engine
-- **Backtesting engine** — vectorized bar-replay with ATR-based stop-loss and take-profit, plus dedicated options backtest engine with delta+theta pricing model
-- **Memory & RAG** — session memory (resets daily) + strategic memory (persistent). Top-K similar past trades retrieved and injected into Claude's prompt for confidence calibration
-- **Exit management** — active position monitoring with trailing stops, regime-flip detection, and options compound-stage exit engine
-- **976 tests, zero real API calls** — full test coverage with no external dependencies
+- **Strategy framework** — pluggable strategies with signal generation and LLM-assisted analysis
+- **Risk management** — position limits, portfolio exposure caps, daily loss circuit breakers, ATR-based volatility gates, spread/liquidity checks
+- **Exit monitoring** — active position monitoring with trailing stops, time stops, RSI exhaustion, profit targets
+- **Morning brief** — LLM-generated market context at session start
+- **168 tests, zero real API calls** — full test coverage with no external dependencies
 - **Paper-first default** — live trading requires explicit opt-in
 - **Append-only SQLite audit log** — full forensic trail of every decision
 
@@ -46,25 +42,17 @@ Sauce is a fully autonomous, multi-agent trading system that runs on a VPS on a 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                       SAUCE LOOP (every 15min)                      │
+│                       SAUCE LOOP (cron cadence)                     │
 ├──────────────┬───────────────────────────────────────────────────────┤
-│  Session Boot│  Init day, load economic calendar, macro suppression  │
-│  Mkt Context │  SPY bars → regime classification → narrative         │
-│  Research    │  Indicators → multi-TF confluence → RAG retrieval →   │
-│              │  setup scanner → Claude audit (temp 0.3)              │
-│  Risk        │  Position limits, exposure, daily loss checks         │
-│  Debate      │  Deterministic bull/bear arguments, confidence adj    │
-│  Execution   │  Live quote → price validation → order construction   │
-│  Supervisor  │  Hard pre-flight + Claude veto (temp 0.2)             │
-│  Exit Mgmt   │  Open position evaluation, trailing stops             │
-│  Options     │  Research → safety gates → entry/exit → compound      │
-│              │  stage management (feature-flagged)                    │
-│  Broker      │  Place orders + companion stop-loss                   │
-│  Ops         │  Audit trail, anomaly detection, circuit breakers     │
+│  Morning Brief  Market context via LLM                              │
+│  Strategy       Indicators → signal generation → LLM analysis       │
+│  Risk           Position limits, exposure, volatility, liquidity    │
+│  Execution      Live quote → price validation → order construction  │
+│  Exit Monitor   Trailing stops, time stops, profit targets          │
+│  Broker         Place orders via Alpaca                             │
+│  Audit          Append-only event log                               │
 └──────────────┴───────────────────────────────────────────────────────┘
 ```
-
-See [docs/architecture.md](docs/architecture.md) for the full pipeline breakdown.
 
 ---
 
@@ -72,69 +60,30 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline breakdown
 
 ```
 sauce/
+  loop.py              Main orchestration loop
+  strategy.py          Strategy runner + signal generation
+  risk.py              Risk checks + position sizing
+  exit_monitor.py      Exit signal evaluation for open positions
+  morning_brief.py     LLM-generated market context
+  db.py                Trade/position/signal tables (new engine)
+  strategies/
+    crypto_momentum.py Crypto momentum strategy implementation
   adapters/
     broker.py          Alpaca order placement + account queries
     market_data.py     Bars, quotes, snapshots via Alpaca Data API
-    options_data.py    Options chain, quotes, greeks via Alpaca Options API
     llm.py             Claude via Anthropic API (with retry + back-off)
-    db.py              SQLite engine, audit log, signal/order/options writers
-    notify.py          Alert dispatch
-  agents/
-    session_boot.py    Day-start initialization + calendar suppression
-    market_context.py  Regime classification + intraday narrative
-    research.py        Signal generation (Claude auditor role)
-    risk.py            Risk checks + position sizing
-    execution.py       Order construction + price validation
-    debate.py          Deterministic bull/bear debate engine
-    exit_research.py   Exit signal evaluation for open positions
-    options_research.py Options signal generation (Claude)
-    options_execution.py Options order construction
-    options_exit.py    Options compound-stage exit engine
-    supervisor.py      Final approval gate (Claude)
-    portfolio.py       Portfolio analysis
-    ops.py             Operational health checks
+    db.py              SQLite engine, audit log
+    utils.py           Shared adapter utilities
   core/
     config.py          Pydantic v2 settings — single source of truth
-    schemas.py         All typed models: Signal, Order, AuditEvent, ...
-    safety.py          TRADING_PAUSE, staleness, daily loss, market hours
-    loop.py            Main orchestration loop
-    setups.py          Deterministic setup scanner (hard/soft scoring)
-    regime.py          Market regime classifier
-    capital.py         Capital tier system
-    calendar.py        Economic calendar + earnings blackout suppression
-    nav.py             NAV tracking + high-water mark
-    metrics.py         Performance metrics calculations
-    screener.py        Dynamic equity screening from full Alpaca market
-    options_schemas.py Pydantic models: OptionsPosition, ExitDecision, ...
-    options_config.py  Options settings (IV, DTE, delta, stages)
-    options_safety.py  7 safety gates: IV rank, DTE, spread, delta, exposure
-    validation.py      Input validation helpers
+    schemas.py         Typed models: Order, AuditEvent, Indicators, ...
   indicators/
     core.py            RSI, MACD, BB, ATR, VWAP, SMA, Stochastic, vol ratio
-  signals/
-    timeframes.py      Multi-TF OHLCV fetch + indicators (5m–1d)
-    confluence.py      Weighted confluence scoring + signal tiers (S1–S4)
-  backtest/
-    models.py          BacktestConfig, BacktestResult, BacktestTrade
-    engine.py          Vectorized bar-replay backtesting
-    options_models.py  Options backtest dataclasses + exit reasons
-    options_engine.py  Options bar-replay engine (delta+theta pricing)
-  memory/
-    db.py              Session + strategic memory ORM, RAG retrieval
-    learning.py        Post-trade outcome recording
-    options_learning.py  Options post-trade analytics + win rate drift
-    narrative.py       Intraday narrative builder
-  prompts/
-    context.py         Memory → plain English context builders
-    research.py        Research agent system + user prompt templates
-    execution.py       Execution agent prompt templates
-    supervisor.py      Supervisor agent prompt templates
-    utils.py           Shared prompt formatting utilities
 
-tests/                 976 tests, zero real API calls
+tests/                 168 tests, zero real API calls
 scripts/               Cron entry, health checks, diagnostics
 docker/                Dockerfile + docker-compose.yml
-docs/                  Architecture, features, deployment guides
+docs/                  Deployment guide, indicator reference
 ```
 
 ---
@@ -162,7 +111,7 @@ cp .env.example .env
 
 ## Configuration
 
-All configuration lives in `.env`. No value is hardcoded in agent or adapter code.
+All configuration lives in `.env`. No value is hardcoded in source code.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -172,24 +121,13 @@ All configuration lives in `.env`. No value is hardcoded in agent or adapter cod
 | `ANTHROPIC_API_KEY` | — | Required. Anthropic API key |
 | `LLM_MODEL` | `claude-sonnet-4-6` | Anthropic model name |
 | `TRADING_UNIVERSE_EQUITIES` | `AAPL,MSFT,GOOGL,...` | Comma-separated tickers |
-| `TRADING_UNIVERSE_CRYPTO` | `BTC/USD,ETH/USD` | Alpaca crypto pairs |
-| `MAX_POSITION_PCT` | `0.08` | Max allocation per symbol (fraction of NAV) |
+| `TRADING_UNIVERSE_CRYPTO` | `BTC/USD,ETH/USD,...` | Alpaca crypto pairs |
+| `MAX_POSITION_PCT` | `0.08` | Max allocation per symbol |
 | `MAX_PORTFOLIO_EXPOSURE` | `1.0` | Max total exposure (1.0 = no leverage) |
 | `MAX_DAILY_LOSS_PCT` | `0.03` | Auto-pause threshold (3% daily drawdown) |
-| `MIN_CONFIDENCE` | `0.40` | Signals below this are treated as hold |
-| `DATA_TTL_SECONDS` | `120` | Max age of market data before it is considered stale |
-| `MAX_PRICE_DEVIATION` | `0.01` | Execution vetoes if live quote deviates > 1% |
 | `TRADING_PAUSE` | `false` | Set `true` to halt all trading immediately |
-| `PROMPT_VERSION` | `v1` | Stamped on every LLM call for auditability |
-| `OPTIONS_ENABLED` | `false` | Enable options trading pipeline |
-| `OPTION_IV_RANK_MIN` | `0.25` | Minimum IV rank to enter an options trade |
-| `OPTION_DTE_MIN` | `14` | Minimum days to expiration |
-| `OPTION_DTE_MAX` | `60` | Maximum days to expiration |
-| `OPTION_DELTA_MIN` | `0.25` | Minimum absolute delta |
-| `OPTION_DELTA_MAX` | `0.55` | Maximum absolute delta |
-| `OPTION_MAX_SPREAD_PCT` | `0.05` | Max bid-ask spread as pct of mid |
-| `OPTION_PROFIT_TARGET_MULT` | `2.0` | Multiplier for compound profit stages |
-| `OPTION_MAX_LOSS_PCT` | `0.50` | Hard stop: max loss per position |
+
+See `sauce/core/config.py` for the complete list of configuration options.
 
 ---
 
@@ -197,7 +135,7 @@ All configuration lives in `.env`. No value is hardcoded in agent or adapter cod
 
 ```bash
 # Run one loop cycle
-python -m sauce.core.loop
+python -m sauce.loop
 
 # Run tests
 pytest
@@ -232,14 +170,7 @@ See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 
 | Doc | Description |
 |---|---|
-| [Architecture](docs/architecture.md) | Full pipeline, module map, design principles |
 | [Indicators](docs/indicators.md) | Technical indicator library reference |
-| [Signals](docs/signals.md) | Multi-timeframe engine, confluence scoring, signal tiers |
-| [Backtesting](docs/backtesting.md) | Bar-replay engine, configuration, exit reasons |
-| [Options](docs/options.md) | Options trading strategy, safety gates, compound exits |
-| [Debate](docs/debate.md) | Bull/bear debate layer, arguments, integration |
-| [Memory & RAG](docs/memory.md) | Session/strategic memory, similar trade retrieval |
-| [Safety & Risk](docs/safety.md) | 8-layer gauntlet, risk parameters, anomaly detection |
 | [Deployment](docs/deployment.md) | Docker setup, environment variables, operations |
 
 ---

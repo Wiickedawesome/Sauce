@@ -57,7 +57,6 @@ docker/
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
 | `LLM_MODEL` | No | `claude-sonnet-4-6` | Anthropic model name |
 | `TRADING_PAUSE` | No | `false` | Emergency kill switch |
-| `OPTIONS_ENABLED` | No | `false` | Enable options trading pipeline |
 | `DB_PATH` | No | `data/sauce.db` | SQLite database path |
 
 See `sauce/core/config.py` for the complete list of configuration options.
@@ -76,9 +75,6 @@ docker compose restart
 
 # Health check
 docker exec sauce python scripts/docker_healthcheck.py
-
-# Resume after pause
-python scripts/resume_trading.py
 
 # Diagnostics
 python scripts/diagnose.py

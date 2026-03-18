@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # scripts/run_loop.sh — Cron entrypoint for the Sauce trading loop.
 #
-# Invoked by cron at LOOP_INTERVAL_MINUTES cadence (default 30).
+# Invoked by cron at LOOP_INTERVAL_MINUTES cadence (default 5).
 #
 # Contract:
 #   - Logs a timestamped START and END line on every run.
@@ -67,7 +67,7 @@ fi
 # Cron should never see a failure exit code here — that would trigger alert
 # noise without adding information (errors are in the DB, not cron's job).
 exit_code=0
-python -m sauce.core.loop || exit_code=$?
+python -m sauce.loop || exit_code=$?
 
 if [[ "${exit_code}" -ne 0 ]]; then
     echo "[$(ts)] WARNING: loop exited with code ${exit_code} — check audit DB for details"

@@ -34,8 +34,6 @@ class Settings(BaseSettings):
     # ── LLM ───────────────────────────────────────────────────────────────────
     anthropic_api_key: str = Field(..., repr=False, description="Anthropic API key")
     llm_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model name")
-    research_temperature: float = Field(default=0.3, ge=0.0, le=2.0, description="LLM temperature for research agent")
-    supervisor_temperature: float = Field(default=0.2, ge=0.0, le=2.0, description="LLM temperature for supervisor agent")
 
     # ── Trading Universe ──────────────────────────────────────────────────────
     trading_universe_equities: str = Field(
@@ -141,25 +139,6 @@ class Settings(BaseSettings):
                     "to avoid excessive market impact (Finding 2.5).",
     )
 
-    # ── Earnings blackout parameters (Finding 2.6) ────────────────────────────
-    earnings_blackout_days: int = Field(
-        default=1, ge=0,
-        description="Number of calendar days before and after a scheduled earnings "
-                    "announcement to suppress trading signals for that symbol (Finding 2.6).",
-    )
-
-    # ── Fund Fee Parameters ───────────────────────────────────────────────────
-    annual_management_fee_pct: float = Field(
-        default=0.01, ge=0.0, le=0.10,
-        description="Annual management fee as a decimal (e.g. 0.01 = 1%). "
-                    "Accrued daily as equity × rate / 252.",
-    )
-    performance_fee_pct: float = Field(
-        default=0.20, ge=0.0, le=0.50,
-        description="Performance fee rate above the high-water mark (e.g. 0.20 = 20%). "
-                    "Applied only when ending NAV exceeds the prior high-water mark.",
-    )
-
     # ── Data Feed ─────────────────────────────────────────────────────────────
     data_feed: str = Field(
         default="iex",
@@ -172,92 +151,55 @@ class Settings(BaseSettings):
 
     # ── Loop Cadence ──────────────────────────────────────────────────────────
     loop_interval_minutes: int = Field(
-        default=30, ge=5, le=60,
-        description="Cron loop cadence in minutes. Set to 15 for fast mode or "
-                    "30 for cost-saving mode. The Dockerfile CMD reads this at "
-                    "container start to write the cron schedule.",
+        default=5, ge=1, le=60,
+        description="Loop cadence in minutes. Default is 5.",
+    )
+
+    # ── Signal Scoring ────────────────────────────────────────────────────────
+    signal_threshold_base: int = Field(
+        default=65, ge=0, le=100,
+        description="Base threshold for signal scoring (0–100). "
+                    "Regime shift adjusts this: bullish −10, bearish +10.",
+    )
+    stop_loss_pct: float = Field(
+        default=0.03, ge=0.0, le=0.50,
+        description="Hard stop-loss as a fraction of entry price (3%).",
+    )
+    trail_activation_pct: float = Field(
+        default=0.03, ge=0.0, le=0.50,
+        description="Gain required to activate trailing stop (3%).",
+    )
+    trail_pct: float = Field(
+        default=0.02, ge=0.0, le=0.50,
+        description="Trailing stop distance below high water mark (2%).",
+    )
+    profit_target_pct: float = Field(
+        default=0.06, ge=0.0, le=1.0,
+        description="Take-profit target as a fraction of entry price (6%).",
+    )
+    rsi_exhaustion_threshold: float = Field(
+        default=72.0, ge=50.0, le=100.0,
+        description="RSI level at which to exit for momentum exhaustion.",
+    )
+    max_hold_hours: float = Field(
+        default=48.0, ge=1.0,
+        description="Maximum hours to hold a position before time-stop check.",
+    )
+    time_stop_min_gain: float = Field(
+        default=0.01, ge=0.0, le=1.0,
+        description="Minimum gain required to survive a time stop (1%).",
     )
 
     # ── Safety ────────────────────────────────────────────────────────────────
     trading_pause: bool = Field(default=False)
-    options_enabled: bool = Field(
-        default=False,
-        description="Master switch for the options module. "
-                    "Must be explicitly set to True to allow options trading.",
-    )
     confirm_live_trading: str = Field(
         default="",
         description="Must be set to 'LIVE-TRADING-CONFIRMED' when alpaca_paper=False. "
                     "Prevents accidental live-money trading.",
     )
-    loop_timeout_seconds: int = Field(
-        default=0, ge=0,
-        description="Maximum seconds a single loop iteration may run before being "
-                    "cancelled. 0 = auto (loop_interval_minutes × 50 seconds).",
-    )
-    stale_order_cancel_minutes: int = Field(
-        default=0, ge=0,
-        description="Cancel any open (unfilled) orders older than this many minutes "
-                    "at the start of each loop run. 0 = auto (loop_interval_minutes).",
-    )
-
-    @property
-    def effective_loop_timeout(self) -> int:
-        """Loop timeout in seconds, auto-derived from interval if not set."""
-        if self.loop_timeout_seconds > 0:
-            return self.loop_timeout_seconds
-        return self.loop_interval_minutes * 50
-
-    @property
-    def effective_stale_order_minutes(self) -> int:
-        """Stale order cancel threshold, auto-derived from interval if not set."""
-        if self.stale_order_cancel_minutes > 0:
-            return self.stale_order_cancel_minutes
-        return self.loop_interval_minutes
-
-    # ── Screener ──────────────────────────────────────────────────────────────
-    screener_enabled: bool = Field(
-        default=False,
-        description="Enable dynamic equity screening from the full Alpaca market. "
-                    "When True, the screener runs at the start of each loop to find "
-                    "the top-N equity candidates. Crypto uses the .env list as-is.",
-    )
-    screener_max_candidates: int = Field(
-        default=30, ge=1,
-        description="Maximum number of equity symbols the screener passes to research.",
-    )
-    screener_min_dollar_volume: float = Field(
-        default=5_000_000.0, ge=0.0,
-        description="Minimum estimated daily dollar volume to qualify for screening.",
-    )
-    screener_price_min: float = Field(
-        default=5.0, ge=0.0,
-        description="Minimum last-trade price for screener eligibility.",
-    )
-    screener_price_max: float = Field(
-        default=5000.0, ge=0.0,
-        description="Maximum last-trade price for screener eligibility.",
-    )
-
-    # ── Prompt Tuning ─────────────────────────────────────────────────────────
-    max_reasoning_len: int = Field(
-        default=500, ge=50, le=5000,
-        description="Maximum character length for LLM reasoning text embedded "
-                    "in downstream prompts (sanitize_llm_text truncation limit).",
-    )
 
     # ── Database ──────────────────────────────────────────────────────────────
     db_path: str = Field(default="data/sauce.db")
-    session_memory_db_path: str = Field(default="data/session_memory.db")
-    strategic_memory_db_path: str = Field(default="data/strategic_memory.db")
-
-    # ── Alerting (Finding 5.2) ────────────────────────────────────────────────
-    alert_webhook_url: str = Field(
-        default="",
-        repr=False,
-        description="Slack or generic webhook URL for critical alert notifications. "
-                    "If empty, alerts are written to Python logging only.",
-    )
 
     # ── Prompt Versioning ─────────────────────────────────────────────────────
     prompt_version: str = Field(default="v1")

@@ -38,7 +38,6 @@ The `is_crypto` flag controls VWAP computation — crypto uses 24h sessions vs e
 
 ## Integration Points
 
-- **Research Agent** — indicators are computed per symbol and packaged into the Claude prompt as structured JSON
-- **Multi-Timeframe Engine** — `compute_all()` is called per timeframe (5m, 15m, 1h, 4h, 1d)
-- **Debate Layer** — bull/bear arguments reference indicator values directly
-- **Setup Scanner** — hard/soft scoring thresholds reference specific indicator values (e.g., RSI < 38 for crypto mean reversion)
+- **Strategy Module** — `compute_all()` supplies indicator data to `sauce/strategy.py` for signal generation
+- **Exit Monitor** — `sauce/exit_monitor.py` uses indicators for exit condition checks (RSI exhaustion, trailing stops)
+- **Risk Module** — ATR values feed into position sizing and volatility gates in `sauce/risk.py`

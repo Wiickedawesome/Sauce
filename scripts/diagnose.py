@@ -153,7 +153,7 @@ def run() -> None:
 
     session.close()
     print("\n" + "=" * 70)
-    print("To resume trading:  python scripts/resume_trading.py")
+    print("To resume trading:  set TRADING_PAUSE=false in .env and restart")
     print("=" * 70)
 
 
