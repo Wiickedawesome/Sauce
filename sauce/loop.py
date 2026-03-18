@@ -77,11 +77,11 @@ def _hour_et() -> int:
     return datetime.now(ZoneInfo("America/New_York")).hour
 
 
-async def _fetch_indicators(symbol: str, is_crypto: bool):
+def _fetch_indicators(symbol: str, is_crypto: bool):
     """Fetch history and compute indicators for a symbol."""
     bars = 100  # enough for SMA50 + MACD
     timeframe = "1Hour" if is_crypto else "1Day"
-    df = await get_history(symbol, timeframe=timeframe, bars=bars)
+    df = get_history(symbol, timeframe=timeframe, bars=bars)
     if df is None or df.empty:
         return None
     return compute_all(df, is_crypto=is_crypto)
@@ -90,7 +90,7 @@ async def _fetch_indicators(symbol: str, is_crypto: bool):
 # ── Entry Scan ────────────────────────────────────────────────────────────────
 
 
-async def _scan_entries(regime: str, account: dict, open_positions: list[Position]) -> None:
+def _scan_entries(regime: str, account: dict, open_positions: list[Position]) -> None:
     """Score each strategy instrument for entry signals."""
     settings = get_settings()
     equity = float(account.get("equity", "0"))
@@ -114,13 +114,13 @@ async def _scan_entries(regime: str, account: dict, open_positions: list[Positio
                 continue
 
             try:
-                indicators = await _fetch_indicators(instrument, is_crypto=True)
+                indicators = _fetch_indicators(instrument, is_crypto=True)
                 if indicators is None:
                     logger.warning("No indicators for %s, skipping", instrument)
                     continue
 
                 # Get current price for BB scoring
-                quote = await get_quote(instrument)
+                quote = get_quote(instrument)
                 if quote is None:
                     continue
                 current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
@@ -149,7 +149,7 @@ async def _scan_entries(regime: str, account: dict, open_positions: list[Positio
                 # Build and place order
                 account_with_ask = {**account, "_ask": str(ask)}
                 order = strategy.build_order(signal, account_with_ask, tier)
-                broker_result = await place_order(order)
+                broker_result = place_order(order)
                 broker_order_id = getattr(broker_result, "id", None)
 
                 # Track position locally
@@ -181,7 +181,7 @@ async def _scan_entries(regime: str, account: dict, open_positions: list[Positio
 # ── Exit Scan ─────────────────────────────────────────────────────────────────
 
 
-async def _scan_exits(open_positions: list[Position]) -> None:
+def _scan_exits(open_positions: list[Position]) -> None:
     """Check exit conditions for each open position."""
     today = _today()
 
@@ -189,13 +189,13 @@ async def _scan_exits(open_positions: list[Position]) -> None:
         if _shutdown:
             return
         try:
-            quote = await get_quote(position.symbol)
+            quote = get_quote(position.symbol)
             if quote is None:
                 continue
             current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
 
             # Fetch current RSI for exhaustion check
-            indicators = await _fetch_indicators(position.symbol, is_crypto=True)
+            indicators = _fetch_indicators(position.symbol, is_crypto=True)
             rsi_14 = indicators.rsi_14 if indicators else None
 
             # Get exit plan from strategy
@@ -228,7 +228,7 @@ async def _scan_exits(open_positions: list[Position]) -> None:
                 prompt_version="v2",
                 source="execution",
             )
-            await place_order(sell_order)
+            place_order(sell_order)
             log_trade(position, current_price, exit_signal.trigger)
             close_position(position.id)
             upsert_daily_stats(today, trades_closed=1)
@@ -285,7 +285,7 @@ async def run_loop() -> None:
                 logger.info("Morning brief: regime=%s", regime)
 
             # Account state
-            account = await get_account()
+            account = get_account()
             equity = float(account.get("equity", "0"))
             upsert_daily_stats(today, loop_runs=1, ending_equity=equity)
 
@@ -298,11 +298,11 @@ async def run_loop() -> None:
             open_positions = load_open_positions()
 
             # Entry scan
-            await _scan_entries(regime, account, open_positions)
+            _scan_entries(regime, account, open_positions)
 
             # Exit scan
             if open_positions:
-                await _scan_exits(open_positions)
+                _scan_exits(open_positions)
 
             logger.info(
                 "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",
