@@ -5,10 +5,10 @@
 # Jobs:      test → deploy → verify
 #
 # Required GitHub repository secrets:
-#   DO_HOST      — droplet IP or hostname
-#   DO_USER      — SSH user (e.g. root)
-#   DO_SSH_KEY   — full PEM content of the deploy private key
-#   DO_APP_PATH  — absolute path on droplet (e.g. /root/Sauce)
+#   VPS_HOST      — server IP or hostname
+#   VPS_USER      — SSH user (e.g. root)
+#   VPS_SSH_KEY   — full PEM content of the deploy private key
+#   VPS_APP_PATH  — absolute path on server (e.g. /root/Sauce)
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: Deploy
@@ -44,19 +44,21 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - name: Pull & rebuild on droplet
+      - name: Pull & rebuild on server
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.DO_HOST }}
-          username: ${{ secrets.DO_USER }}
-          key: ${{ secrets.DO_SSH_KEY }}
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -euo pipefail
-            cd "${{ secrets.DO_APP_PATH }}"
+            cd "${{ secrets.VPS_APP_PATH }}"
             echo "--- git pull ---"
             git pull origin main
             echo "--- docker compose up --build -d ---"
             docker compose -f docker/docker-compose.yml up --build -d
+            echo "--- prune old images ---"
+            docker image prune -f
             echo "--- deploy complete ---"
 
   # ── 3. Verify container is running ───────────────────────────────────────────
@@ -68,9 +70,9 @@ jobs:
       - name: Check container state
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.DO_HOST }}
-          username: ${{ secrets.DO_USER }}
-          key: ${{ secrets.DO_SSH_KEY }}
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -euo pipefail
             STATE=$(docker inspect --format='{{.State.Status}}' sauce 2>/dev/null || echo "missing")
@@ -78,7 +80,7 @@ jobs:
             if [[ "${STATE}" != "running" ]]; then
               echo "ERROR: container is not running after deploy (state=${STATE})"
               echo "--- last 50 log lines ---"
-              docker compose -f "${{ secrets.DO_APP_PATH }}/docker/docker-compose.yml" logs --tail=50 || true
+              docker compose -f "${{ secrets.VPS_APP_PATH }}/docker/docker-compose.yml" logs --tail=50 || true
               exit 1
             fi
             echo "OK: container is running"

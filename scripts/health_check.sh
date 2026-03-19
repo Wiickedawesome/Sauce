@@ -11,11 +11,11 @@
 #   4. Market data auth works from inside the live container.
 #
 # Usage: bash scripts/health_check.sh
-# Env:   DO_APP_PATH or script-local APP_PATH default below.
+# Env:   VPS_APP_PATH or script-local APP_PATH default below.
 
 set -euo pipefail
 
-APP_PATH="${DO_APP_PATH:-/root/Sauce}"
+APP_PATH="${VPS_APP_PATH:-/root/Sauce}"
 CONTAINER_NAME="sauce"
 LOG_FILE="${APP_PATH}/data/logs/cron.log"
 LOG_STALE_MINUTES=70   # 2 × 30-min cron cycles + 10-min grace

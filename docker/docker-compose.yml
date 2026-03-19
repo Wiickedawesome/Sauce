@@ -43,12 +43,12 @@ services:
         max-file: "5"
 
     # ── Resource limits ───────────────────────────────────────────────────────
-    # Conservative limits suited to a 1 vCPU / 1 GB VPS.
+    # Sized for Contabo VPS S (4 vCPU / 8 GB RAM).
     # Each loop run lasts < 60 s. Peak memory is ~200–300 MB (pandas + models).
     deploy:
       resources:
         limits:
-          cpus: "0.9"
-          memory: "768M"
+          cpus: "3.5"
+          memory: "6G"
         reservations:
-          memory: "128M"
+          memory: "256M"
