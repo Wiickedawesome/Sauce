@@ -8,7 +8,6 @@ produces a valid Indicators schema.
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from sauce.core.schemas import Indicators
 from sauce.indicators.core import (
@@ -25,7 +24,6 @@ from sauce.indicators.core import (
     compute_vwap,
 )
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -39,8 +37,7 @@ def _ohlcv(n: int = 100, *, seed: int = 42) -> pd.DataFrame:
     volume = rng.uniform(1000, 5000, n)
     idx = pd.date_range("2026-01-01", periods=n, freq="30min")
     return pd.DataFrame(
-        {"open": opn, "high": high, "low": low,
-         "close": close, "volume": volume},
+        {"open": opn, "high": high, "low": low, "close": close, "volume": volume},
         index=idx,
     )
 
@@ -180,7 +177,10 @@ class TestComputeStochastic:
 class TestComputeVwap:
     def test_returns_float(self):
         result = compute_vwap(
-            STD_DF["high"], STD_DF["low"], STD_DF["close"], STD_DF["volume"],
+            STD_DF["high"],
+            STD_DF["low"],
+            STD_DF["close"],
+            STD_DF["volume"],
         )
         assert isinstance(result, float)
 
@@ -227,9 +227,13 @@ class TestComputeAll:
     def test_constant_price(self):
         """Constant OHLCV should not crash — RSI and ATR may be None/0."""
         df = pd.DataFrame(
-            {"open": [100.0] * 50, "high": [100.0] * 50,
-             "low": [100.0] * 50, "close": [100.0] * 50,
-             "volume": [1000.0] * 50},
+            {
+                "open": [100.0] * 50,
+                "high": [100.0] * 50,
+                "low": [100.0] * 50,
+                "close": [100.0] * 50,
+                "volume": [1000.0] * 50,
+            },
             index=pd.date_range("2026-01-01", periods=50, freq="30min"),
         )
         result = compute_all(df)

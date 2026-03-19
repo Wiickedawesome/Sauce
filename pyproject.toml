@@ -41,11 +41,20 @@ line-length = 100
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117"]  # Nested with statements are often clearer in tests
+
 # ── Mypy ─────────────────────────────────────────────────────────────────────
 [tool.mypy]
 python_version = "3.13"
 strict = true
 ignore_missing_imports = true
+
+# SQLAlchemy declarative models use Column[T] which doesn't play well with
+# mypy's strict checking - the Column class descriptor magic is not understood.
+[[tool.mypy.overrides]]
+module = ["sauce.db", "sauce.adapters.db"]
+disable_error_code = ["assignment"]
 
 # ── Pytest ───────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

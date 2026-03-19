@@ -11,8 +11,8 @@ from pydantic import ValidationError
 
 from sauce.core.config import Settings, get_settings
 
-
 # ── Helper ────────────────────────────────────────────────────────────────────
+
 
 def set_required(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the minimum required env vars so Settings() can construct."""
@@ -22,6 +22,7 @@ def set_required(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ── Required field validation ─────────────────────────────────────────────────
+
 
 def test_settings_loads_with_required_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
@@ -45,6 +46,7 @@ def test_settings_missing_secret_key_raises(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # ── Paper trading default ─────────────────────────────────────────────────────
+
 
 def test_alpaca_paper_defaults_to_true(monkeypatch: pytest.MonkeyPatch) -> None:
     """CRITICAL: paper must default to True. Never default to live."""
@@ -81,6 +83,7 @@ def test_alpaca_paper_empty_string_defaults_to_true(monkeypatch: pytest.MonkeyPa
 
 # ── LLM config ─────────────────────────────────────────────────────────────
 
+
 def test_anthropic_api_key_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test_secret")
@@ -96,6 +99,7 @@ def test_llm_model_defaults_to_claude_sonnet(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # ── Risk limit bounds ─────────────────────────────────────────────────────────
+
 
 def test_max_position_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
@@ -124,6 +128,7 @@ def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ── Trading universe parsing ──────────────────────────────────────────────────
 
+
 def test_equity_universe_parses_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.setenv("TRADING_UNIVERSE_EQUITIES", "AAPL,MSFT, NVDA ")
@@ -148,6 +153,7 @@ def test_full_universe_combines_both(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ── Safety flag ───────────────────────────────────────────────────────────────
 
+
 def test_trading_pause_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.delenv("TRADING_PAUSE", raising=False)
@@ -163,6 +169,7 @@ def test_trading_pause_can_be_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ── Singleton cache ───────────────────────────────────────────────────────────
+
 
 def test_get_settings_returns_same_instance(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)

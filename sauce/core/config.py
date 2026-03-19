@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     # ── Broker ────────────────────────────────────────────────────────────────
     alpaca_api_key: str = Field(..., repr=False, description="Alpaca API key")
     alpaca_secret_key: str = Field(..., repr=False, description="Alpaca secret key")
-    alpaca_paper: bool = Field(default=True, description="True = paper trading. Default MUST be True.")
+    alpaca_paper: bool = Field(
+        default=True, description="True = paper trading. Default MUST be True."
+    )
 
     # ── LLM ───────────────────────────────────────────────────────────────────
     anthropic_api_key: str = Field(..., repr=False, description="Anthropic API key")
@@ -72,121 +74,215 @@ class Settings(BaseSettings):
     # ── Asset-Class Allocation Caps ───────────────────────────────────────────
     # Independent caps — they do not need to sum to 1.0 (remainder is cash).
     max_crypto_allocation_pct: float = Field(
-        default=0.40, ge=0.0, le=1.0,
+        default=0.40,
+        ge=0.0,
+        le=1.0,
         description="Maximum fraction of equity that may be allocated to crypto "
-                    "positions combined (e.g. 0.40 = 40%).",
+        "positions combined (e.g. 0.40 = 40%).",
     )
     max_equity_allocation_pct: float = Field(
-        default=0.70, ge=0.0, le=1.0,
+        default=0.70,
+        ge=0.0,
+        le=1.0,
         description="Maximum fraction of equity that may be allocated to equity "
-                    "positions combined (e.g. 0.70 = 70%).",
+        "positions combined (e.g. 0.70 = 70%).",
     )
+    max_options_allocation_pct: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Maximum fraction of equity that may be allocated to options "
+        "positions combined (e.g. 0.20 = 20%). Keep lower due to leverage.",
+    )
+
+    # ── Options Parameters ────────────────────────────────────────────────────
+    options_enabled: bool = Field(
+        default=True,
+        description="Enable options trading. Default True for aggressive strategy.",
+    )
+    options_dte_min: int = Field(
+        default=7,
+        ge=0,
+        le=90,
+        description="Minimum days to expiration for new positions.",
+    )
+    options_dte_max: int = Field(
+        default=45,
+        ge=1,
+        le=365,
+        description="Maximum days to expiration for new positions.",
+    )
+    options_dte_exit_threshold: int = Field(
+        default=2,
+        ge=0,
+        le=14,
+        description="Close positions at this DTE to avoid expiration risk.",
+    )
+    options_delta_min: float = Field(
+        default=0.25,
+        ge=0.05,
+        le=0.50,
+        description="Minimum absolute delta for contract selection.",
+    )
+    options_delta_max: float = Field(
+        default=0.40,
+        ge=0.20,
+        le=0.80,
+        description="Maximum absolute delta for contract selection.",
+    )
+    options_max_contracts_per_position: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Maximum contracts per options position.",
+    )
+    options_max_premium_pct: float = Field(
+        default=0.05,
+        ge=0.01,
+        le=0.20,
+        description="Maximum premium as % of equity per position (5%).",
+    )
+    options_underlyings: str = Field(
+        default="SPY,QQQ,TSLA,NVDA,AMD,AAPL,AMZN,META,GOOGL",
+        description="Comma-separated underlyings approved for options trading.",
+    )
+
     min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
     data_ttl_seconds: int = Field(default=120, ge=1)
     max_price_deviation: float = Field(default=0.01, ge=0.0, le=1.0)
 
     # ── Volatility / ATR parameters (Finding 1.8 / 2.4) ─────────────────────
     max_atr_ratio: float = Field(
-        default=0.08, ge=0.0,
+        default=0.08,
+        ge=0.0,
         description="Maximum ATR/price ratio permitted before vetoing a trade (8%).",
     )
     max_atr_ratio_crypto: float = Field(
-        default=0.15, ge=0.0,
+        default=0.15,
+        ge=0.0,
         description="Maximum ATR/price ratio for crypto pairs (15%). Crypto is "
-                    "inherently more volatile than equities.",
+        "inherently more volatile than equities.",
     )
     allow_no_atr: bool = Field(
         default=True,
         description="If True, approve trades when ATR data is unavailable. "
-                    "Defaults to True to avoid vetoing crypto pairs with short history.",
+        "Defaults to True to avoid vetoing crypto pairs with short history.",
     )
     stop_loss_atr_multiple: float = Field(
-        default=2.0, ge=0.0,
+        default=2.0,
+        ge=0.0,
         description="Stop-loss distance = ATR × this multiple.",
     )
     profit_target_atr_multiple: float = Field(
-        default=3.0, ge=0.0,
+        default=3.0,
+        ge=0.0,
         description="Profit-target distance = ATR × this multiple.",
     )
     over_concentration_multiplier: float = Field(
-        default=2.0, ge=1.0,
+        default=2.0,
+        ge=1.0,
         description="A single position exceeding equity × max_position_pct × this "
-                    "value is flagged as over-concentrated.",
+        "value is flagged as over-concentrated.",
     )
 
     # ── Order Execution parameters (Finding 1.9) ─────────────────────────────
     max_limit_price_premium: float = Field(
-        default=0.001, ge=0.0, le=0.05,
+        default=0.001,
+        ge=0.0,
+        le=0.05,
         description="Maximum deviation of limit_price from ask/bid as a fraction "
-                    "(e.g. 0.001 = 0.1%). Buy orders must not exceed ask × (1 + premium).",
+        "(e.g. 0.001 = 0.1%). Buy orders must not exceed ask × (1 + premium).",
     )
 
     # ── Liquidity / Spread parameters (Finding 2.5) ──────────────────────────
     max_spread_pct: float = Field(
-        default=0.005, ge=0.0, le=1.0,
+        default=0.005,
+        ge=0.0,
+        le=1.0,
         description="Maximum permissible bid-ask spread as a fraction of mid price "
-                    "(e.g. 0.005 = 0.5%). Trades on wider instruments are vetoed.",
+        "(e.g. 0.005 = 0.5%). Trades on wider instruments are vetoed.",
     )
     max_spread_pct_crypto: float = Field(
-        default=0.015, ge=0.0, le=1.0,
+        default=0.015,
+        ge=0.0,
+        le=1.0,
         description="Maximum permissible bid-ask spread for crypto pairs "
-                    "(e.g. 0.015 = 1.5%). Crypto spreads are wider than equities.",
+        "(e.g. 0.015 = 1.5%). Crypto spreads are wider than equities.",
     )
     max_volume_participation: float = Field(
-        default=0.01, ge=0.0, le=1.0,
+        default=0.01,
+        ge=0.0,
+        le=1.0,
         description="Maximum fraction of estimated daily volume the proposed order "
-                    "may represent (e.g. 0.01 = 1%). Orders exceeding this are vetoed "
-                    "to avoid excessive market impact (Finding 2.5).",
+        "may represent (e.g. 0.01 = 1%). Orders exceeding this are vetoed "
+        "to avoid excessive market impact (Finding 2.5).",
     )
 
     # ── Data Feed ─────────────────────────────────────────────────────────────
     data_feed: str = Field(
         default="iex",
         description="Alpaca market data feed for equities: 'iex' (free) or 'sip' (paid). "
-                    "Free-tier accounts MUST use 'iex'. Default is 'iex'. "
-                    "NOTE: IEX provides 15-min delayed quotes for equities. "
-                    "Crypto quotes are real-time regardless of data_feed setting. "
-                    "SIP provides real-time NBBO but requires a paid market data subscription.",
+        "Free-tier accounts MUST use 'iex'. Default is 'iex'. "
+        "NOTE: IEX provides 15-min delayed quotes for equities. "
+        "Crypto quotes are real-time regardless of data_feed setting. "
+        "SIP provides real-time NBBO but requires a paid market data subscription.",
     )
 
     # ── Loop Cadence ──────────────────────────────────────────────────────────
     loop_interval_minutes: int = Field(
-        default=5, ge=1, le=60,
+        default=5,
+        ge=1,
+        le=60,
         description="Loop cadence in minutes. Default is 5.",
     )
 
     # ── Signal Scoring ────────────────────────────────────────────────────────
     signal_threshold_base: int = Field(
-        default=65, ge=0, le=100,
+        default=65,
+        ge=0,
+        le=100,
         description="Base threshold for signal scoring (0–100). "
-                    "Regime shift adjusts this: bullish −10, bearish +10.",
+        "Regime shift adjusts this: bullish −10, bearish +10.",
     )
     stop_loss_pct: float = Field(
-        default=0.03, ge=0.0, le=0.50,
+        default=0.03,
+        ge=0.0,
+        le=0.50,
         description="Hard stop-loss as a fraction of entry price (3%).",
     )
     trail_activation_pct: float = Field(
-        default=0.03, ge=0.0, le=0.50,
+        default=0.03,
+        ge=0.0,
+        le=0.50,
         description="Gain required to activate trailing stop (3%).",
     )
     trail_pct: float = Field(
-        default=0.02, ge=0.0, le=0.50,
+        default=0.02,
+        ge=0.0,
+        le=0.50,
         description="Trailing stop distance below high water mark (2%).",
     )
     profit_target_pct: float = Field(
-        default=0.06, ge=0.0, le=1.0,
+        default=0.06,
+        ge=0.0,
+        le=1.0,
         description="Take-profit target as a fraction of entry price (6%).",
     )
     rsi_exhaustion_threshold: float = Field(
-        default=72.0, ge=50.0, le=100.0,
+        default=72.0,
+        ge=50.0,
+        le=100.0,
         description="RSI level at which to exit for momentum exhaustion.",
     )
     max_hold_hours: float = Field(
-        default=48.0, ge=1.0,
+        default=48.0,
+        ge=1.0,
         description="Maximum hours to hold a position before time-stop check.",
     )
     time_stop_min_gain: float = Field(
-        default=0.01, ge=0.0, le=1.0,
+        default=0.01,
+        ge=0.0,
+        le=1.0,
         description="Minimum gain required to survive a time stop (1%).",
     )
 
@@ -195,7 +291,7 @@ class Settings(BaseSettings):
     confirm_live_trading: str = Field(
         default="",
         description="Must be set to 'LIVE-TRADING-CONFIRMED' when alpaca_paper=False. "
-                    "Prevents accidental live-money trading.",
+        "Prevents accidental live-money trading.",
     )
 
     # ── Database ──────────────────────────────────────────────────────────────
@@ -215,6 +311,11 @@ class Settings(BaseSettings):
     def crypto_universe(self) -> list[str]:
         """Parsed list of crypto pairs from the comma-separated env var."""
         return [s.strip().upper() for s in self.trading_universe_crypto.split(",") if s.strip()]
+
+    @property
+    def options_universe(self) -> list[str]:
+        """Parsed list of underlyings approved for options trading."""
+        return [s.strip().upper() for s in self.options_underlyings.split(",") if s.strip()]
 
     @property
     def full_universe(self) -> list[str]:
@@ -265,4 +366,4 @@ def get_settings() -> Settings:
     Loaded once at first call. All code must use this function — never
     instantiate Settings() directly in production code.
     """
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

@@ -2,34 +2,38 @@
 tests/test_utils.py — Tests for adapters/utils.py retry wrapper.
 """
 
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from sauce.adapters.utils import _is_transient, call_with_retry
 
-
 # ── _is_transient ─────────────────────────────────────────────────────────────
 
 
 class TestIsTransient:
-    @pytest.mark.parametrize("exc", [
-        ConnectionError("connection refused"),
-        TimeoutError("read timed out"),
-        OSError("network unreachable"),
-    ])
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionError("connection refused"),
+            TimeoutError("read timed out"),
+            OSError("network unreachable"),
+        ],
+    )
     def test_network_exceptions_are_transient(self, exc: Exception) -> None:
         assert _is_transient(exc) is True
 
-    @pytest.mark.parametrize("msg", [
-        "HTTP 429 Too Many Requests",
-        "502 Bad Gateway",
-        "503 Service Unavailable",
-        "504 Gateway Timeout",
-        "connection reset by peer",
-        "request timed out",
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "HTTP 429 Too Many Requests",
+            "502 Bad Gateway",
+            "503 Service Unavailable",
+            "504 Gateway Timeout",
+            "connection reset by peer",
+            "request timed out",
+        ],
+    )
     def test_message_markers_are_transient(self, msg: str) -> None:
         assert _is_transient(Exception(msg)) is True
 

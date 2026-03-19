@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
 
 from sauce.adapters.db import Base, get_session
-from sauce.strategy import ExitPlan, Position, SignalResult
+from sauce.strategy import Position, SignalResult
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +191,7 @@ def update_position(position: Position, db_path: str | None = None) -> None:
     """Update trailing-stop state for an open position."""
     session = get_session(db_path)
     try:
-        row = (
-            session.query(PositionRow)
-            .filter_by(position_id=position.id, status="open")
-            .first()
-        )
+        row = session.query(PositionRow).filter_by(position_id=position.id, status="open").first()
         if row is None:
             logger.warning("Position %s not found for update", position.id)
             return
@@ -213,11 +210,7 @@ def close_position(position_id: str, db_path: str | None = None) -> None:
     """Mark a position as closed."""
     session = get_session(db_path)
     try:
-        row = (
-            session.query(PositionRow)
-            .filter_by(position_id=position_id, status="open")
-            .first()
-        )
+        row = session.query(PositionRow).filter_by(position_id=position_id, status="open").first()
         if row is None:
             return
         row.status = "closed"
@@ -268,7 +261,7 @@ def log_trade(
 ) -> None:
     """Record a completed trade. Append-only."""
     if exit_time is None:
-        exit_time = datetime.now(timezone.utc)
+        exit_time = datetime.now(UTC)
 
     hold_hours = (exit_time - position.entry_time).total_seconds() / 3600
     realized_pnl = (exit_price - position.entry_price) * position.qty
@@ -312,23 +305,29 @@ def upsert_daily_stats(
     try:
         existing = session.query(DailySummaryRow).filter_by(date=date).first()
         if existing is None:
-            row = DailySummaryRow(date=date, updated_at=datetime.now(timezone.utc))
+            row = DailySummaryRow(date=date, updated_at=datetime.now(UTC))
             session.add(row)
         else:
             row = existing
 
-        additive = {"loop_runs", "signals_fired", "signals_skipped",
-                     "orders_placed", "trades_closed"}
+        additive = {
+            "loop_runs",
+            "signals_fired",
+            "signals_skipped",
+            "orders_placed",
+            "trades_closed",
+        }
         for key, value in fields.items():
             if not hasattr(row, key):
                 continue
             if key in additive and existing is not None:
                 current = getattr(row, key, 0) or 0
-                setattr(row, key, int(current) + int(value))
+                # Both current and value come from dynamic sources; cast via str/int
+                setattr(row, key, int(str(current)) + int(str(value)))
             else:
                 setattr(row, key, value)
 
-        row.updated_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(UTC)
         session.commit()
     except Exception as exc:
         session.rollback()
@@ -358,7 +357,7 @@ def upsert_instrument_meta(
     strategy_name: str,
     last_signal_score: int | None = None,
     last_signal_time: datetime | None = None,
-    extra: dict | None = None,
+    extra: dict[str, Any] | None = None,
     db_path: str | None = None,
 ) -> None:
     """Insert or update instrument metadata."""

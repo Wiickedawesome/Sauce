@@ -14,7 +14,7 @@ Rules:
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, text
@@ -30,6 +30,7 @@ def _default_db_path() -> str:
     """Resolve the DB path from settings (config / env var), not a hardcoded string."""
     try:
         from sauce.core.config import get_settings
+
         return str(get_settings().db_path)
     except Exception:  # noqa: BLE001 — during early init or test isolation
         return os.environ.get("DB_PATH", "data/sauce.db")
@@ -37,11 +38,13 @@ def _default_db_path() -> str:
 
 # ── ORM Base ──────────────────────────────────────────────────────────────────
 
+
 class Base(DeclarativeBase):
     pass
 
 
 # ── Table Definitions ─────────────────────────────────────────────────────────
+
 
 class AuditEventRow(Base):
     """Immutable audit log. One row per event. Never updated. Never deleted."""
@@ -53,7 +56,7 @@ class AuditEventRow(Base):
     event_type: str = Column(String(64), nullable=False, index=True)
     symbol: str | None = Column(String(20), nullable=True, index=True)
     payload: str = Column(Text, nullable=False, default="{}")  # JSON string
-    timestamp: datetime = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     prompt_version: str | None = Column(String(32), nullable=True)
 
 
@@ -93,7 +96,7 @@ def get_engine(db_path: str | None = None) -> Engine:
 
 
 # Cache session factories keyed by db_path (consistent with memory/db.py).
-_session_factories: dict[str, sessionmaker] = {}
+_session_factories: dict[str, sessionmaker[Session]] = {}
 
 
 def get_session(db_path: str | None = None) -> Session:
@@ -115,6 +118,7 @@ def cleanup_engines() -> None:
 
 
 # ── Public Write Helpers ──────────────────────────────────────────────────────
+
 
 def log_event(event: AuditEvent, db_path: str | None = None) -> None:
     """
@@ -139,8 +143,9 @@ def log_event(event: AuditEvent, db_path: str | None = None) -> None:
         # Log to Python logging system so any log aggregator captures this (Finding 4.2).
         logger.critical(
             "DB write FAILED for AuditEvent [loop_id=%s event_type=%s]: %s",
-            event.loop_id, event.event_type, exc,
+            event.loop_id,
+            event.event_type,
+            exc,
         )
     finally:
         session.close()
-

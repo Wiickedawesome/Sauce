@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sauce.adapters.llm import LLMError, call_claude
 
@@ -57,7 +57,7 @@ async def get_regime(
     Falls back to "neutral" on any error.
     """
     user_msg = USER_TEMPLATE.format(
-        date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        date=datetime.now(UTC).strftime("%Y-%m-%d"),
         btc_change=btc_change,
         eth_change=eth_change,
         spy_change=spy_change,
@@ -73,7 +73,7 @@ async def get_regime(
             temperature=0.1,
         )
         parsed = json.loads(raw)
-        regime = parsed.get("regime", "neutral").lower().strip()
+        regime: str = parsed.get("regime", "neutral").lower().strip()
 
         if regime not in VALID_REGIMES:
             logger.warning("Invalid regime from Claude: %r, defaulting to neutral", regime)

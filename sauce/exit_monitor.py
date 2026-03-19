@@ -1,23 +1,26 @@
 """
-exit_monitor.py — Seven-condition exit engine for Sauce.
+exit_monitor.py — Eight-condition exit engine for Sauce.
 
 Called every loop cycle for each open position. Returns the first triggered
 exit condition (priority order) or None if no exit.
 
 Priority order (first match wins):
   1. Hard stop       — price ≤ entry × (1 − stop_loss_pct)
+  1b. ATR stop       — price ≤ entry - (ATR × atr_stop_multiple) [optional]
   2. Trailing stop   — price ≤ trailing_stop_price (once activated)
   3. Trail activate  — price ≥ entry × (1 + trail_activation_pct) → arm trailing
   4. Trail ratchet   — new high water mark → tighten trailing stop
   5. Profit target   — price ≥ entry × (1 + profit_target_pct)
+  5b. ATR target     — price ≥ entry + (ATR × atr_target_multiple) [optional]
   6. RSI exhaustion  — rsi_14 ≥ rsi_exhaustion_threshold
   7. Time stop       — held > max_hold_hours AND gain < time_stop_min_gain
+  8. Regime stop     — regime flipped to bearish (if plan.regime_stop=True)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sauce.strategy import ExitPlan, Position
 
@@ -26,7 +29,7 @@ from sauce.strategy import ExitPlan, Position
 class ExitSignal:
     """Describes why and how a position should be closed."""
 
-    trigger: str  # one of the 7 condition names
+    trigger: str  # one of the exit condition names
     symbol: str
     position_id: str
     side: str  # always "sell" for long exits
@@ -40,21 +43,36 @@ def evaluate_exit(
     current_price: float,
     rsi_14: float | None,
     now: datetime | None = None,
+    atr_14: float | None = None,
+    atr_stop_multiple: float = 2.0,
+    atr_target_multiple: float = 3.0,
+    regime: str | None = None,
 ) -> tuple[ExitSignal | None, Position]:
-    """Check all 7 exit conditions for one position.
+    """Check all exit conditions for one position.
+
+    Args:
+        position: Current position
+        plan: Exit plan from strategy
+        current_price: Current market price
+        rsi_14: Current RSI(14) value
+        now: Current timestamp (defaults to utcnow)
+        atr_14: Current ATR(14) value for ATR-scaled stops
+        atr_stop_multiple: ATR multiple for stop loss (default 2.0)
+        atr_target_multiple: ATR multiple for profit target (default 3.0)
+        regime: Current market regime for regime stop
 
     Returns (exit_signal_or_none, updated_position).
     The position is returned with possibly updated high_water_price,
     trailing_active, and trailing_stop_price fields.
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     entry = position.entry_price
     symbol = position.symbol
     pid = position.id
 
-    # ── 1. Hard stop ──────────────────────────────────────────────────────
+    # ── 1a. Hard stop (percentage-based) ─────────────────────────────────
     hard_stop_price = entry * (1 - plan.stop_loss_pct)
     if current_price <= hard_stop_price:
         return (
@@ -65,26 +83,46 @@ def evaluate_exit(
                 side="sell",
                 current_price=current_price,
                 reason=f"Price {current_price:.4f} hit hard stop {hard_stop_price:.4f} "
-                       f"({plan.stop_loss_pct:.1%} below entry {entry:.4f})",
+                f"({plan.stop_loss_pct:.1%} below entry {entry:.4f})",
             ),
             position,
         )
 
-    # ── 2. Trailing stop (if armed) ──────────────────────────────────────
-    if position.trailing_active and position.trailing_stop_price is not None:
-        if current_price <= position.trailing_stop_price:
+    # ── 1b. ATR stop (volatility-scaled) ─────────────────────────────────
+    if atr_14 is not None and atr_14 > 0:
+        atr_stop_price = entry - (atr_14 * atr_stop_multiple)
+        if current_price <= atr_stop_price:
             return (
                 ExitSignal(
-                    trigger="trailing_stop",
+                    trigger="atr_stop",
                     symbol=symbol,
                     position_id=pid,
                     side="sell",
                     current_price=current_price,
-                    reason=f"Price {current_price:.4f} hit trailing stop "
-                           f"{position.trailing_stop_price:.4f}",
+                    reason=f"Price {current_price:.4f} hit ATR stop {atr_stop_price:.4f} "
+                    f"({atr_stop_multiple}× ATR {atr_14:.4f} below entry {entry:.4f})",
                 ),
                 position,
             )
+
+    # ── 2. Trailing stop (if armed) ──────────────────────────────────────
+    if (
+        position.trailing_active
+        and position.trailing_stop_price is not None
+        and current_price <= position.trailing_stop_price
+    ):
+        return (
+            ExitSignal(
+                trigger="trailing_stop",
+                symbol=symbol,
+                position_id=pid,
+                side="sell",
+                current_price=current_price,
+                reason=f"Price {current_price:.4f} hit trailing stop "
+                f"{position.trailing_stop_price:.4f}",
+            ),
+            position,
+        )
 
     # ── 3. Trail activation ──────────────────────────────────────────────
     activation_price = entry * (1 + plan.trail_activation_pct)
@@ -109,10 +147,27 @@ def evaluate_exit(
                 side="sell",
                 current_price=current_price,
                 reason=f"Price {current_price:.4f} hit target {target_price:.4f} "
-                       f"({plan.profit_target_pct:.1%} above entry {entry:.4f})",
+                f"({plan.profit_target_pct:.1%} above entry {entry:.4f})",
             ),
             position,
         )
+
+    # ── 5b. ATR profit target (volatility-scaled) ────────────────────────
+    if atr_14 is not None and atr_14 > 0:
+        atr_target_price = entry + (atr_14 * atr_target_multiple)
+        if current_price >= atr_target_price:
+            return (
+                ExitSignal(
+                    trigger="atr_target",
+                    symbol=symbol,
+                    position_id=pid,
+                    side="sell",
+                    current_price=current_price,
+                    reason=f"Price {current_price:.4f} hit ATR target {atr_target_price:.4f} "
+                    f"({atr_target_multiple}× ATR {atr_14:.4f} above entry {entry:.4f})",
+                ),
+                position,
+            )
 
     # ── 6. RSI exhaustion ────────────────────────────────────────────────
     if rsi_14 is not None and rsi_14 >= plan.rsi_exhaustion_threshold:
@@ -124,7 +179,7 @@ def evaluate_exit(
                 side="sell",
                 current_price=current_price,
                 reason=f"RSI {rsi_14:.1f} ≥ exhaustion threshold "
-                       f"{plan.rsi_exhaustion_threshold:.0f}",
+                f"{plan.rsi_exhaustion_threshold:.0f}",
             ),
             position,
         )
@@ -142,7 +197,24 @@ def evaluate_exit(
                     side="sell",
                     current_price=current_price,
                     reason=f"Held {held_hours:.1f}h (>{plan.max_hold_hours}h) "
-                           f"with gain {gain_pct:.2%} < min {plan.time_stop_min_gain:.2%}",
+                    f"with gain {gain_pct:.2%} < min {plan.time_stop_min_gain:.2%}",
+                ),
+                position,
+            )
+
+    # ── 8. Regime stop ───────────────────────────────────────────────────
+    if plan.regime_stop and regime == "bearish":
+        gain_pct = (current_price - entry) / entry if entry > 0 else 0
+        # Only exit on regime flip if we're not already in profit
+        if gain_pct < 0.05:
+            return (
+                ExitSignal(
+                    trigger="regime_stop",
+                    symbol=symbol,
+                    position_id=pid,
+                    side="sell",
+                    current_price=current_price,
+                    reason=f"Regime flipped to bearish with gain {gain_pct:.2%} < 5%",
                 ),
                 position,
             )

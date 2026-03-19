@@ -10,7 +10,7 @@ None is returned when data is insufficient or computation fails.
 from __future__ import annotations
 
 import pandas as pd
-import pandas_ta as ta  # type: ignore[import-untyped]
+import pandas_ta as ta
 
 from sauce.core.schemas import Indicators
 
@@ -20,13 +20,13 @@ BARS_PER_DAY_CRYPTO: int = 48
 BARS_PER_DAY_EQUITY: int = 13
 
 
-def _last_float(series: object) -> float | None:
+def _last_float(series: pd.Series) -> float | None:
     """Return the last non-NaN value from a pandas Series, or None."""
     try:
-        val = series.dropna()  # type: ignore[union-attr]
-        if val.empty:  # type: ignore[union-attr]
+        val = series.dropna()
+        if val.empty:
             return None
-        f = float(val.iloc[-1])  # type: ignore[union-attr]
+        f = float(val.iloc[-1])
         return f if f == f else None  # NaN guard
     except (TypeError, ValueError, AttributeError):
         return None
@@ -46,7 +46,10 @@ def compute_rsi(close: pd.Series, length: int = 14) -> float | None:
 
 
 def compute_atr(
-    high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14,
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    length: int = 14,
 ) -> float | None:
     """Average True Range."""
     return _last_float(ta.atr(high, low, close, length=length))
@@ -64,7 +67,9 @@ def compute_volume_ratio(volume: pd.Series, lookback: int = 20) -> float | None:
 
 
 def compute_volume_1d_avg(
-    volume: pd.Series, n_bars: int, bars_per_day: int,
+    volume: pd.Series,
+    n_bars: int,
+    bars_per_day: int,
 ) -> float | None:
     """Estimated average daily volume from intraday bar data."""
     try:
@@ -92,10 +97,12 @@ def compute_macd(
 
 
 def compute_bbands(
-    close: pd.Series, length: int = 20, std: float = 2.0,
+    close: pd.Series,
+    length: int = 20,
+    std: float = 2.0,
 ) -> tuple[float | None, float | None, float | None]:
     """Bollinger Bands: (lower, middle, upper)."""
-    bb_df = ta.bbands(close, length=length, std=std)
+    bb_df = ta.bbands(close, length=length, std=std)  # type: ignore[arg-type]
     if bb_df is None or bb_df.empty:
         return None, None, None
     return (
@@ -121,7 +128,10 @@ def compute_stochastic(
 
 
 def compute_vwap(
-    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
 ) -> float | None:
     """Volume-Weighted Average Price."""
     result = ta.vwap(high, low, close, volume)

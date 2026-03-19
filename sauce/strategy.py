@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from datetime import UTC, datetime
+from typing import Any, Protocol, runtime_checkable
 
 from sauce.core.schemas import Indicators, Order
-
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
 
@@ -39,7 +38,7 @@ class SignalResult:
     volume_ratio: float | None
     regime: str
     strategy_name: str
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(slots=True)
@@ -54,7 +53,7 @@ class Position:
     high_water_price: float = 0.0
     trailing_stop_price: float | None = None
     trailing_active: bool = False
-    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    entry_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     broker_order_id: str | None = None
     strategy_name: str = ""
     stop_loss_price: float = 0.0
@@ -98,67 +97,68 @@ class TierParams:
 
 
 # ── Tier Table ────────────────────────────────────────────────────────────────
+# AGGRESSIVE CONFIGURATION: Optimized for day/swing trading with 15-25% risk tolerance
 
 SEED_PARAMS = TierParams(
     tier="seed",
-    max_position_pct=0.30,
-    max_concurrent=2,
-    daily_loss_limit=0.08,
-    stop_loss_pct=0.03,
-    trail_activation_pct=0.03,
-    trail_pct=0.02,
-    profit_target_pct=0.06,
-    rsi_exhaustion_threshold=72,
-    max_hold_hours=48,
-    time_stop_min_gain=0.01,
+    max_position_pct=0.40,  # 40% per position for conviction plays
+    max_concurrent=4,  # 4 concurrent positions
+    daily_loss_limit=0.20,  # 20% daily drawdown ceiling (aggressive)
+    stop_loss_pct=0.05,  # 5% stop (wider for swing holds)
+    trail_activation_pct=0.06,  # Trail kicks in at 6% gain
+    trail_pct=0.03,  # 3% trailing stop
+    profit_target_pct=0.12,  # 12% target (2.4:1 R/R)
+    rsi_exhaustion_threshold=75,  # Higher RSI exit (let winners run)
+    max_hold_hours=336,  # 14 days for swing positions
+    time_stop_min_gain=0.02,  # Exit stale positions at 2% gain minimum
 )
 
 BUILDING_PARAMS = TierParams(
     tier="building",
-    max_position_pct=0.15,
-    max_concurrent=4,
-    daily_loss_limit=0.05,
-    stop_loss_pct=0.03,
-    trail_activation_pct=0.03,
-    trail_pct=0.02,
-    profit_target_pct=0.06,
-    rsi_exhaustion_threshold=72,
-    max_hold_hours=48,
-    time_stop_min_gain=0.01,
-    max_crypto_pct=0.40,
-    max_equity_sector_pct=0.35,
+    max_position_pct=0.25,  # 25% per position ($10K-$50K)
+    max_concurrent=6,  # 6 concurrent positions
+    daily_loss_limit=0.15,  # 15% daily drawdown
+    stop_loss_pct=0.04,  # 4% stop
+    trail_activation_pct=0.05,  # Trail at 5%
+    trail_pct=0.025,  # 2.5% trail
+    profit_target_pct=0.10,  # 10% target
+    rsi_exhaustion_threshold=75,
+    max_hold_hours=336,
+    time_stop_min_gain=0.02,
+    max_crypto_pct=0.50,  # 50% crypto allocation
+    max_equity_sector_pct=0.40,  # 40% per equity sector
 )
 
 SCALING_PARAMS = TierParams(
     tier="scaling",
-    max_position_pct=0.08,
+    max_position_pct=0.15,  # 15% per position ($50K-$100K)
     max_concurrent=8,
-    daily_loss_limit=0.03,
-    stop_loss_pct=0.03,
-    trail_activation_pct=0.03,
+    daily_loss_limit=0.10,  # 10% daily drawdown
+    stop_loss_pct=0.035,  # 3.5% stop
+    trail_activation_pct=0.04,
     trail_pct=0.02,
-    profit_target_pct=0.06,
-    rsi_exhaustion_threshold=72,
-    max_hold_hours=48,
-    time_stop_min_gain=0.01,
-    max_crypto_pct=0.30,
-    max_equity_sector_pct=0.30,
+    profit_target_pct=0.08,
+    rsi_exhaustion_threshold=75,
+    max_hold_hours=336,
+    time_stop_min_gain=0.015,
+    max_crypto_pct=0.40,
+    max_equity_sector_pct=0.35,
 )
 
 OPERATING_PARAMS = TierParams(
     tier="operating",
-    max_position_pct=0.05,
+    max_position_pct=0.10,  # 10% per position ($100K+)
     max_concurrent=12,
-    daily_loss_limit=0.02,
+    daily_loss_limit=0.08,  # 8% daily drawdown (more conservative at scale)
     stop_loss_pct=0.03,
-    trail_activation_pct=0.03,
+    trail_activation_pct=0.035,
     trail_pct=0.02,
     profit_target_pct=0.06,
-    rsi_exhaustion_threshold=72,
-    max_hold_hours=48,
+    rsi_exhaustion_threshold=75,
+    max_hold_hours=336,
     time_stop_min_gain=0.01,
-    max_crypto_pct=0.30,
-    max_equity_sector_pct=0.25,
+    max_crypto_pct=0.35,
+    max_equity_sector_pct=0.30,
 )
 
 
@@ -196,11 +196,13 @@ class Strategy(Protocol):
         """Can this strategy fire on this instrument given today's regime?"""
         ...
 
-    def score(self, indicators: Indicators, instrument: str, regime: str, current_price: float) -> SignalResult:
+    def score(
+        self, indicators: Indicators, instrument: str, regime: str, current_price: float
+    ) -> SignalResult:
         """Score the signal. Returns score 0–100 and metadata."""
         ...
 
-    def build_order(self, signal: SignalResult, account: dict, tier: TierParams) -> Order:
+    def build_order(self, signal: SignalResult, account: dict[str, Any], tier: TierParams) -> Order:
         """Construct the entry order. Handles sizing per tier."""
         ...
 

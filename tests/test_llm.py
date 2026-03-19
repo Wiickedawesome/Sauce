@@ -4,16 +4,14 @@ tests/test_llm.py — Tests for adapters/llm.py.
 Mocks the anthropic SDK — no real API calls.
 """
 
-import json
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from sauce.adapters.llm import LLMError, call_claude
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
@@ -24,12 +22,14 @@ def set_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ── Happy path ────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_call_claude_returns_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_env(monkeypatch)
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
     expected = '{"side": "hold", "confidence": 0.0}'
@@ -54,12 +54,14 @@ async def test_call_claude_returns_content(
 
 # ── Rate-limit retry ─────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_call_claude_retries_on_rate_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_env(monkeypatch)
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
     import anthropic as anthropic_mod
@@ -95,12 +97,14 @@ async def test_call_claude_retries_on_rate_limit(
 
 # ── Exhausted retries ────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_call_claude_raises_after_all_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_env(monkeypatch)
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
     import anthropic as anthropic_mod
@@ -134,6 +138,7 @@ async def test_call_claude_retries_on_connection_error(
     """APIConnectionError should be retried (network blip), not immediately fatal."""
     set_env(monkeypatch)
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
     import anthropic as anthropic_mod
@@ -171,7 +176,9 @@ async def test_call_claude_no_api_key_raises(
     monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     from pydantic import ValidationError
+
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
     with pytest.raises(ValidationError, match="API key must not be empty"):

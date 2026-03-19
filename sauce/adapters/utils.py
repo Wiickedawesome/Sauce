@@ -15,7 +15,8 @@ Rules:
 
 import logging
 import time
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def _is_transient(exc: Exception) -> bool:
     return any(marker in msg for marker in transient_markers)
 
 
-def call_with_retry(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+def call_with_retry[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """
     Call fn(*args, **kwargs) with up to _MAX_RETRIES attempts.
 
@@ -77,9 +78,11 @@ def call_with_retry(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
                 break
             delay = _BASE_DELAY * (2 ** (attempt - 1))
             logger.warning(
-                "call_with_retry: transient error on attempt %d/%d, "
-                "retrying in %.1fs: %s",
-                attempt, _MAX_RETRIES, delay, exc,
+                "call_with_retry: transient error on attempt %d/%d, retrying in %.1fs: %s",
+                attempt,
+                _MAX_RETRIES,
+                delay,
+                exc,
             )
             time.sleep(delay)
 

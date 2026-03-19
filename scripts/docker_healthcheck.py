@@ -5,7 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 DB_PATH = os.environ.get("DB_PATH", "/app/data/sauce.db")
 _INTERVAL = int(os.environ.get("LOOP_INTERVAL_MINUTES", "30"))
@@ -38,12 +38,12 @@ def main() -> int:
         if "+" in ts or "Z" in ts:
             last = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         else:
-            last = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+            last = datetime.fromisoformat(ts).replace(tzinfo=UTC)
     except ValueError:
         print(f"UNHEALTHY: cannot parse timestamp: {ts}")
         return 1
 
-    age = datetime.now(timezone.utc) - last
+    age = datetime.now(UTC) - last
     age_minutes = age.total_seconds() / 60
 
     if age_minutes > MAX_AGE_MINUTES:
@@ -53,7 +53,7 @@ def main() -> int:
     # 3. Check for orphaned loop_start (started but never finished — crash indicator)
     # Only flag orphans from within the MAX_AGE window; older ones are historical.
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(minutes=MAX_AGE_MINUTES)).isoformat()
         orphan = conn.execute(
             "SELECT s.loop_id, s.timestamp FROM audit_events s "
             "WHERE s.event_type = 'loop_start' "
@@ -65,7 +65,9 @@ def main() -> int:
             (cutoff,),
         ).fetchone()
         if orphan:
-            print(f"UNHEALTHY: orphaned loop_start detected (loop_id={orphan[0]}, started={orphan[1]})")
+            print(
+                f"UNHEALTHY: orphaned loop_start detected (loop_id={orphan[0]}, started={orphan[1]})"
+            )
             return 1
     except Exception:
         pass  # Non-fatal — primary checks already passed

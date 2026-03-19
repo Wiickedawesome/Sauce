@@ -9,7 +9,7 @@ Rules:
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent
@@ -32,7 +32,7 @@ def _strip_fences(text: str) -> str:
     stripped = text.strip()
     if stripped.startswith("```"):
         # Remove opening fence line (e.g. ```json or ```)
-        stripped = stripped[stripped.index("\n") + 1:] if "\n" in stripped else stripped[3:]
+        stripped = stripped[stripped.index("\n") + 1 :] if "\n" in stripped else stripped[3:]
         # Remove closing fence
         if stripped.endswith("```"):
             stripped = stripped[: stripped.rfind("```")]
@@ -47,19 +47,22 @@ def _strip_fences(text: str) -> str:
     if brace_start != -1:
         brace_end = stripped.rfind("}")
         if brace_end > brace_start:
-            return stripped[brace_start:brace_end + 1].strip()
+            return stripped[brace_start : brace_end + 1].strip()
 
     return stripped
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
+
 class LLMError(Exception):
     """Raised when all retries are exhausted or a fatal LLM error occurs."""
+
     pass
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
 
 async def _call_anthropic(
     system: str,
@@ -73,20 +76,23 @@ async def _call_anthropic(
     Call Anthropic's Messages API with retry logic.
     """
     import anthropic
+
     from sauce.adapters.db import log_event
 
-    log_event(AuditEvent(
-        loop_id=loop_id,
-        event_type="llm_call",
-        payload={
-            "provider": "anthropic",
-            "model": model,
-            "system_chars": len(system),
-            "user_chars": len(user),
-        },
-        timestamp=datetime.now(timezone.utc),
-        prompt_version=get_settings().prompt_version,
-    ))
+    log_event(
+        AuditEvent(
+            loop_id=loop_id,
+            event_type="llm_call",
+            payload={
+                "provider": "anthropic",
+                "model": model,
+                "system_chars": len(system),
+                "user_chars": len(user),
+            },
+            timestamp=datetime.now(UTC),
+            prompt_version=get_settings().prompt_version,
+        )
+    )
 
     # Construct the client once — not inside the retry loop — to avoid creating
     # a new HTTP connection pool on every attempt (Finding 7.6).
@@ -102,20 +108,22 @@ async def _call_anthropic(
                 messages=[{"role": "user", "content": user}],
                 temperature=temperature,
             )
-            content = _strip_fences(message.content[0].text)  # type: ignore[index]
+            content = _strip_fences(message.content[0].text)  # type: ignore[union-attr]
 
-            log_event(AuditEvent(
-                loop_id=loop_id,
-                event_type="llm_response",
-                payload={
-                    "provider": "anthropic",
-                    "model": model,
-                    "response_chars": len(content),
-                    "stop_reason": message.stop_reason,
-                },
-                timestamp=datetime.now(timezone.utc),
-                prompt_version=get_settings().prompt_version,
-            ))
+            log_event(
+                AuditEvent(
+                    loop_id=loop_id,
+                    event_type="llm_response",
+                    payload={
+                        "provider": "anthropic",
+                        "model": model,
+                        "response_chars": len(content),
+                        "stop_reason": message.stop_reason,
+                    },
+                    timestamp=datetime.now(UTC),
+                    prompt_version=get_settings().prompt_version,
+                )
+            )
 
             return content
 
@@ -123,7 +131,9 @@ async def _call_anthropic(
             delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
             logger.warning(
                 "Anthropic rate limit (attempt %d/%d). Retrying in %.1fs.",
-                attempt, MAX_RETRIES, delay,
+                attempt,
+                MAX_RETRIES,
+                delay,
             )
             await asyncio.sleep(delay)
             last_exc = LLMError(f"Anthropic rate limited after {attempt} attempts")
@@ -142,22 +152,28 @@ async def _call_anthropic(
             delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
             logger.warning(
                 "Anthropic connection error (attempt %d/%d). Retrying in %.1fs: %s",
-                attempt, MAX_RETRIES, delay, exc,
+                attempt,
+                MAX_RETRIES,
+                delay,
+                exc,
             )
             await asyncio.sleep(delay)
             last_exc = LLMError(f"Anthropic connection error: {exc}")
 
     error_msg = str(last_exc) if last_exc else "Unknown Anthropic error"
-    log_event(AuditEvent(
-        loop_id=loop_id,
-        event_type="error",
-        payload={"provider": "anthropic", "error": error_msg},
-        timestamp=datetime.now(timezone.utc),
-    ))
+    log_event(
+        AuditEvent(
+            loop_id=loop_id,
+            event_type="error",
+            payload={"provider": "anthropic", "error": error_msg},
+            timestamp=datetime.now(UTC),
+        )
+    )
     raise LLMError(f"Anthropic call failed after {MAX_RETRIES} retries: {error_msg}")
 
 
 # ── Public interface ──────────────────────────────────────────────────────────
+
 
 async def call_claude(
     system: str,

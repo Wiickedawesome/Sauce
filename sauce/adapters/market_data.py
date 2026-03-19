@@ -15,7 +15,7 @@ NOTE: Verify alpaca-py field names against https://alpaca.markets/docs/api-refer
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -29,21 +29,26 @@ logger = logging.getLogger(__name__)
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
+
 class MarketDataError(Exception):
     """Raised on unrecoverable Alpaca data API errors."""
+
     pass
 
 
 # ── Client factories ──────────────────────────────────────────────────────────
 
+
 def _get_stock_client() -> Any:
-    from alpaca.data.historical import StockHistoricalDataClient  # type: ignore[import-untyped]
+    from alpaca.data.historical import StockHistoricalDataClient
+
     s = get_settings()
     return StockHistoricalDataClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key)
 
 
 def _get_crypto_client() -> Any:
-    from alpaca.data.historical import CryptoHistoricalDataClient  # type: ignore[import-untyped]
+    from alpaca.data.historical import CryptoHistoricalDataClient
+
     s = get_settings()
     return CryptoHistoricalDataClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key)
 
@@ -58,6 +63,7 @@ _is_crypto = is_crypto
 
 
 # ── get_quote ─────────────────────────────────────────────────────────────────
+
 
 def get_quote(symbol: str) -> PriceReference:
     """
@@ -79,13 +85,13 @@ def get_quote(symbol: str) -> PriceReference:
 
 
 def _equity_quote(symbol: str) -> PriceReference:
-    from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
+    from alpaca.data.requests import StockLatestQuoteRequest
 
     s = get_settings()
     client = _get_stock_client()
     response = call_with_retry(
         client.get_stock_latest_quote,
-        StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=s.data_feed),
+        StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=s.data_feed),  # type: ignore[arg-type]
     )
     quote = response[symbol]
 
@@ -98,7 +104,7 @@ def _equity_quote(symbol: str) -> PriceReference:
 
 
 def _crypto_quote(symbol: str) -> PriceReference:
-    from alpaca.data.requests import CryptoLatestQuoteRequest  # type: ignore[import-untyped]
+    from alpaca.data.requests import CryptoLatestQuoteRequest
 
     client = _get_crypto_client()
     response = call_with_retry(
@@ -116,6 +122,7 @@ def _crypto_quote(symbol: str) -> PriceReference:
 
 
 # ── get_history ───────────────────────────────────────────────────────────────
+
 
 def get_history(
     symbol: str,
@@ -151,11 +158,10 @@ def get_history(
 
 
 def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    from alpaca.data.requests import StockBarsRequest  # type: ignore[import-untyped]
-    from alpaca.data.timeframe import TimeFrame  # type: ignore[import-untyped]
+    from alpaca.data.requests import StockBarsRequest
 
     tf = _parse_timeframe(timeframe)
-    start = datetime.now(timezone.utc) - timedelta(days=_days_back_for_bars(timeframe, bars))
+    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars))
 
     s = get_settings()
     client = _get_stock_client()
@@ -164,8 +170,8 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
         timeframe=tf,
         start=start,
         limit=bars,
-        adjustment="raw",
-        feed=s.data_feed,
+        adjustment="raw",  # type: ignore[arg-type]
+        feed=s.data_feed,  # type: ignore[arg-type]
     )
     bars_response = call_with_retry(client.get_stock_bars, request)
     df = bars_response.df
@@ -177,10 +183,10 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
 
 
 def _crypto_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    from alpaca.data.requests import CryptoBarsRequest  # type: ignore[import-untyped]
+    from alpaca.data.requests import CryptoBarsRequest
 
     tf = _parse_timeframe(timeframe)
-    start = datetime.now(timezone.utc) - timedelta(days=_days_back_for_bars(timeframe, bars))
+    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars))
 
     client = _get_crypto_client()
     request = CryptoBarsRequest(
@@ -199,6 +205,7 @@ def _crypto_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
 
 
 # ── get_universe_snapshot ─────────────────────────────────────────────────────
+
 
 def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     """
@@ -233,13 +240,13 @@ def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
 
 
 def _equity_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
-    from alpaca.data.requests import StockLatestQuoteRequest  # type: ignore[import-untyped]
+    from alpaca.data.requests import StockLatestQuoteRequest
 
     s = get_settings()
     client = _get_stock_client()
     response = call_with_retry(
         client.get_stock_latest_quote,
-        StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=s.data_feed),
+        StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=s.data_feed),  # type: ignore[arg-type]
     )
 
     result: dict[str, PriceReference] = {}
@@ -254,7 +261,7 @@ def _equity_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
 
 
 def _crypto_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
-    from alpaca.data.requests import CryptoLatestQuoteRequest  # type: ignore[import-untyped]
+    from alpaca.data.requests import CryptoLatestQuoteRequest
 
     client = _get_crypto_client()
     response = call_with_retry(
@@ -280,9 +287,9 @@ def get_active_equity_assets() -> list[dict[str, Any]]:
     Returns a list of dicts with keys: symbol, name, exchange, status, tradable.
     Uses the TradingClient (1 API call).
     """
-    from alpaca.trading.client import TradingClient  # type: ignore[import-untyped]
-    from alpaca.trading.requests import GetAssetsRequest  # type: ignore[import-untyped]
-    from alpaca.trading.enums import AssetClass, AssetStatus  # type: ignore[import-untyped]
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import AssetClass, AssetStatus
+    from alpaca.trading.requests import GetAssetsRequest
 
     s = get_settings()
     client = TradingClient(
@@ -294,7 +301,7 @@ def get_active_equity_assets() -> list[dict[str, Any]]:
     assets = call_with_retry(client.get_all_assets, request)
     return [
         {
-            "symbol": str(a.symbol),
+            "symbol": str(a.symbol),  # type: ignore[union-attr]
             "name": str(getattr(a, "name", "")),
             "exchange": str(getattr(a, "exchange", "")),
             "tradable": bool(getattr(a, "tradable", False)),
@@ -315,13 +322,13 @@ def get_bulk_equity_bars(
     Returns a dict mapping symbol → DataFrame (same format as get_history).
     Symbols without data are silently omitted.
     """
-    from alpaca.data.requests import StockBarsRequest  # type: ignore[import-untyped]
+    from alpaca.data.requests import StockBarsRequest
 
     if not symbols:
         return {}
 
     tf = _parse_timeframe(timeframe)
-    start = datetime.now(timezone.utc) - timedelta(days=_days_back_for_bars(timeframe, bars))
+    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars))
 
     s = get_settings()
     client = _get_stock_client()
@@ -330,8 +337,8 @@ def get_bulk_equity_bars(
         timeframe=tf,
         start=start,
         limit=bars,
-        adjustment="raw",
-        feed=s.data_feed,
+        adjustment="raw",  # type: ignore[arg-type]
+        feed=s.data_feed,  # type: ignore[arg-type]
     )
     bars_response = call_with_retry(client.get_stock_bars, request)
     df = bars_response.df
@@ -353,6 +360,7 @@ def get_bulk_equity_bars(
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+
 def _parse_timestamp(ts: Any) -> datetime:
     """
     Parse an API timestamp into a UTC-aware datetime.
@@ -361,12 +369,10 @@ def _parse_timestamp(ts: Any) -> datetime:
     substitutes datetime.now() which would mask stale data.
     """
     if ts is None:
-        raise MarketDataError(
-            "API returned no timestamp. Treating data as stale — no trade."
-        )
+        raise MarketDataError("API returned no timestamp. Treating data as stale — no trade.")
     if isinstance(ts, datetime):
         if ts.tzinfo is None:
-            return ts.replace(tzinfo=timezone.utc)
+            return ts.replace(tzinfo=UTC)
         return ts
     if isinstance(ts, str):
         try:
@@ -383,7 +389,7 @@ def _parse_timeframe(timeframe: str) -> Any:
 
     Supported: "1Min", "5Min", "15Min", "30Min", "1Hour", "4Hour", "1Day".
     """
-    from alpaca.data.timeframe import TimeFrame  # type: ignore[import-untyped]
+    from alpaca.data.timeframe import TimeFrame
 
     mapping: dict[str, Any] = {
         "1Min": TimeFrame.Minute,
@@ -397,8 +403,7 @@ def _parse_timeframe(timeframe: str) -> Any:
     tf = mapping.get(timeframe)
     if tf is None:
         raise MarketDataError(
-            f"Unsupported timeframe '{timeframe}'. "
-            f"Use one of: {list(mapping.keys())}"
+            f"Unsupported timeframe '{timeframe}'. Use one of: {list(mapping.keys())}"
         )
     return tf
 
@@ -410,8 +415,13 @@ def _days_back_for_bars(timeframe: str, bars: int) -> int:
     Adds a 2x buffer for weekends/holidays. Minimum of 5 days.
     """
     minutes_per_bar = {
-        "1Min": 1, "5Min": 5, "15Min": 15, "30Min": 30,
-        "1Hour": 60, "4Hour": 240, "1Day": 390,
+        "1Min": 1,
+        "5Min": 5,
+        "15Min": 15,
+        "30Min": 30,
+        "1Hour": 60,
+        "4Hour": 240,
+        "1Day": 390,
     }
     mins = minutes_per_bar.get(timeframe, 30)
     # US market: ~390 trading minutes/day → ~6.5 hours

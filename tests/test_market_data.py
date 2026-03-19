@@ -4,7 +4,7 @@ tests/test_market_data.py — Tests for adapters/market_data.py.
 Mocks alpaca-py data clients — no real API calls.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -12,8 +12,8 @@ import pytest
 
 from sauce.core.schemas import PriceReference
 
-
 # ── Env setup ─────────────────────────────────────────────────────────────────
+
 
 def set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
@@ -21,15 +21,18 @@ def set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_PAPER", "true")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
 
 def clear_cache() -> None:
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
 
 def make_bar_df(
     symbol: str = "AAPL",
@@ -53,9 +56,7 @@ def make_bar_df(
     }
 
     if index_type == "multi":
-        idx = pd.MultiIndex.from_product(
-            [[symbol], timestamps], names=["symbol", "timestamp"]
-        )
+        idx = pd.MultiIndex.from_product([[symbol], timestamps], names=["symbol", "timestamp"])
         return pd.DataFrame(data, index=idx)
     else:
         df = pd.DataFrame(data, index=timestamps)
@@ -73,11 +74,12 @@ def make_quote_mock(
     q = MagicMock()
     q.bid_price = bid
     q.ask_price = ask
-    q.timestamp = ts or datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+    q.timestamp = ts or datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     return q
 
 
 # ── get_quote — equity ────────────────────────────────────────────────────────
+
 
 def test_get_quote_equity_returns_price_reference(
     monkeypatch: pytest.MonkeyPatch,
@@ -85,7 +87,7 @@ def test_get_quote_equity_returns_price_reference(
     set_env(monkeypatch)
     from sauce.adapters import market_data
 
-    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     mock_quote = make_quote_mock("AAPL", ts=ts)
 
     mock_client = MagicMock()
@@ -108,7 +110,7 @@ def test_get_quote_equity_as_of_comes_from_api_not_now(
     from sauce.adapters import market_data
 
     # Historical timestamp well in the past, proving it isn't datetime.now()
-    historical_ts = datetime(2023, 6, 15, 14, 0, 0, tzinfo=timezone.utc)
+    historical_ts = datetime(2023, 6, 15, 14, 0, 0, tzinfo=UTC)
     mock_quote = make_quote_mock("AAPL", ts=historical_ts)
 
     mock_client = MagicMock()
@@ -123,13 +125,14 @@ def test_get_quote_equity_as_of_comes_from_api_not_now(
 
 # ── get_quote — crypto ────────────────────────────────────────────────────────
 
+
 def test_get_quote_crypto_uses_crypto_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_env(monkeypatch)
     from sauce.adapters import market_data
 
-    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     mock_quote = make_quote_mock("BTC/USD", bid=42000.0, ask=42100.0, ts=ts)
 
     stock_client = MagicMock()
@@ -137,9 +140,7 @@ def test_get_quote_crypto_uses_crypto_client(
     crypto_client.get_crypto_latest_quote.return_value = {"BTC/USD": mock_quote}
 
     with patch("sauce.adapters.market_data._get_stock_client", return_value=stock_client):
-        with patch(
-            "sauce.adapters.market_data._get_crypto_client", return_value=crypto_client
-        ):
+        with patch("sauce.adapters.market_data._get_crypto_client", return_value=crypto_client):
             result = market_data.get_quote("BTC/USD")
 
     stock_client.get_stock_latest_quote.assert_not_called()
@@ -150,6 +151,7 @@ def test_get_quote_crypto_uses_crypto_client(
 
 
 # ── _parse_timestamp — None must raise, not use datetime.now() ────────────────
+
 
 def test_parse_timestamp_raises_on_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """
@@ -202,6 +204,7 @@ def test_parse_timestamp_raises_on_invalid_string(
 
 # ── get_history ───────────────────────────────────────────────────────────────
 
+
 def test_get_history_equity_returns_dataframe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,9 +236,7 @@ def test_get_history_crypto_uses_crypto_client(
     crypto_client.get_crypto_bars.return_value.df = mock_df
 
     with patch("sauce.adapters.market_data._get_stock_client", return_value=stock_client):
-        with patch(
-            "sauce.adapters.market_data._get_crypto_client", return_value=crypto_client
-        ):
+        with patch("sauce.adapters.market_data._get_crypto_client", return_value=crypto_client):
             result = market_data.get_history("ETH/USD", timeframe="30Min", bars=5)
 
     stock_client.get_stock_bars.assert_not_called()
@@ -279,6 +280,7 @@ def test_get_history_raises_market_data_error_on_failure(
 
 # ── get_universe_snapshot ─────────────────────────────────────────────────────
 
+
 def make_batch_quote(symbol: str, ts: datetime) -> MagicMock:
     q = MagicMock()
     q.bid_price = 100.0
@@ -293,7 +295,7 @@ def test_get_universe_snapshot_merges_equity_and_crypto(
     set_env(monkeypatch)
     from sauce.adapters import market_data
 
-    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
 
     equity_snap = {
         "AAPL": make_batch_quote("AAPL", ts),
@@ -306,13 +308,11 @@ def test_get_universe_snapshot_merges_equity_and_crypto(
     mock_crypto_client = MagicMock()
     mock_crypto_client.get_crypto_latest_quote.return_value = crypto_snap
 
-    with patch(
-        "sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client
+    with (
+        patch("sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client),
+        patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
     ):
-        with patch(
-            "sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client
-        ):
-            result = market_data.get_universe_snapshot(["AAPL", "MSFT", "BTC/USD"])
+        result = market_data.get_universe_snapshot(["AAPL", "MSFT", "BTC/USD"])
 
     assert "AAPL" in result
     assert "MSFT" in result
@@ -328,7 +328,7 @@ def test_get_universe_snapshot_partial_failure_does_not_crash(
     set_env(monkeypatch)
     from sauce.adapters import market_data
 
-    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     equity_snap = {"AAPL": make_batch_quote("AAPL", ts)}
 
     mock_stock_client = MagicMock()
@@ -336,13 +336,11 @@ def test_get_universe_snapshot_partial_failure_does_not_crash(
     mock_crypto_client = MagicMock()
     mock_crypto_client.get_crypto_latest_quote.side_effect = Exception("Crypto API down")
 
-    with patch(
-        "sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client
+    with (
+        patch("sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client),
+        patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
     ):
-        with patch(
-            "sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client
-        ):
-            result = market_data.get_universe_snapshot(["AAPL", "BTC/USD"])
+        result = market_data.get_universe_snapshot(["AAPL", "BTC/USD"])
 
     assert "AAPL" in result
     assert isinstance(result["AAPL"], PriceReference)
@@ -366,20 +364,18 @@ def test_get_universe_snapshot_equity_only(
     set_env(monkeypatch)
     from sauce.adapters import market_data
 
-    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     equity_snap = {"AAPL": make_batch_quote("AAPL", ts)}
 
     mock_stock_client = MagicMock()
     mock_stock_client.get_stock_latest_quote.return_value = equity_snap
     mock_crypto_client = MagicMock()
 
-    with patch(
-        "sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client
+    with (
+        patch("sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client),
+        patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
     ):
-        with patch(
-            "sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client
-        ):
-            result = market_data.get_universe_snapshot(["AAPL"])
+        result = market_data.get_universe_snapshot(["AAPL"])
 
     mock_crypto_client.get_crypto_latest_quote.assert_not_called()
     assert "AAPL" in result

@@ -7,13 +7,13 @@ unexpected restarts (Finding F-13 / IMP-15).
 
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from json import dumps
 
 
 def main() -> int:
     db_path = os.environ.get("DB_PATH", "data/sauce.db")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     try:
         conn = sqlite3.connect(db_path)

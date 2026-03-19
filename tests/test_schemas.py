@@ -8,24 +8,23 @@ Every schema must:
 - Enforce field constraints (types, ranges, literals).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
 from sauce.core.schemas import (
     AuditEvent,
-    Indicators,
     Order,
     PriceReference,
 )
 
-
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 PROMPT_V = "v1"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def make_price_ref(**overrides: object) -> PriceReference:
     base = {"symbol": "AAPL", "bid": 150.0, "ask": 150.10, "mid": 150.05, "as_of": NOW}
@@ -48,6 +47,7 @@ def make_order(**overrides: object) -> Order:
 
 # ── PriceReference ────────────────────────────────────────────────────────────
 
+
 def test_price_reference_valid() -> None:
     ref = make_price_ref()
     assert ref.symbol == "AAPL"
@@ -62,7 +62,11 @@ def test_price_reference_negative_price_rejected() -> None:
 def test_price_reference_extra_field_rejected() -> None:
     with pytest.raises(ValidationError):
         PriceReference(
-            symbol="AAPL", bid=150.0, ask=150.1, mid=150.05, as_of=NOW,
+            symbol="AAPL",
+            bid=150.0,
+            ask=150.1,
+            mid=150.05,
+            as_of=NOW,
             unexpected_field="boom",  # type: ignore[call-arg]
         )
 
@@ -73,6 +77,7 @@ def test_price_reference_missing_as_of_rejected() -> None:
 
 
 # ── Order ─────────────────────────────────────────────────────────────────────
+
 
 def test_order_valid() -> None:
     o = make_order()
@@ -102,6 +107,7 @@ def test_order_invalid_side_rejected() -> None:
 
 
 # ── AuditEvent ────────────────────────────────────────────────────────────────
+
 
 def test_audit_event_valid() -> None:
     event = AuditEvent(

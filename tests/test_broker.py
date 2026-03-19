@@ -4,16 +4,15 @@ tests/test_broker.py — Tests for adapters/broker.py.
 Mocks alpaca-py TradingClient — no real API calls.
 """
 
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from sauce.core.schemas import Order
 
-
 # ── Env setup ─────────────────────────────────────────────────────────────────
+
 
 def set_env(monkeypatch: pytest.MonkeyPatch, paper: str = "true") -> None:
     monkeypatch.setenv("ALPACA_API_KEY", "test_key")
@@ -21,12 +20,13 @@ def set_env(monkeypatch: pytest.MonkeyPatch, paper: str = "true") -> None:
     monkeypatch.setenv("ALPACA_PAPER", paper)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     from sauce.core.config import get_settings
+
     get_settings.cache_clear()
 
 
 # ── Build a minimal Order ─────────────────────────────────────────────────────
 
-_TS = datetime(2024, 1, 2, 15, 30, 0, tzinfo=timezone.utc)
+_TS = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
 _PVER = "v1-test"
 
 
@@ -64,6 +64,7 @@ def make_market_order(
 
 # ── Fake Alpaca account ───────────────────────────────────────────────────────
 
+
 def make_fake_account() -> MagicMock:
     acct = MagicMock()
     acct.id = "acct-001"
@@ -95,6 +96,7 @@ def make_fake_order_response() -> MagicMock:
 
 # ── get_account ───────────────────────────────────────────────────────────────
 
+
 def test_get_account_returns_dict(monkeypatch: pytest.MonkeyPatch) -> None:
     set_env(monkeypatch)
     from sauce.adapters import broker
@@ -109,9 +111,7 @@ def test_get_account_returns_dict(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(result, dict)
     assert "id" in result
     assert result["id"] == "acct-001"
-    get_settings = __import__(
-        "sauce.core.config", fromlist=["get_settings"]
-    ).get_settings
+    get_settings = __import__("sauce.core.config", fromlist=["get_settings"]).get_settings
     get_settings.cache_clear()
 
 
@@ -126,6 +126,7 @@ def test_get_account_logs_audit_events(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def capture_log(event: object) -> None:
         from sauce.core.schemas import AuditEvent
+
         if isinstance(event, AuditEvent):
             logged_events.append(event.event_type)
 
@@ -153,6 +154,7 @@ def test_get_account_raises_broker_error_on_failure(
 
 
 # ── get_positions ─────────────────────────────────────────────────────────────
+
 
 def test_get_positions_returns_list(monkeypatch: pytest.MonkeyPatch) -> None:
     set_env(monkeypatch)
@@ -188,6 +190,7 @@ def test_get_positions_raises_broker_error_on_failure(
 
 
 # ── place_order ───────────────────────────────────────────────────────────────
+
 
 def test_place_order_limit_calls_submit_order(
     monkeypatch: pytest.MonkeyPatch,
@@ -279,6 +282,7 @@ def test_place_order_logs_audit_events(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def capture_log(event: object) -> None:
         from sauce.core.schemas import AuditEvent
+
         if isinstance(event, AuditEvent):
             logged_events.append(event.event_type)
 
@@ -292,6 +296,7 @@ def test_place_order_logs_audit_events(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ── paper=True is enforced ────────────────────────────────────────────────────
 
+
 def test_trading_client_uses_paper_true_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -300,6 +305,7 @@ def test_trading_client_uses_paper_true_by_default(
     with patch("alpaca.trading.client.TradingClient") as mock_tc_class:
         mock_tc_class.return_value = MagicMock()
         import sauce.adapters.broker as broker_mod
+
         broker_mod._get_trading_client()
 
     _, kwargs = mock_tc_class.call_args
@@ -315,6 +321,7 @@ def test_trading_client_paper_false_when_env_set(
     with patch("alpaca.trading.client.TradingClient") as mock_tc_class:
         mock_tc_class.return_value = MagicMock()
         import sauce.adapters.broker as broker_mod
+
         broker_mod._get_trading_client()
 
     _, kwargs = mock_tc_class.call_args
@@ -322,6 +329,7 @@ def test_trading_client_paper_false_when_env_set(
 
 
 # ── Crypto order dispatch ─────────────────────────────────────────────────────
+
 
 def test_place_order_crypto_symbol_dispatches_correctly(
     monkeypatch: pytest.MonkeyPatch,
@@ -355,6 +363,7 @@ def test_place_order_crypto_symbol_dispatches_correctly(
 
 
 # ── get_recent_orders (IMP-03) ────────────────────────────────────────────────
+
 
 def test_get_recent_orders_returns_list(monkeypatch):
     """get_recent_orders returns a list of dicts from broker."""

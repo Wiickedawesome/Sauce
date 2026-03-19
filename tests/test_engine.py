@@ -14,27 +14,22 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from sauce.core.schemas import Indicators, Order
-from sauce.exit_monitor import ExitSignal, evaluate_exit
-from sauce.risk import RiskVerdict, check_risk
+from sauce.core.schemas import Indicators
+from sauce.exit_monitor import evaluate_exit
+from sauce.risk import check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion, _compute_bb_pct
 from sauce.strategy import (
-    BUILDING_PARAMS,
-    OPERATING_PARAMS,
-    SCALING_PARAMS,
     SEED_PARAMS,
     ExitPlan,
     Position,
     SignalResult,
-    TierParams,
     get_tier_params,
 )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Tier Table
@@ -45,14 +40,14 @@ class TestTierTable:
     def test_seed_tier(self):
         tier = get_tier_params(1_000.0)
         assert tier.tier == "seed"
-        assert tier.max_concurrent == 2
-        assert tier.max_position_pct == 0.30
+        assert tier.max_concurrent == 4
+        assert tier.max_position_pct == 0.40
 
     def test_building_tier(self):
         tier = get_tier_params(25_000.0)
         assert tier.tier == "building"
-        assert tier.max_concurrent == 4
-        assert tier.max_position_pct == 0.15
+        assert tier.max_concurrent == 6
+        assert tier.max_position_pct == 0.25
 
     def test_scaling_tier(self):
         tier = get_tier_params(75_000.0)
@@ -63,7 +58,7 @@ class TestTierTable:
         tier = get_tier_params(150_000.0)
         assert tier.tier == "operating"
         assert tier.max_concurrent == 12
-        assert tier.max_position_pct == 0.05
+        assert tier.max_position_pct == 0.10
 
     def test_boundary_building(self):
         """Exactly $10K should be building tier."""
@@ -126,11 +121,11 @@ class TestCryptoMomentumReversion:
         assert result.side == "hold"
 
     def test_rsi_oversold_only(self):
-        """RSI < 42 → 25 pts + MACD dip 15 pts = 40, below threshold 50 → not fired."""
+        """RSI < 45 → 25 pts + MACD dip 15 pts = 40, threshold 40 → fired."""
         ind = _make_indicators(rsi_14=30, volume_ratio=1.0, macd_histogram=-1.0)
         result = self.strategy.score(ind, "BTC/USD", "neutral", 100.0)
         assert result.score == 40  # RSI 25 + MACD dip 15
-        assert not result.fired
+        assert result.fired  # 40 >= 40 threshold
 
     def test_all_conditions_met(self):
         """All non-contradictory conditions → max pts, definitely fired."""
@@ -164,28 +159,28 @@ class TestCryptoMomentumReversion:
         assert result.side == "buy"
 
     def test_regime_bullish_lowers_threshold(self):
-        """Bullish regime → threshold 45, easier to fire."""
+        """Bullish regime → threshold 40 (no shift), fires easily."""
         ind = _make_indicators(
-            rsi_14=30,           # 25 pts (RSI < 42)
+            rsi_14=30,  # 25 pts (RSI < 45)
             macd_histogram=0.5,  # 20 pts (momentum shift)
             volume_ratio=1.0,
         )
         result = self.strategy.score(ind, "BTC/USD", "bullish", 100.0)
-        assert result.threshold == 45
+        assert result.threshold == 40  # bullish shift = 0
         assert result.score == 45
         assert result.fired
 
     def test_regime_bearish_raises_threshold(self):
-        """Bearish regime → threshold 60, harder to fire."""
+        """Bearish regime → threshold 30 (volatility = opportunity), easier to fire."""
         ind = _make_indicators(
-            rsi_14=30,           # 25 pts (RSI < 42)
+            rsi_14=30,  # 25 pts (RSI < 45)
             macd_histogram=0.5,  # 20 pts (momentum shift)
             volume_ratio=1.0,
         )
         result = self.strategy.score(ind, "BTC/USD", "bearish", 100.0)
-        assert result.threshold == 60
+        assert result.threshold == 30  # bearish shift = -10
         assert result.score == 45
-        assert not result.fired
+        assert result.fired  # 45 >= 30
 
     def test_bb_pct_at_lower(self):
         """Price exactly at lower BB → bb_pct 0.0 → 25 pts."""
@@ -215,18 +210,18 @@ class TestCryptoMomentumReversion:
         result = self.strategy.score(ind, "SOL/USD", "neutral", 100.0)
         assert result.symbol == "SOL/USD"
         assert result.regime == "neutral"
-        assert result.strategy_name == "crypto_momentum_reversion"
+        assert result.strategy_name == "crypto_momentum"
         assert result.rsi_14 == 25
         assert result.volume_ratio == 2.0
 
     def test_mean_reversion_typical_scenario(self):
         """Typical mean reversion setup: oversold + dip confirmed + volume."""
         ind = _make_indicators(
-            rsi_14=38,           # 25 pts (below 42)
+            rsi_14=38,  # 25 pts (below 42)
             bb_upper=110.0,
             bb_lower=95.0,
             macd_histogram=-2.0,  # 15 pts (dip confirmed)
-            volume_ratio=1.5,     # 20 pts (volume spike)
+            volume_ratio=1.5,  # 20 pts (volume spike)
         )
         # Price at lower band area → bb_pct ~ 0.0
         result = self.strategy.score(ind, "BTC/USD", "bearish", 95.0)
@@ -237,15 +232,22 @@ class TestCryptoMomentumReversion:
     def test_build_order_sizing(self):
         """Order size = tier.max_position_pct × equity / ask."""
         signal = SignalResult(
-            symbol="BTC/USD", side="buy", score=80, threshold=65,
-            fired=True, rsi_14=30, macd_hist=0.5, bb_pct=-0.1,
-            volume_ratio=2.0, regime="neutral",
-            strategy_name="crypto_momentum_reversion",
+            symbol="BTC/USD",
+            side="buy",
+            score=80,
+            threshold=65,
+            fired=True,
+            rsi_14=30,
+            macd_hist=0.5,
+            bb_pct=-0.1,
+            volume_ratio=2.0,
+            regime="neutral",
+            strategy_name="crypto_momentum",
         )
         account = {"equity": "10000", "_ask": "50000"}
         order = self.strategy.build_order(signal, account, SEED_PARAMS)
-        # 30% of $10K = $3K / $50K ask = 0.06 BTC
-        assert order.qty == pytest.approx(0.06, rel=0.01)
+        # 40% of $10K = $4K / $50K ask = 0.08 BTC
+        assert order.qty == pytest.approx(0.08, rel=0.01)
         assert order.side == "buy"
         assert order.order_type == "limit"
         assert order.limit_price == pytest.approx(50000 * 1.001, rel=0.001)
@@ -253,9 +255,9 @@ class TestCryptoMomentumReversion:
     def test_build_exit_plan(self):
         pos = Position(symbol="BTC/USD", entry_price=50000)
         plan = self.strategy.build_exit_plan(pos, SEED_PARAMS)
-        assert plan.stop_loss_pct == 0.03
-        assert plan.trail_activation_pct == 0.03
-        assert plan.profit_target_pct == 0.06
+        assert plan.stop_loss_pct == 0.05
+        assert plan.trail_activation_pct == 0.06
+        assert plan.profit_target_pct == 0.12
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,18 +268,26 @@ class TestCryptoMomentumReversion:
 class TestRiskGate:
     def test_all_pass(self):
         v = check_risk(
-            daily_pnl=0.0, equity=10000, open_position_count=1,
-            buying_power=5000, order_value=1000,
-            daily_loss_limit=0.08, max_concurrent=2,
+            daily_pnl=0.0,
+            equity=10000,
+            open_position_count=1,
+            buying_power=5000,
+            order_value=1000,
+            daily_loss_limit=0.08,
+            max_concurrent=2,
         )
         assert v.passed
         assert v.rule == "all"
 
     def test_daily_pnl_fail(self):
         v = check_risk(
-            daily_pnl=-0.09, equity=10000, open_position_count=0,
-            buying_power=5000, order_value=1000,
-            daily_loss_limit=0.08, max_concurrent=2,
+            daily_pnl=-0.09,
+            equity=10000,
+            open_position_count=0,
+            buying_power=5000,
+            order_value=1000,
+            daily_loss_limit=0.08,
+            max_concurrent=2,
         )
         assert not v.passed
         assert v.rule == "daily_pnl"
@@ -285,27 +295,39 @@ class TestRiskGate:
     def test_daily_pnl_at_limit(self):
         """Exactly at the limit → fail (<=)."""
         v = check_risk(
-            daily_pnl=-0.08, equity=10000, open_position_count=0,
-            buying_power=5000, order_value=1000,
-            daily_loss_limit=0.08, max_concurrent=2,
+            daily_pnl=-0.08,
+            equity=10000,
+            open_position_count=0,
+            buying_power=5000,
+            order_value=1000,
+            daily_loss_limit=0.08,
+            max_concurrent=2,
         )
         assert not v.passed
         assert v.rule == "daily_pnl"
 
     def test_position_count_fail(self):
         v = check_risk(
-            daily_pnl=0.0, equity=10000, open_position_count=2,
-            buying_power=5000, order_value=1000,
-            daily_loss_limit=0.08, max_concurrent=2,
+            daily_pnl=0.0,
+            equity=10000,
+            open_position_count=2,
+            buying_power=5000,
+            order_value=1000,
+            daily_loss_limit=0.08,
+            max_concurrent=2,
         )
         assert not v.passed
         assert v.rule == "position_count"
 
     def test_buying_power_fail(self):
         v = check_risk(
-            daily_pnl=0.0, equity=10000, open_position_count=0,
-            buying_power=500, order_value=1000,
-            daily_loss_limit=0.08, max_concurrent=2,
+            daily_pnl=0.0,
+            equity=10000,
+            open_position_count=0,
+            buying_power=500,
+            order_value=1000,
+            daily_loss_limit=0.08,
+            max_concurrent=2,
         )
         assert not v.passed
         assert v.rule == "buying_power"
@@ -313,9 +335,13 @@ class TestRiskGate:
     def test_first_failure_wins(self):
         """When multiple rules fail, the first one (daily_pnl) is reported."""
         v = check_risk(
-            daily_pnl=-0.10, equity=10000, open_position_count=5,
-            buying_power=0, order_value=1000,
-            daily_loss_limit=0.08, max_concurrent=2,
+            daily_pnl=-0.10,
+            equity=10000,
+            open_position_count=5,
+            buying_power=0,
+            order_value=1000,
+            daily_loss_limit=0.08,
+            max_concurrent=2,
         )
         assert not v.passed
         assert v.rule == "daily_pnl"
@@ -346,7 +372,7 @@ def _make_position(**overrides) -> Position:
         symbol="BTC/USD",
         entry_price=100.0,
         qty=1.0,
-        entry_time=datetime.now(timezone.utc),
+        entry_time=datetime.now(UTC),
     )
     defaults.update(overrides)
     return Position(**defaults)
@@ -442,7 +468,7 @@ class TestExitMonitor:
 
     def test_time_stop(self):
         """Held 50 hours with 0.5% gain < 1% min → time stop."""
-        entry_time = datetime.now(timezone.utc) - timedelta(hours=50)
+        entry_time = datetime.now(UTC) - timedelta(hours=50)
         pos = _make_position(entry_price=100.0, entry_time=entry_time)
         plan = _make_plan(max_hold_hours=48, time_stop_min_gain=0.01, profit_target_pct=0.20)
         sig, _ = evaluate_exit(pos, plan, 100.5, rsi_14=50.0)
@@ -451,7 +477,7 @@ class TestExitMonitor:
 
     def test_time_stop_not_triggered_with_gain(self):
         """Held 50 hours but gain 2% > 1% min → no time stop."""
-        entry_time = datetime.now(timezone.utc) - timedelta(hours=50)
+        entry_time = datetime.now(UTC) - timedelta(hours=50)
         pos = _make_position(entry_price=100.0, entry_time=entry_time)
         plan = _make_plan(max_hold_hours=48, time_stop_min_gain=0.01, profit_target_pct=0.20)
         sig, _ = evaluate_exit(pos, plan, 102.0, rsi_14=50.0)
@@ -481,7 +507,9 @@ class TestMorningBrief:
         from sauce.morning_brief import get_regime
 
         mock_response = json.dumps({"regime": "bullish", "reasoning": "BTC up big"})
-        with patch("sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value=mock_response):
+        with patch(
+            "sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value=mock_response
+        ):
             result = asyncio.run(get_regime(0.05, 0.03, 0.01, 15.0, 55.0))
         assert result == "bullish"
 
@@ -489,7 +517,9 @@ class TestMorningBrief:
         from sauce.morning_brief import get_regime
 
         mock_response = json.dumps({"regime": "bearish", "reasoning": "All red"})
-        with patch("sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value=mock_response):
+        with patch(
+            "sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value=mock_response
+        ):
             result = asyncio.run(get_regime(-0.05, -0.03, -0.02, 30.0, 25.0))
         assert result == "bearish"
 
@@ -498,7 +528,11 @@ class TestMorningBrief:
         from sauce.adapters.llm import LLMError
         from sauce.morning_brief import get_regime
 
-        with patch("sauce.morning_brief.call_claude", new_callable=AsyncMock, side_effect=LLMError("API down")):
+        with patch(
+            "sauce.morning_brief.call_claude",
+            new_callable=AsyncMock,
+            side_effect=LLMError("API down"),
+        ):
             result = asyncio.run(get_regime(0.0, 0.0, 0.0, 20.0, 50.0))
         assert result == "neutral"
 
@@ -507,7 +541,9 @@ class TestMorningBrief:
         from sauce.morning_brief import get_regime
 
         mock_response = json.dumps({"regime": "sideways", "reasoning": "mixed"})
-        with patch("sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value=mock_response):
+        with patch(
+            "sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value=mock_response
+        ):
             result = asyncio.run(get_regime(0.0, 0.0, 0.0, 20.0, 50.0))
         assert result == "neutral"
 
@@ -515,7 +551,9 @@ class TestMorningBrief:
         """Claude returns non-JSON → falls back to neutral."""
         from sauce.morning_brief import get_regime
 
-        with patch("sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value="not valid json"):
+        with patch(
+            "sauce.morning_brief.call_claude", new_callable=AsyncMock, return_value="not valid json"
+        ):
             result = asyncio.run(get_regime(0.0, 0.0, 0.0, 20.0, 50.0))
         assert result == "neutral"
 
@@ -532,10 +570,13 @@ class TestDatabase:
     """
 
     def test_save_and_load_position(self):
-        from sauce.db import close_position, load_open_positions, save_position
+        from sauce.db import load_open_positions, save_position
 
         pos = Position(
-            id="pos-1", symbol="BTC/USD", qty=0.5, entry_price=50000.0,
+            id="pos-1",
+            symbol="BTC/USD",
+            qty=0.5,
+            entry_price=50000.0,
             strategy_name="crypto_momentum_reversion",
         )
         save_position(pos)
@@ -548,8 +589,9 @@ class TestDatabase:
     def test_close_position(self):
         from sauce.db import close_position, load_open_positions, save_position
 
-        pos = Position(id="pos-2", symbol="ETH/USD", qty=1.0, entry_price=3000.0,
-                       strategy_name="test")
+        pos = Position(
+            id="pos-2", symbol="ETH/USD", qty=1.0, entry_price=3000.0, strategy_name="test"
+        )
         save_position(pos)
         close_position("pos-2")
         loaded = load_open_positions()
@@ -558,8 +600,9 @@ class TestDatabase:
     def test_update_position(self):
         from sauce.db import load_open_positions, save_position, update_position
 
-        pos = Position(id="pos-3", symbol="SOL/USD", qty=10.0, entry_price=150.0,
-                       strategy_name="test")
+        pos = Position(
+            id="pos-3", symbol="SOL/USD", qty=10.0, entry_price=150.0, strategy_name="test"
+        )
         save_position(pos)
 
         pos.trailing_active = True
@@ -578,9 +621,16 @@ class TestDatabase:
         from sauce.db import SignalLogRow, log_signal
 
         signal = SignalResult(
-            symbol="BTC/USD", side="buy", score=80, threshold=65,
-            fired=True, rsi_14=30.0, macd_hist=0.5, bb_pct=-0.1,
-            volume_ratio=2.0, regime="neutral",
+            symbol="BTC/USD",
+            side="buy",
+            score=80,
+            threshold=65,
+            fired=True,
+            rsi_14=30.0,
+            macd_hist=0.5,
+            bb_pct=-0.1,
+            volume_ratio=2.0,
+            regime="neutral",
             strategy_name="crypto_momentum_reversion",
         )
         log_signal(signal)
@@ -600,9 +650,12 @@ class TestDatabase:
         from sauce.db import TradeRow, log_trade
 
         pos = Position(
-            id="trade-1", symbol="BTC/USD", qty=0.5, entry_price=50000.0,
+            id="trade-1",
+            symbol="BTC/USD",
+            qty=0.5,
+            entry_price=50000.0,
             strategy_name="test",
-            entry_time=datetime.now(timezone.utc) - timedelta(hours=24),
+            entry_time=datetime.now(UTC) - timedelta(hours=24),
         )
         log_trade(pos, exit_price=52000.0, exit_trigger="profit_target")
 
@@ -616,10 +669,9 @@ class TestDatabase:
             session.close()
 
     def test_daily_stats_upsert(self):
-        from sauce.db import get_daily_pnl, upsert_daily_stats
+        from sauce.db import upsert_daily_stats
 
-        upsert_daily_stats("2026-03-15", loop_runs=1, orders_placed=2,
-                          realized_pnl_usd=150.0)
+        upsert_daily_stats("2026-03-15", loop_runs=1, orders_placed=2, realized_pnl_usd=150.0)
         upsert_daily_stats("2026-03-15", loop_runs=1, orders_placed=1)
 
         # Additive fields should accumulate
@@ -637,6 +689,7 @@ class TestDatabase:
 
     def test_get_daily_pnl_zero_when_missing(self):
         from sauce.db import get_daily_pnl
+
         assert get_daily_pnl("2099-01-01") == 0.0
 
     def test_instrument_meta_upsert(self):

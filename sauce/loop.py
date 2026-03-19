@@ -25,18 +25,12 @@ import asyncio
 import logging
 import signal
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
+from sauce.adapters.broker import BrokerError, get_account, place_order
 from sauce.adapters.market_data import MarketDataError, get_history, get_quote
 from sauce.core.config import get_settings
-from sauce.core.schemas import Order
-from sauce.exit_monitor import evaluate_exit
-from sauce.indicators.core import compute_all
-from sauce.morning_brief import get_regime
-from sauce.risk import check_risk
-from sauce.strategies.crypto_momentum import CryptoMomentumReversion
-from sauce.strategy import Position, get_tier_params
+from sauce.core.schemas import Indicators, Order
 from sauce.db import (
     close_position,
     load_open_positions,
@@ -46,6 +40,13 @@ from sauce.db import (
     update_position,
     upsert_daily_stats,
 )
+from sauce.exit_monitor import evaluate_exit
+from sauce.indicators.core import compute_all
+from sauce.morning_brief import get_regime
+from sauce.risk import check_risk
+from sauce.strategies.crypto_momentum import CryptoMomentumReversion
+from sauce.strategies.equity_momentum import EquityMomentum
+from sauce.strategy import Position, Strategy, get_tier_params
 
 logger = logging.getLogger(__name__)
 
@@ -61,23 +62,29 @@ def _handle_signal(signum: int, _frame: object) -> None:
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 
-STRATEGIES = [CryptoMomentumReversion()]
+STRATEGIES: list[Strategy] = [CryptoMomentumReversion(), EquityMomentum()]
+
+
+def _is_crypto(symbol: str) -> bool:
+    """Detect if symbol is crypto (contains '/' like BTC/USD)."""
+    return "/" in symbol
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _hour_et() -> int:
     """Current hour in US/Eastern (approximate: UTC−5 for EST, UTC−4 for EDT)."""
     from zoneinfo import ZoneInfo
+
     return datetime.now(ZoneInfo("America/New_York")).hour
 
 
-def _fetch_indicators(symbol: str, is_crypto: bool):
+def _fetch_indicators(symbol: str, is_crypto: bool) -> Indicators | None:
     """Fetch history and compute indicators for a symbol."""
     bars = 100  # enough for SMA50 + MACD
     timeframe = "1Hour" if is_crypto else "1Day"
@@ -87,13 +94,13 @@ def _fetch_indicators(symbol: str, is_crypto: bool):
     return compute_all(df, is_crypto=is_crypto)
 
 
-def _gather_brief_data() -> dict:
+def _gather_brief_data() -> dict[str, float]:
     """Fetch real market data for the morning brief.
 
     Returns dict with keys: btc_change, eth_change, spy_change, vix, btc_rsi.
     Each value has a sensible fallback if its specific API call fails.
     """
-    result: dict = {
+    result: dict[str, float] = {
         "btc_change": 0.0,
         "eth_change": 0.0,
         "spy_change": 0.0,
@@ -156,9 +163,9 @@ def _gather_brief_data() -> dict:
 # ── Entry Scan ────────────────────────────────────────────────────────────────
 
 
-def _scan_entries(regime: str, account: dict, open_positions: list[Position]) -> None:
+def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Position]) -> None:
     """Score each strategy instrument for entry signals."""
-    settings = get_settings()
+    get_settings()
     equity = float(account.get("equity", "0"))
     buying_power = float(account.get("buying_power", "0"))
     tier = get_tier_params(equity)
@@ -180,7 +187,8 @@ def _scan_entries(regime: str, account: dict, open_positions: list[Position]) ->
                 continue
 
             try:
-                indicators = _fetch_indicators(instrument, is_crypto=True)
+                is_crypto = _is_crypto(instrument)
+                indicators = _fetch_indicators(instrument, is_crypto=is_crypto)
                 if indicators is None:
                     logger.warning("No indicators for %s, skipping", instrument)
                     continue
@@ -221,11 +229,11 @@ def _scan_entries(regime: str, account: dict, open_positions: list[Position]) ->
                 # Track position locally
                 position = Position(
                     symbol=instrument,
-                    asset_class="crypto",
+                    asset_class="crypto" if is_crypto else "equity",
                     qty=order.qty,
                     entry_price=order.limit_price or ask,
                     high_water_price=order.limit_price or ask,
-                    entry_time=datetime.now(timezone.utc),
+                    entry_time=datetime.now(UTC),
                     broker_order_id=str(broker_order_id) if broker_order_id else None,
                     strategy_name=strategy.name,
                     stop_loss_price=order.stop_loss_price or 0.0,
@@ -235,7 +243,11 @@ def _scan_entries(regime: str, account: dict, open_positions: list[Position]) ->
                 upsert_daily_stats(today, orders_placed=1)
                 logger.info(
                     "ENTRY %s: score=%d threshold=%d qty=%.4f limit=%.2f",
-                    instrument, signal.score, signal.threshold, order.qty, order.limit_price,
+                    instrument,
+                    signal.score,
+                    signal.threshold,
+                    order.qty,
+                    order.limit_price,
                 )
 
             except BrokerError as exc:
@@ -247,7 +259,7 @@ def _scan_entries(regime: str, account: dict, open_positions: list[Position]) ->
 # ── Exit Scan ─────────────────────────────────────────────────────────────────
 
 
-def _scan_exits(open_positions: list[Position], equity: float) -> None:
+def _scan_exits(open_positions: list[Position], equity: float, regime: str) -> None:
     """Check exit conditions for each open position."""
     today = _today()
     tier = get_tier_params(equity)
@@ -261,9 +273,11 @@ def _scan_exits(open_positions: list[Position], equity: float) -> None:
                 continue
             current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
 
-            # Fetch current RSI for exhaustion check
-            indicators = _fetch_indicators(position.symbol, is_crypto=True)
+            # Fetch current indicators for exit checks
+            is_crypto = _is_crypto(position.symbol)
+            indicators = _fetch_indicators(position.symbol, is_crypto=is_crypto)
             rsi_14 = indicators.rsi_14 if indicators else None
+            atr_14 = indicators.atr_14 if indicators else None
 
             # Get exit plan from strategy
             strategy = _find_strategy(position.strategy_name)
@@ -272,12 +286,19 @@ def _scan_exits(open_positions: list[Position], equity: float) -> None:
             plan = strategy.build_exit_plan(position, tier)
 
             exit_signal, updated_pos = evaluate_exit(
-                position, plan, current_price, rsi_14,
+                position,
+                plan,
+                current_price,
+                rsi_14,
+                atr_14=atr_14,
+                regime=regime,
             )
 
             # Always persist trailing state updates
-            if (updated_pos.trailing_active != position.trailing_active or
-                    updated_pos.high_water_price != position.high_water_price):
+            if (
+                updated_pos.trailing_active != position.trailing_active
+                or updated_pos.high_water_price != position.high_water_price
+            ):
                 update_position(updated_pos)
 
             if exit_signal is None:
@@ -290,7 +311,7 @@ def _scan_exits(open_positions: list[Position], equity: float) -> None:
                 qty=position.qty,
                 order_type="market",
                 time_in_force="gtc",
-                as_of=datetime.now(timezone.utc),
+                as_of=datetime.now(UTC),
                 prompt_version="v2",
                 source="execution",
             )
@@ -300,7 +321,10 @@ def _scan_exits(open_positions: list[Position], equity: float) -> None:
             upsert_daily_stats(today, trades_closed=1)
             logger.info(
                 "EXIT %s: trigger=%s price=%.4f reason=%s",
-                position.symbol, exit_signal.trigger, current_price, exit_signal.reason,
+                position.symbol,
+                exit_signal.trigger,
+                current_price,
+                exit_signal.reason,
             )
 
         except BrokerError as exc:
@@ -309,7 +333,7 @@ def _scan_exits(open_positions: list[Position], equity: float) -> None:
             logger.error("Unexpected error on exit scan for %s: %s", position.symbol, exc)
 
 
-def _find_strategy(name: str):
+def _find_strategy(name: str) -> Strategy | None:
     """Find a registered strategy by name."""
     for s in STRATEGIES:
         if s.name == name:
@@ -331,8 +355,7 @@ async def run_loop() -> None:
     regime = "neutral"
     last_brief_date = ""
 
-    logger.info("Sauce loop starting — interval=%ds, strategies=%d",
-                interval, len(STRATEGIES))
+    logger.info("Sauce loop starting — interval=%ds, strategies=%d", interval, len(STRATEGIES))
 
     while not _shutdown:
         cycle_id = str(uuid.uuid4())[:8]
@@ -372,11 +395,14 @@ async def run_loop() -> None:
 
             # Exit scan
             if open_positions:
-                _scan_exits(open_positions, equity)
+                _scan_exits(open_positions, equity, regime)
 
             logger.info(
                 "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",
-                cycle_id, equity, len(open_positions), regime,
+                cycle_id,
+                equity,
+                len(open_positions),
+                regime,
             )
 
         except Exception as exc:

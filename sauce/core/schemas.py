@@ -7,13 +7,13 @@ Rules:
 """
 
 import uuid
-from datetime import datetime, timezone
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ── Shared base ───────────────────────────────────────────────────────────────
+
 
 class StrictModel(BaseModel):
     """Base for all Sauce models. Forbids extra fields globally."""
@@ -23,6 +23,7 @@ class StrictModel(BaseModel):
 
 # ── Market Data ───────────────────────────────────────────────────────────────
 
+
 class PriceReference(StrictModel):
     """Latest bid/ask/mid for a symbol at a given moment."""
 
@@ -30,10 +31,13 @@ class PriceReference(StrictModel):
     bid: float = Field(..., ge=0.0)
     ask: float = Field(..., ge=0.0)
     mid: float = Field(..., ge=0.0)
-    as_of: datetime = Field(..., description="Timestamp from the data API (UTC). Never datetime.now().")
+    as_of: datetime = Field(
+        ..., description="Timestamp from the data API (UTC). Never datetime.now()."
+    )
 
 
 # ── Technical Indicators ──────────────────────────────────────────────────────
+
 
 class Indicators(StrictModel):
     """Technical indicators computed from OHLCV history via pandas-ta."""
@@ -57,39 +61,80 @@ class Indicators(StrictModel):
 
 # ── Order ─────────────────────────────────────────────────────────────────────
 
+
 class Order(StrictModel):
     """
     Order object passed to broker.place_order().
 
     Must originate from an approved risk check — never created directly.
+
+    Order classes (Alpaca equity only, crypto = simple only):
+    - simple: Single order, no attached legs
+    - bracket: Entry + stop-loss + take-profit (both SL and TP required)
+    - oto: Entry triggers a single dependent order (stop-loss only)
+    - oco: Two linked exit orders — one cancels the other (SL OR TP)
+
+    Bracket/OTO/OCO execute server-side on Alpaca — no polling required.
+    Crypto falls back to exit_monitor polling since Alpaca doesn't support.
     """
 
     symbol: str
     side: Literal["buy", "sell"]
     qty: float = Field(..., gt=0.0)
-    order_type: Literal["market", "limit", "stop", "stop_limit"] = "limit"
+    order_type: Literal["market", "limit", "stop", "stop_limit", "trailing_stop"] = "limit"
     time_in_force: Literal["day", "gtc", "ioc", "fok"] = "day"
+    order_class: Literal["simple", "bracket", "oto", "oco"] | None = Field(
+        default=None,
+        description="Order class for multi-leg orders. None = auto-detect from "
+        "stop_loss_price/take_profit_price. Explicit value overrides.",
+    )
     limit_price: float | None = Field(default=None, ge=0.0)
     stop_price: float | None = Field(default=None, ge=0.0)
     stop_loss_price: float | None = Field(
-        default=None, ge=0.0,
-        description="Companion stop-loss price (ATR-based). Used to submit a "
-                    "protective stop order after entry fill.",
+        default=None,
+        ge=0.0,
+        description="Stop-loss trigger price for bracket/OTO orders. Server-side "
+        "execution for equities; exit_monitor polling for crypto.",
+    )
+    stop_loss_limit_price: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Limit price for stop-loss leg (stop-limit order). Provides "
+        "slippage protection. If None, SL is a market order on trigger.",
     )
     take_profit_price: float | None = Field(
-        default=None, ge=0.0,
-        description="Companion take-profit price (ATR-based). Informational — "
-                    "logged for audit but not automatically submitted.",
+        default=None,
+        ge=0.0,
+        description="Take-profit limit price for bracket/OCO orders. Server-side "
+        "execution for equities; exit_monitor polling for crypto.",
+    )
+    trail_percent: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Trailing stop percentage (0.05 = 5%). For trailing_stop "
+        "order_type, Alpaca ratchets the stop server-side.",
     )
     as_of: datetime
     prompt_version: str
-    source: Literal["execution", "exit_research", "stop_loss", "options_entry", "options_exit", "options_stop"] | None = Field(
+    source: (
+        Literal[
+            "execution",
+            "exit_research",
+            "stop_loss",
+            "options_entry",
+            "options_exit",
+            "options_stop",
+        ]
+        | None
+    ) = Field(
         default=None,
         description="Provenance tag: which agent/stage created this order.",
     )
 
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
+
 
 class AuditEvent(StrictModel):
     """
@@ -109,6 +154,6 @@ class AuditEvent(StrictModel):
         "options_order_submitted",
     ]
     symbol: str | None = None
-    payload: dict = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    payload: dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     prompt_version: str | None = None
