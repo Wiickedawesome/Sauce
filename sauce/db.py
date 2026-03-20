@@ -237,7 +237,7 @@ def load_open_positions(db_path: str | None = None) -> list[Position]:
                 high_water_price=row.high_water_price,
                 trailing_stop_price=row.trailing_stop_price,
                 trailing_active=row.trailing_active,
-                entry_time=row.entry_time,
+                entry_time=row.entry_time.replace(tzinfo=UTC) if row.entry_time.tzinfo is None else row.entry_time,
                 broker_order_id=row.broker_order_id,
                 strategy_name=row.strategy_name,
                 stop_loss_price=row.stop_loss_price,

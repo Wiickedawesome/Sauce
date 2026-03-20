@@ -210,6 +210,11 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
                     logger.info("Risk gate blocked %s: %s", instrument, verdict.reason)
                     continue
 
+                # Skip orders below broker minimum ($10)
+                if order_value < 10.0:
+                    logger.info("Skipping %s: order value $%.2f below $10 minimum", instrument, order_value)
+                    continue
+
                 # Build and place order
                 account_with_ask = {**account, "_ask": str(ask)}
                 order = strategy.build_order(signal, account_with_ask, tier)
