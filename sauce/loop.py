@@ -230,7 +230,14 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
                     profit_target_price=order.take_profit_price or 0.0,
                 )
                 save_position(position)
+                open_positions.append(position)
                 upsert_daily_stats(today, orders_placed=1)
+
+                # Deduct order cost so subsequent iterations see reduced buying power
+                order_cost = order.qty * (order.limit_price or ask)
+                buying_power = max(buying_power - order_cost, 0.0)
+                account["buying_power"] = str(buying_power)
+
                 logger.info(
                     "ENTRY %s: score=%d threshold=%d qty=%.4f limit=%.2f",
                     instrument,
