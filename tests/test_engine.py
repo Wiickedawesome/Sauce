@@ -256,8 +256,8 @@ class TestCryptoMomentumReversion:
         pos = Position(symbol="BTC/USD", entry_price=50000)
         plan = self.strategy.build_exit_plan(pos, SEED_PARAMS)
         assert plan.stop_loss_pct == 0.05
-        assert plan.trail_activation_pct == 0.06
-        assert plan.profit_target_pct == 0.12
+        assert plan.trail_activation_pct == 0.04
+        assert plan.profit_target_pct == 0.08
 
 
 # ══════════════════════════════════════════════════════════════════════════════

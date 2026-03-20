@@ -78,7 +78,7 @@ def _hour_et() -> int:
 def _fetch_indicators(symbol: str, is_crypto: bool) -> Indicators | None:
     """Fetch history and compute indicators for a symbol."""
     bars = 100  # enough for SMA50 + MACD
-    timeframe = "1Hour" if is_crypto else "1Day"
+    timeframe = "15Min" if is_crypto else "1Day"
     df = get_history(symbol, timeframe=timeframe, bars=bars)
     if df is None or df.empty:
         return None
