@@ -244,7 +244,7 @@ class TestCryptoMomentumReversion:
             regime="neutral",
             strategy_name="crypto_momentum",
         )
-        account = {"equity": "10000", "_ask": "50000"}
+        account = {"equity": "10000", "buying_power": "10000", "_ask": "50000"}
         order = self.strategy.build_order(signal, account, SEED_PARAMS)
         # 40% of $10K = $4K / $50K ask = 0.08 BTC
         assert order.qty == pytest.approx(0.08, rel=0.01)

@@ -136,12 +136,14 @@ class CryptoMomentumReversion:
         )
 
     def build_order(self, signal: SignalResult, account: dict[str, Any], tier: TierParams) -> Order:
-        """Construct a limit buy order sized by tier parameters."""
+        """Construct a limit buy order sized by tier parameters, clamped to buying power."""
         equity = float(account.get("equity", "0"))
+        buying_power = float(account.get("buying_power", "0"))
         ask = float(account.get("_ask", "0"))
 
-        # Size: tier.max_position_pct × equity / current price
-        position_value = equity * tier.max_position_pct
+        # Size: min(tier target, available buying power × 95% safety buffer)
+        target_value = equity * tier.max_position_pct
+        position_value = min(target_value, buying_power * 0.95)
         qty = position_value / ask if ask > 0 else 0.0
 
         # Limit price: ask + 0.1% for faster fills

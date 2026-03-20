@@ -1,10 +1,11 @@
 """
-loop.py — Sauce main trading loop.
+loop.py — Sauce single-cycle trading engine.
 
-5-minute cadence, deterministic signal scoring, no per-trade LLM calls.
+Cron fires run_loop.sh every N minutes — each invocation runs ONE cycle and exits.
+No internal while-loop or sleep. Cron handles scheduling.
 
-Loop cycle:
-  1. Morning brief (once/day) → regime classification via Claude
+Cycle:
+  1. Morning brief (once/day, cached in DB) → regime classification via Claude
   2. Fetch account state + open positions from broker
   3. For each strategy instrument:
      a. Fetch indicators (history → compute_all)
@@ -16,14 +17,12 @@ Loop cycle:
      b. Evaluate 7 exit conditions
      c. Place sell order if exit triggers
   5. Update daily stats
-  6. Sleep 5 minutes → repeat
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 import uuid
 from datetime import UTC, datetime
 
@@ -33,6 +32,7 @@ from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
 from sauce.db import (
     close_position,
+    get_daily_regime,
     load_open_positions,
     log_signal,
     log_trade,
@@ -49,15 +49,6 @@ from sauce.strategies.equity_momentum import EquityMomentum
 from sauce.strategy import Position, Strategy, get_tier_params
 
 logger = logging.getLogger(__name__)
-
-# Graceful shutdown
-_shutdown = False
-
-
-def _handle_signal(signum: int, _frame: object) -> None:
-    global _shutdown
-    _shutdown = True
-    logger.info("Shutdown requested (signal %d)", signum)
 
 
 # ── Strategies ────────────────────────────────────────────────────────────────
@@ -179,8 +170,6 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
 
     for strategy in STRATEGIES:
         for instrument in strategy.instruments:
-            if _shutdown:
-                return
             if instrument in open_symbols:
                 continue  # already have a position
             if not strategy.eligible(instrument, regime):
@@ -207,12 +196,13 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
                     continue
 
                 # Risk gate
+                order_value = min(equity * tier.max_position_pct, buying_power * 0.95)
                 verdict = check_risk(
                     daily_pnl=daily_pnl,
                     equity=equity,
                     open_position_count=len(open_positions),
                     buying_power=buying_power,
-                    order_value=equity * tier.max_position_pct,
+                    order_value=order_value,
                     daily_loss_limit=tier.daily_loss_limit,
                     max_concurrent=tier.max_concurrent,
                 )
@@ -265,8 +255,6 @@ def _scan_exits(open_positions: list[Position], equity: float, regime: str) -> N
     tier = get_tier_params(equity)
 
     for position in open_positions:
-        if _shutdown:
-            return
         try:
             quote = get_quote(position.symbol)
             if quote is None:
@@ -341,85 +329,72 @@ def _find_strategy(name: str) -> Strategy | None:
     return None
 
 
-# ── Main Loop ─────────────────────────────────────────────────────────────────
+# ── Main Cycle ─────────────────────────────────────────────────────────────
 
 
-async def run_loop() -> None:
-    """Run the Sauce trading loop indefinitely."""
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
-
-    settings = get_settings()
-    interval = getattr(settings, "loop_interval_minutes", 5) * 60
-
+async def run_cycle() -> None:
+    """Run a single trading cycle. Called by cron — no internal loop."""
+    cycle_id = str(uuid.uuid4())[:8]
+    today = _today()
     regime = "neutral"
-    last_brief_date = ""
 
-    logger.info("Sauce loop starting — interval=%ds, strategies=%d", interval, len(STRATEGIES))
-
-    while not _shutdown:
-        cycle_id = str(uuid.uuid4())[:8]
-        today = _today()
-
-        try:
-            # Morning brief: once per day
-            if today != last_brief_date and _hour_et() >= 7:
-                brief_data = _gather_brief_data()
-                regime = await get_regime(
-                    btc_change=brief_data["btc_change"],
-                    eth_change=brief_data["eth_change"],
-                    spy_change=brief_data["spy_change"],
-                    vix=brief_data["vix"],
-                    btc_rsi=brief_data["btc_rsi"],
-                    loop_id=cycle_id,
-                )
-                last_brief_date = today
-                upsert_daily_stats(today, regime=regime)
-                logger.info("Morning brief: regime=%s", regime)
-
-            # Account state
-            account = get_account()
-            equity = float(account.get("equity", "0"))
-            upsert_daily_stats(today, loop_runs=1, ending_equity=equity)
-
-            if equity <= 0:
-                logger.error("Account equity is $0 — pausing")
-                await asyncio.sleep(interval)
-                continue
-
-            # Load positions
-            open_positions = load_open_positions()
-
-            # Entry scan
-            _scan_entries(regime, account, open_positions)
-
-            # Exit scan
-            if open_positions:
-                _scan_exits(open_positions, equity, regime)
-
-            logger.info(
-                "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",
-                cycle_id,
-                equity,
-                len(open_positions),
-                regime,
+    try:
+        # Morning brief: check DB cache first (avoids duplicate LLM calls
+        # if cron fires multiple times before the first cycle finishes).
+        cached_regime = get_daily_regime(today)
+        if cached_regime:
+            regime = cached_regime
+        elif _hour_et() >= 7:
+            brief_data = _gather_brief_data()
+            regime = await get_regime(
+                btc_change=brief_data["btc_change"],
+                eth_change=brief_data["eth_change"],
+                spy_change=brief_data["spy_change"],
+                vix=brief_data["vix"],
+                btc_rsi=brief_data["btc_rsi"],
+                loop_id=cycle_id,
             )
+            upsert_daily_stats(today, regime=regime)
+            logger.info("Morning brief: regime=%s", regime)
 
-        except Exception as exc:
-            logger.error("Loop cycle %s failed: %s", cycle_id, exc, exc_info=True)
+        # Account state
+        account = get_account()
+        equity = float(account.get("equity", "0"))
+        upsert_daily_stats(today, loop_runs=1, ending_equity=equity)
 
-        await asyncio.sleep(interval)
+        if equity <= 0:
+            logger.error("Account equity is $0 — skipping cycle")
+            return
 
-    logger.info("Sauce loop stopped")
+        # Load positions
+        open_positions = load_open_positions()
+
+        # Entry scan
+        _scan_entries(regime, account, open_positions)
+
+        # Exit scan
+        if open_positions:
+            _scan_exits(open_positions, equity, regime)
+
+        logger.info(
+            "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",
+            cycle_id,
+            equity,
+            len(open_positions),
+            regime,
+        )
+
+    except Exception as exc:
+        logger.error("Cycle %s failed: %s", cycle_id, exc, exc_info=True)
 
 
 def main() -> None:
-    """CLI entry point."""
+    """CLI entry point — runs one cycle then exits."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    asyncio.run(run_loop())
+    asyncio.run(run_cycle())
 
 
 if __name__ == "__main__":

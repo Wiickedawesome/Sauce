@@ -348,6 +348,21 @@ def get_daily_pnl(date: str, db_path: str | None = None) -> float:
         session.close()
 
 
+def get_daily_regime(date: str, db_path: str | None = None) -> str | None:
+    """Return the regime cached in daily_summary for the given date, or None.
+
+    Returns None only when no cycle has run today yet (no row or loop_runs == 0).
+    """
+    session = get_session(db_path)
+    try:
+        row = session.query(DailySummaryRow).filter_by(date=date).first()
+        if row is None or (row.loop_runs or 0) == 0:
+            return None  # no cycle has run today yet
+        return str(row.regime)
+    finally:
+        session.close()
+
+
 # ── Instrument Meta ───────────────────────────────────────────────────────────
 
 
