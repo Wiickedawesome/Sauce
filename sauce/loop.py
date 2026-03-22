@@ -26,7 +26,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from sauce.adapters.broker import BrokerError, get_account, place_order
+from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
 from sauce.adapters.market_data import MarketDataError, get_history, get_quote
 from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
@@ -221,13 +221,22 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
                 broker_result = place_order(order)
                 broker_order_id = getattr(broker_result, "id", None)
 
+                # Use broker's filled_qty when available (accounts for
+                # fees / fractional rounding), otherwise fall back to
+                # the qty we requested.
+                filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
+                filled_qty = float(str(filled_qty_raw)) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else order.qty
+
+                filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
+                filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else (order.limit_price or ask)
+
                 # Track position locally
                 position = Position(
                     symbol=instrument,
                     asset_class="crypto" if is_crypto else "equity",
-                    qty=order.qty,
-                    entry_price=order.limit_price or ask,
-                    high_water_price=order.limit_price or ask,
+                    qty=filled_qty,
+                    entry_price=filled_price,
+                    high_water_price=filled_price,
                     entry_time=datetime.now(UTC),
                     broker_order_id=str(broker_order_id) if broker_order_id else None,
                     strategy_name=strategy.name,
@@ -239,17 +248,18 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
                 upsert_daily_stats(today, orders_placed=1)
 
                 # Deduct order cost so subsequent iterations see reduced buying power
-                order_cost = order.qty * (order.limit_price or ask)
+                order_cost = filled_qty * filled_price
                 buying_power = max(buying_power - order_cost, 0.0)
                 account["buying_power"] = str(buying_power)
 
                 logger.info(
-                    "ENTRY %s: score=%d threshold=%d qty=%.4f limit=%.2f",
+                    "ENTRY %s: score=%d threshold=%d qty=%.4f (filled=%.4f) price=%.2f",
                     instrument,
                     signal.score,
                     signal.threshold,
                     order.qty,
-                    order.limit_price,
+                    filled_qty,
+                    filled_price,
                 )
 
             except BrokerError as exc:
@@ -265,6 +275,17 @@ def _scan_exits(open_positions: list[Position], equity: float, regime: str) -> N
     """Check exit conditions for each open position."""
     today = _today()
     tier = get_tier_params(equity)
+
+    # Fetch broker positions once to get actual qty (may differ from DB due to fees)
+    broker_qty_map: dict[str, float] = {}
+    try:
+        broker_positions = get_positions()
+        for bp in broker_positions:
+            sym = str(bp.get("symbol", ""))
+            qty_val = bp.get("qty") or bp.get("qty_available") or 0
+            broker_qty_map[sym] = float(str(qty_val))
+    except BrokerError as exc:
+        logger.warning("Could not fetch broker positions for exit scan: %s", exc)
 
     for position in open_positions:
         try:
@@ -304,11 +325,29 @@ def _scan_exits(open_positions: list[Position], equity: float, regime: str) -> N
             if exit_signal is None:
                 continue
 
+            # Use broker's actual qty (accounts for fees/rounding),
+            # fall back to DB qty if broker lookup unavailable.
+            broker_symbol = position.symbol.replace("/", "")
+            sell_qty = broker_qty_map.get(broker_symbol, position.qty)
+            if sell_qty <= 0:
+                logger.warning(
+                    "Broker reports 0 qty for %s, skipping sell", position.symbol
+                )
+                continue
+            if sell_qty != position.qty:
+                logger.info(
+                    "Qty reconcile %s: DB=%.10f broker=%.10f (diff=%.10f)",
+                    position.symbol,
+                    position.qty,
+                    sell_qty,
+                    position.qty - sell_qty,
+                )
+
             # Place sell order
             sell_order = Order(
                 symbol=position.symbol,
                 side="sell",
-                qty=position.qty,
+                qty=sell_qty,
                 order_type="market",
                 time_in_force="gtc",
                 as_of=datetime.now(UTC),
