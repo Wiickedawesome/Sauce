@@ -286,6 +286,26 @@ class Settings(BaseSettings):
         description="Minimum gain required to survive a time stop (1%).",
     )
 
+    # ── Analyst Committee LLM temperatures ───────────────────────────────────
+    research_temperature: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Temperature for the analyst dual-analysis call (bull/bear).",
+    )
+    supervisor_temperature: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Temperature for the PM verdict call (approve/reject).",
+    )
+    reflection_temperature: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Temperature for the post-trade reflection call.",
+    )
+
     # ── Safety ────────────────────────────────────────────────────────────────
     trading_pause: bool = Field(default=False)
     confirm_live_trading: str = Field(

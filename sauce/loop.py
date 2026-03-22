@@ -28,21 +28,26 @@ from datetime import UTC, datetime
 
 from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
 from sauce.adapters.market_data import MarketDataError, get_history, get_quote
+from sauce.analyst import analyst_committee
 from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
 from sauce.db import (
     close_position,
     get_daily_regime,
+    load_all_memories,
     load_open_positions,
     log_signal,
     log_trade,
+    save_memory,
     save_position,
     update_position,
     upsert_daily_stats,
 )
 from sauce.exit_monitor import evaluate_exit
 from sauce.indicators.core import compute_all
+from sauce.memory import MemoryEntry, TradeMemory, build_outcome_description, build_situation_description
 from sauce.morning_brief import get_regime
+from sauce.reflection import reflect_on_trade
 from sauce.risk import check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion
 from sauce.strategies.equity_momentum import EquityMomentum
@@ -154,7 +159,13 @@ def _gather_brief_data() -> dict[str, float]:
 # ── Entry Scan ────────────────────────────────────────────────────────────────
 
 
-def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Position]) -> None:
+async def _scan_entries(
+    regime: str,
+    account: dict[str, str],
+    open_positions: list[Position],
+    trade_memory: TradeMemory,
+    loop_id: str = "entry",
+) -> None:
     """Score each strategy instrument for entry signals."""
     get_settings()
     equity = float(account.get("equity", "0"))
@@ -194,6 +205,51 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
 
                 if not signal.fired:
                     continue
+
+                # ── Analyst committee (2 LLM calls) ──
+                situation_desc = build_situation_description(
+                    symbol=instrument,
+                    regime=regime,
+                    score=signal.score,
+                    threshold=signal.threshold,
+                    rsi_14=signal.rsi_14,
+                    macd_hist=signal.macd_hist,
+                    bb_pct=signal.bb_pct,
+                    volume_ratio=signal.volume_ratio,
+                    current_price=current_price,
+                    strategy_name=strategy.name,
+                )
+                recalled = trade_memory.recall(situation_desc)
+                verdict = await analyst_committee(
+                    symbol=instrument,
+                    strategy_name=strategy.name,
+                    score=signal.score,
+                    threshold=signal.threshold,
+                    regime=regime,
+                    current_price=current_price,
+                    rsi_14=signal.rsi_14,
+                    macd_hist=signal.macd_hist,
+                    bb_pct=signal.bb_pct,
+                    volume_ratio=signal.volume_ratio,
+                    memories=recalled,
+                    loop_id=loop_id,
+                )
+                if not verdict.approve:
+                    logger.info(
+                        "ANALYST REJECTED %s: confidence=%d — %s",
+                        instrument,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                    upsert_daily_stats(today, signals_skipped=1)
+                    continue
+
+                logger.info(
+                    "ANALYST APPROVED %s: confidence=%d — %s",
+                    instrument,
+                    verdict.confidence,
+                    verdict.reasoning,
+                )
 
                 # Risk gate
                 order_value = min(equity * tier.max_position_pct, buying_power * 0.95)
@@ -271,7 +327,13 @@ def _scan_entries(regime: str, account: dict[str, str], open_positions: list[Pos
 # ── Exit Scan ─────────────────────────────────────────────────────────────────
 
 
-def _scan_exits(open_positions: list[Position], equity: float, regime: str) -> None:
+async def _scan_exits(
+    open_positions: list[Position],
+    equity: float,
+    regime: str,
+    trade_memory: TradeMemory,
+    loop_id: str = "exit",
+) -> None:
     """Check exit conditions for each open position."""
     today = _today()
     tier = get_tier_params(equity)
@@ -366,6 +428,45 @@ def _scan_exits(open_positions: list[Position], equity: float, regime: str) -> N
                 exit_signal.reason,
             )
 
+            # ── Post-trade reflection (1 LLM call) ──
+            try:
+                hold_hrs = (datetime.now(UTC) - position.entry_time).total_seconds() / 3600
+                realized_pnl = (current_price - position.entry_price) * position.qty
+                sit = build_situation_description(
+                    symbol=position.symbol,
+                    regime=regime,
+                    score=0,
+                    threshold=0,
+                    rsi_14=rsi_14,
+                    macd_hist=None,
+                    bb_pct=None,
+                    volume_ratio=None,
+                    current_price=current_price,
+                    strategy_name=position.strategy_name,
+                )
+                out = build_outcome_description(
+                    symbol=position.symbol,
+                    entry_price=position.entry_price,
+                    exit_price=current_price,
+                    exit_trigger=exit_signal.trigger,
+                    hold_hours=hold_hrs,
+                    realized_pnl=realized_pnl,
+                )
+                recalled = trade_memory.recall(sit)
+                lesson = await reflect_on_trade(
+                    symbol=position.symbol,
+                    situation=sit,
+                    outcome=out,
+                    memories=recalled,
+                    loop_id=loop_id,
+                )
+                if lesson:
+                    mem_entry = MemoryEntry(situation=sit, outcome=out, lesson=lesson)
+                    trade_memory.store(mem_entry)
+                    save_memory(mem_entry)
+            except Exception as exc:
+                logger.warning("Reflection failed for %s: %s", position.symbol, exc)
+
         except BrokerError as exc:
             logger.error("Broker error exiting %s: %s", position.symbol, exc)
         except Exception as exc:
@@ -420,12 +521,17 @@ async def run_cycle() -> None:
         # Load positions
         open_positions = load_open_positions()
 
-        # Entry scan
-        _scan_entries(regime, account, open_positions)
+        # Load trade memory (BM25 index for past reflections)
+        memory_entries = load_all_memories()
+        trade_memory = TradeMemory(memory_entries)
+        logger.info("Trade memory loaded: %d entries", trade_memory.size)
 
-        # Exit scan
+        # Entry scan (async — includes analyst committee)
+        await _scan_entries(regime, account, open_positions, trade_memory, cycle_id)
+
+        # Exit scan (async — includes post-trade reflection)
         if open_positions:
-            _scan_exits(open_positions, equity, regime)
+            await _scan_exits(open_positions, equity, regime, trade_memory, cycle_id)
 
         logger.info(
             "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",

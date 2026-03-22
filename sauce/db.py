@@ -1,12 +1,12 @@
-"""
-db.py — Sauce database layer (5-table schema).
+"""db.py — Sauce database layer (6-table schema).
 
 Tables:
-  1. trades       — completed trades with P&L (append-only)
-  2. positions    — open positions with trailing state (mutable)
-  3. signals      — every scoring result (append-only)
-  4. daily_stats  — daily aggregates (upsert)
+  1. trades         — completed trades with P&L (append-only)
+  2. positions       — open positions with trailing state (mutable)
+  3. signals         — every scoring result (append-only)
+  4. daily_stats     — daily aggregates (upsert)
   5. instrument_meta — per-instrument config/regime cache
+  6. trade_memories  — BM25 trade reflections (append-only)
 
 Uses the existing engine/session infrastructure from adapters.db.
 """
@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
 
 from sauce.adapters.db import Base, get_session
+from sauce.memory import MemoryEntry
 from sauce.strategy import Position, SignalResult
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,18 @@ class InstrumentMetaRow(Base):
     last_signal_score: int | None = Column(Integer, nullable=True)
     last_signal_time: datetime | None = Column(DateTime, nullable=True)
     extra: str = Column(Text, nullable=False, default="{}")  # JSON for ad-hoc metadata
+
+
+class TradeMemoryRow(Base):
+    """Post-trade reflection memory. Append-only."""
+
+    __tablename__ = "trade_memories"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    situation: str = Column(Text, nullable=False)
+    outcome: str = Column(Text, nullable=False)
+    lesson: str = Column(Text, nullable=False)
+    created_at: datetime = Column(DateTime, nullable=False)
 
 
 # ── Signal Persistence ────────────────────────────────────────────────────────
@@ -394,5 +407,44 @@ def upsert_instrument_meta(
     except Exception as exc:
         session.rollback()
         logger.error("Failed to upsert instrument meta for %s: %s", symbol, exc)
+    finally:
+        session.close()
+
+
+# ── Trade Memory ──────────────────────────────────────────────────────────────
+
+
+def save_memory(entry: MemoryEntry, db_path: str | None = None) -> None:
+    """Append a trade reflection to the memories table. Never raises."""
+    session = get_session(db_path)
+    try:
+        row = TradeMemoryRow(
+            situation=entry.situation,
+            outcome=entry.outcome,
+            lesson=entry.lesson,
+            created_at=datetime.now(UTC),
+        )
+        session.add(row)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("Failed to save trade memory: %s", exc)
+    finally:
+        session.close()
+
+
+def load_all_memories(db_path: str | None = None) -> list[MemoryEntry]:
+    """Load all trade memories from the DB for BM25 index construction."""
+    session = get_session(db_path)
+    try:
+        rows = session.query(TradeMemoryRow).order_by(TradeMemoryRow.id).all()
+        return [
+            MemoryEntry(
+                situation=row.situation,
+                outcome=row.outcome,
+                lesson=row.lesson,
+            )
+            for row in rows
+        ]
     finally:
         session.close()
