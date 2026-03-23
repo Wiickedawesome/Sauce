@@ -110,8 +110,8 @@ class TestAnalystCommittee:
         assert result.confidence == 25
 
     @pytest.mark.asyncio
-    async def test_analysis_llm_failure_defaults_approve(self):
-        """If the first LLM call fails, default to approve."""
+    async def test_analysis_llm_failure_defaults_reject(self):
+        """If the first LLM call fails, default to reject."""
         from sauce.adapters.llm import LLMError
 
         with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
@@ -129,13 +129,14 @@ class TestAnalystCommittee:
                 volume_ratio=1.0,
             )
 
-        assert result.approve is True
+        assert result.approve is False
+        assert result.confidence == 0
         assert "unavailable" in result.bull_case.lower()
         assert mock_claude.call_count == 1  # Only first call made
 
     @pytest.mark.asyncio
-    async def test_verdict_llm_failure_defaults_approve(self):
-        """If the second LLM call fails, default to approve with analysis intact."""
+    async def test_verdict_llm_failure_defaults_reject(self):
+        """If the second LLM call fails, default to reject with analysis intact."""
         from sauce.adapters.llm import LLMError
 
         analysis_response = json.dumps({
@@ -158,7 +159,8 @@ class TestAnalystCommittee:
                 volume_ratio=1.5,
             )
 
-        assert result.approve is True
+        assert result.approve is False
+        assert result.confidence == 0
         assert result.bull_case == "Good setup"
         assert result.bear_case == "Some risk"
 
