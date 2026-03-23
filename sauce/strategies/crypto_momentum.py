@@ -3,14 +3,17 @@ strategies/crypto_momentum.py — Crypto Momentum Reversion strategy.
 
 Phase 1 strategy ($1K–$10K). Trades BTC/USD, ETH/USD, SOL/USD on 5-minute cadence.
 
-Five scoring conditions (max 100 points):
-  1. RSI(14) below 35              → 25 pts  (oversold bounce setup)
-  2. Price in lower 20% of BB(2.0) → 20 pts  (statistical support zone)
-  3. MACD histogram negative       → 15 pts  (confirms dip — aligned with mean reversion)
-  4. MACD momentum shift           → 20 pts  (MACD line > signal, or histogram > 0)
-  5. Volume ratio above 1.5×       → 20 pts  (above-average participation)
+Seven scoring conditions (max 70 points):
+  1. Price > SMA(20)              → 15 pts  (trend confirmation)
+  2. SMA(20) > SMA(50)            → 10 pts  (uptrend structure)
+  3. RSI(14) below 35             → 25 pts  (oversold bounce setup)
+  4. Price in lower 20% of BB(2.0)→ 20 pts  (statistical support zone)
+  5. MACD histogram negative      → 15 pts  (confirms dip — mean reversion)
+  6. MACD histogram positive      → 20 pts  (momentum confirmed)
+  7. RSI(14) 55-70                → 15 pts  (bullish momentum zone)
 
-Threshold: base 60, shifted by regime (bullish -5, bearish +10).
+Volume bonus (10 pts) when vol_ratio >= 0.5× (lowered for Alpaca paper crypto).
+Threshold: base 50, shifted by regime (bullish -5, bearish +10).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
 from sauce.strategy import ExitPlan, Position, SignalResult, TierParams
 
@@ -31,10 +35,18 @@ class CryptoMomentumReversion:
     DISCIPLINED CONFIG: Higher thresholds require multi-indicator confluence.
     Regime shifts make bearish markets harder to enter (capital preservation).
     Combines mean-reversion (buy dips) with momentum breakout conditions.
+    Trend confirmation (price vs SMA) adds scoring depth like equity strategy.
     """
 
     name: str = "crypto_momentum"
-    instruments: list[str] = ["BTC/USD", "ETH/USD", "SOL/USD"]
+
+    @property
+    def instruments(self) -> list[str]:
+        return get_settings().crypto_universe
+
+    # Trend confirmation conditions (shared with both paths)
+    TREND_ABOVE_SMA20_POINTS = 15  # price > SMA20 → uptrend
+    UPTREND_STRUCTURE_POINTS = 10  # SMA20 > SMA50 → sustained uptrend
 
     # Scoring condition thresholds — DISCIPLINED
     RSI_OVERSOLD = 35  # True oversold: RSI must be < 35
@@ -46,15 +58,17 @@ class CryptoMomentumReversion:
     MACD_DIP_POINTS = 15  # histogram negative (confirms oversold dip)
     MACD_MOMENTUM_POINTS = 20  # histogram positive (reversal confirmed)
 
-    VOLUME_RATIO_MIN = 1.5  # 1.5x avg volume (meaningful participation)
-    VOLUME_POINTS = 20
+    # Alpaca paper crypto has negligible order book volume;
+    # lowered from 1.5 to 0.5 so volume bonus is achievable.
+    VOLUME_RATIO_MIN = 0.5
+    VOLUME_POINTS = 10
 
     # Momentum breakout conditions
     MOMENTUM_RSI_MIN = 55  # RSI 55-70 = bullish momentum
     MOMENTUM_RSI_MAX = 70
     MOMENTUM_POINTS = 15
 
-    BASE_THRESHOLD = 60  # Require 60% confluence (3+ conditions)
+    BASE_THRESHOLD = 50  # Require multi-indicator confluence
     # CORRECT: Bearish = HARDER to enter (capital preservation)
     REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 10}
 
@@ -65,17 +79,26 @@ class CryptoMomentumReversion:
     def score(
         self, indicators: Indicators, instrument: str, regime: str, current_price: float
     ) -> SignalResult:
-        """Score the signal from 0–100 based on conditions.
+        """Score the signal from 0–70 based on conditions.
 
         Two MUTUALLY EXCLUSIVE entry paths — only the stronger path scores:
         1. Mean-reversion: RSI oversold + BB low + MACD negative (dip buying)
-        2. Momentum breakout: MACD positive + RSI in momentum zone (trend following)
+        2. Momentum breakout: trend + MACD positive + RSI momentum zone (trend following)
         Volume confirmation adds to whichever path is active.
         """
         rsi_14 = indicators.rsi_14
         macd_hist = indicators.macd_histogram
         vol_ratio = indicators.volume_ratio
         bb_pct = _compute_bb_pct(indicators, current_price)
+        sma_20 = indicators.sma_20
+        sma_50 = indicators.sma_50
+
+        # === TREND CONFIRMATION ===
+        trend_points = 0
+        if sma_20 is not None and current_price > sma_20:
+            trend_points += self.TREND_ABOVE_SMA20_POINTS
+        if sma_20 is not None and sma_50 is not None and sma_20 > sma_50:
+            trend_points += self.UPTREND_STRUCTURE_POINTS
 
         # === MEAN REVERSION PATH ===
         mr_points = 0
@@ -86,8 +109,8 @@ class CryptoMomentumReversion:
         if macd_hist is not None and macd_hist < 0:
             mr_points += self.MACD_DIP_POINTS
 
-        # === MOMENTUM BREAKOUT PATH ===
-        mo_points = 0
+        # === MOMENTUM BREAKOUT PATH (includes trend) ===
+        mo_points = trend_points
         if macd_hist is not None and macd_hist > 0:
             mo_points += self.MACD_MOMENTUM_POINTS
         if rsi_14 is not None and self.MOMENTUM_RSI_MIN <= rsi_14 <= self.MOMENTUM_RSI_MAX:

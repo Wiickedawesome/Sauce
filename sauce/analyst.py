@@ -134,6 +134,13 @@ async def analyst_committee(
 
     # ── Call 1: Dual Analysis ──
     try:
+        # Paper-trading volume data from Alpaca is unreliable (near-zero
+        # for crypto).  Flag it so the LLM doesn't reject on that alone.
+        if settings.alpaca_paper:
+            vol_display = "N/A (paper-trading — volume data unreliable, ignore volume)"
+        else:
+            vol_display = f"{volume_ratio:.2f}" if volume_ratio is not None else "N/A"
+
         analysis_user = DUAL_ANALYSIS_USER.format(
             symbol=symbol,
             strategy_name=strategy_name,
@@ -143,7 +150,7 @@ async def analyst_committee(
             rsi_14=f"{rsi_14:.1f}" if rsi_14 is not None else "N/A",
             macd_hist=f"{macd_hist:.4f}" if macd_hist is not None else "N/A",
             bb_pct=f"{bb_pct:.2f}" if bb_pct is not None else "N/A",
-            volume_ratio=f"{volume_ratio:.2f}" if volume_ratio is not None else "N/A",
+            volume_ratio=vol_display,
             regime=regime,
         )
 

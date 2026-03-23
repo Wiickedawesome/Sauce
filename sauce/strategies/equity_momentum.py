@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
 from sauce.strategy import ExitPlan, Position, SignalResult, TierParams
 
@@ -34,19 +35,10 @@ class EquityMomentum:
     """Disciplined momentum strategy for US equities during RTH."""
 
     name: str = "equity_momentum"
-    # Focused on most liquid, high-beta names (reduced from 16 to 10)
-    instruments: list[str] = [
-        "TSLA",
-        "NVDA",
-        "AMD",
-        "AAPL",
-        "AMZN",
-        "META",
-        "GOOGL",
-        "MSFT",
-        "QQQ",
-        "SPY",
-    ]
+
+    @property
+    def instruments(self) -> list[str]:
+        return get_settings().equity_universe
 
     # Trend confirmation conditions
     TREND_ABOVE_SMA20_POINTS = 20

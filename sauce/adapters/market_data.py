@@ -161,7 +161,7 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     from alpaca.data.requests import StockBarsRequest
 
     tf = _parse_timeframe(timeframe)
-    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars))
+    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars, is_crypto=False))
 
     s = get_settings()
     client = _get_stock_client()
@@ -169,7 +169,6 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
         symbol_or_symbols=symbol,
         timeframe=tf,
         start=start,
-        limit=bars,
         adjustment="raw",  # type: ignore[arg-type]
         feed=s.data_feed,  # type: ignore[arg-type]
     )
@@ -179,21 +178,21 @@ def _equity_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "timestamp"])
 
-    return _normalise_bars_df(df, symbol)
+    df = _normalise_bars_df(df, symbol)
+    return df.tail(bars)
 
 
 def _crypto_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     from alpaca.data.requests import CryptoBarsRequest
 
     tf = _parse_timeframe(timeframe)
-    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars))
+    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars, is_crypto=True))
 
     client = _get_crypto_client()
     request = CryptoBarsRequest(
         symbol_or_symbols=symbol,
         timeframe=tf,
         start=start,
-        limit=bars,
     )
     bars_response = call_with_retry(client.get_crypto_bars, request)
     df = bars_response.df
@@ -201,7 +200,8 @@ def _crypto_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "timestamp"])
 
-    return _normalise_bars_df(df, symbol)
+    df = _normalise_bars_df(df, symbol)
+    return df.tail(bars)
 
 
 # ── get_universe_snapshot ─────────────────────────────────────────────────────
@@ -328,7 +328,7 @@ def get_bulk_equity_bars(
         return {}
 
     tf = _parse_timeframe(timeframe)
-    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars))
+    start = datetime.now(UTC) - timedelta(days=_days_back_for_bars(timeframe, bars, is_crypto=False))
 
     s = get_settings()
     client = _get_stock_client()
@@ -336,7 +336,6 @@ def get_bulk_equity_bars(
         symbol_or_symbols=symbols,
         timeframe=tf,
         start=start,
-        limit=bars,
         adjustment="raw",  # type: ignore[arg-type]
         feed=s.data_feed,  # type: ignore[arg-type]
     )
@@ -349,11 +348,11 @@ def get_bulk_equity_bars(
     result: dict[str, pd.DataFrame] = {}
     if isinstance(df.index, pd.MultiIndex):
         for sym in df.index.get_level_values(0).unique():
-            result[sym] = _normalise_bars_df(df, sym)
+            result[sym] = _normalise_bars_df(df, sym).tail(bars)
     else:
         # Single symbol returned without MultiIndex
         if symbols:
-            result[symbols[0]] = _normalise_bars_df(df, symbols[0])
+            result[symbols[0]] = _normalise_bars_df(df, symbols[0]).tail(bars)
 
     return result
 
@@ -408,11 +407,12 @@ def _parse_timeframe(timeframe: str) -> Any:
     return tf
 
 
-def _days_back_for_bars(timeframe: str, bars: int) -> int:
+def _days_back_for_bars(timeframe: str, bars: int, *, is_crypto: bool = False) -> int:
     """
     Estimate how many calendar days we need to fetch `bars` bars of `timeframe`.
 
-    Adds a 2x buffer for weekends/holidays. Minimum of 5 days.
+    Crypto trades 24/7 (1440 min/day). Equities trade ~6.5h/day (390 min/day)
+    with weekends off, so we add a 2x buffer. Minimum of 2 days.
     """
     minutes_per_bar = {
         "1Min": 1,
@@ -421,12 +421,15 @@ def _days_back_for_bars(timeframe: str, bars: int) -> int:
         "30Min": 30,
         "1Hour": 60,
         "4Hour": 240,
-        "1Day": 390,
+        "1Day": 1440 if is_crypto else 390,
     }
     mins = minutes_per_bar.get(timeframe, 30)
-    # US market: ~390 trading minutes/day → ~6.5 hours
-    trading_minutes_per_day = 390
-    days_needed = max(5, int((bars * mins / trading_minutes_per_day) * 2) + 5)
+    if is_crypto:
+        # Crypto: 24h/day, 7 days/week — exact calculation + small buffer
+        days_needed = max(2, int(bars * mins / 1440) + 2)
+    else:
+        # Equity: ~390 trading min/day, 2x buffer for weekends/holidays
+        days_needed = max(5, int((bars * mins / 390) * 2) + 5)
     return days_needed
 
 
