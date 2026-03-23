@@ -4,13 +4,13 @@ strategies/crypto_momentum.py — Crypto Momentum Reversion strategy.
 Phase 1 strategy ($1K–$10K). Trades BTC/USD, ETH/USD, SOL/USD on 5-minute cadence.
 
 Five scoring conditions (max 100 points):
-  1. RSI(14) below 42              → 25 pts  (oversold bounce setup)
-  2. Price in lower 25% of BB(2.0) → 20 pts  (statistical support zone)
+  1. RSI(14) below 35              → 25 pts  (oversold bounce setup)
+  2. Price in lower 20% of BB(2.0) → 20 pts  (statistical support zone)
   3. MACD histogram negative       → 15 pts  (confirms dip — aligned with mean reversion)
   4. MACD momentum shift           → 20 pts  (MACD line > signal, or histogram > 0)
-  5. Volume ratio above 1.3×       → 20 pts  (above-average participation)
+  5. Volume ratio above 1.5×       → 20 pts  (above-average participation)
 
-Threshold: base 50, shifted by regime (bullish -5, bearish +10).
+Threshold: base 60, shifted by regime (bullish -5, bearish +10).
 """
 
 from __future__ import annotations
@@ -28,34 +28,35 @@ logger = logging.getLogger(__name__)
 class CryptoMomentumReversion:
     """Aggressive momentum + mean-reversion strategy for 24/7 crypto markets.
 
-    AGGRESSIVE CONFIG: Lower thresholds, inverted regime scoring (bearish = opportunity).
+    DISCIPLINED CONFIG: Higher thresholds require multi-indicator confluence.
+    Regime shifts make bearish markets harder to enter (capital preservation).
     Combines mean-reversion (buy dips) with momentum breakout conditions.
     """
 
     name: str = "crypto_momentum"
-    instruments: list[str] = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "AVAX/USD"]
+    instruments: list[str] = ["BTC/USD", "ETH/USD", "SOL/USD"]
 
-    # Scoring condition thresholds — AGGRESSIVE
-    RSI_OVERSOLD = 45  # 45 RSI = more entry opportunities (was 42)
+    # Scoring condition thresholds — DISCIPLINED
+    RSI_OVERSOLD = 35  # True oversold: RSI must be < 35
     RSI_POINTS = 25
 
-    BB_PROXIMITY = 0.30  # Lower 30% of BB range (was 25%)
+    BB_PROXIMITY = 0.20  # Lower 20% of BB range (tight)
     BB_POINTS = 20
 
     MACD_DIP_POINTS = 15  # histogram negative (confirms oversold dip)
     MACD_MOMENTUM_POINTS = 20  # histogram positive (reversal confirmed)
 
-    VOLUME_RATIO_MIN = 1.2  # 1.2x avg volume (was 1.3x — more triggers)
+    VOLUME_RATIO_MIN = 1.5  # 1.5x avg volume (meaningful participation)
     VOLUME_POINTS = 20
 
-    # Momentum breakout conditions (new)
-    MOMENTUM_RSI_MIN = 55  # RSI 55-75 = bullish momentum
-    MOMENTUM_RSI_MAX = 75
+    # Momentum breakout conditions
+    MOMENTUM_RSI_MIN = 55  # RSI 55-70 = bullish momentum
+    MOMENTUM_RSI_MAX = 70
     MOMENTUM_POINTS = 15
 
-    BASE_THRESHOLD = 40  # Fire on 40% confluence (was 50%)
-    # INVERTED: Bearish = EASIER to enter (volatility = opportunity)
-    REGIME_SHIFT = {"bullish": 0, "neutral": 0, "bearish": -10}
+    BASE_THRESHOLD = 60  # Require 60% confluence (3+ conditions)
+    # CORRECT: Bearish = HARDER to enter (capital preservation)
+    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 10}
 
     def eligible(self, instrument: str, regime: str) -> bool:
         """Crypto trades 24/7 in all regimes."""
@@ -64,41 +65,38 @@ class CryptoMomentumReversion:
     def score(
         self, indicators: Indicators, instrument: str, regime: str, current_price: float
     ) -> SignalResult:
-        """Score the signal from 0–100 based on six conditions.
+        """Score the signal from 0–100 based on conditions.
 
-        Combines mean-reversion (oversold bounce) with momentum breakout.
+        Two MUTUALLY EXCLUSIVE entry paths — only the stronger path scores:
+        1. Mean-reversion: RSI oversold + BB low + MACD negative (dip buying)
+        2. Momentum breakout: MACD positive + RSI in momentum zone (trend following)
+        Volume confirmation adds to whichever path is active.
         """
-        points = 0
-
         rsi_14 = indicators.rsi_14
         macd_hist = indicators.macd_histogram
         vol_ratio = indicators.volume_ratio
         bb_pct = _compute_bb_pct(indicators, current_price)
 
         # === MEAN REVERSION PATH ===
-        # Condition 1: RSI(14) below oversold threshold
+        mr_points = 0
         if rsi_14 is not None and rsi_14 < self.RSI_OVERSOLD:
-            points += self.RSI_POINTS
-
-        # Condition 2: Price in lower portion of Bollinger Bands
+            mr_points += self.RSI_POINTS
         if bb_pct is not None and bb_pct <= self.BB_PROXIMITY:
-            points += self.BB_POINTS
-
-        # Condition 3: MACD histogram negative (confirms dip)
+            mr_points += self.BB_POINTS
         if macd_hist is not None and macd_hist < 0:
-            points += self.MACD_DIP_POINTS
+            mr_points += self.MACD_DIP_POINTS
 
         # === MOMENTUM BREAKOUT PATH ===
-        # Condition 4: MACD histogram positive (momentum confirmed)
+        mo_points = 0
         if macd_hist is not None and macd_hist > 0:
-            points += self.MACD_MOMENTUM_POINTS
-
-        # Condition 5: RSI in momentum zone (55-75 = bullish but not exhausted)
+            mo_points += self.MACD_MOMENTUM_POINTS
         if rsi_14 is not None and self.MOMENTUM_RSI_MIN <= rsi_14 <= self.MOMENTUM_RSI_MAX:
-            points += self.MOMENTUM_POINTS
+            mo_points += self.MOMENTUM_POINTS
 
-        # === VOLUME CONFIRMATION ===
-        # Condition 6: Volume ratio above average
+        # Take the stronger path (mutually exclusive — no double-counting)
+        points = max(mr_points, mo_points)
+
+        # === VOLUME CONFIRMATION (adds to either path) ===
         if vol_ratio is not None and vol_ratio >= self.VOLUME_RATIO_MIN:
             points += self.VOLUME_POINTS
 

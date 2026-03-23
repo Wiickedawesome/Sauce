@@ -1,17 +1,17 @@
 """
-strategies/equity_momentum.py — Aggressive equity momentum strategy.
+strategies/equity_momentum.py — Disciplined equity momentum strategy.
 
 Day/swing strategy for high-beta equities. Trades RTH only (09:30-16:00 ET).
 
 Six scoring conditions (max 115 points):
   1. Price > SMA(20)             → 20 pts  (trend confirmation)
   2. SMA(20) > SMA(50)           → 15 pts  (uptrend structure)
-  3. RSI(14) between 50-70       → 20 pts  (bullish momentum, not exhausted)
-  4. RSI(14) below 40            → 25 pts  (oversold bounce setup — alternative path)
+  3. RSI(14) between 50-65       → 20 pts  (bullish momentum, not exhausted)
+  4. RSI(14) below 30            → 25 pts  (oversold bounce setup — alternative path)
   5. MACD histogram positive     → 20 pts  (momentum confirmed)
   6. Volume ratio above 1.5×     → 15 pts  (institutional participation)
 
-Threshold: base 45, shifted by regime (bullish -5, bearish -10).
+Threshold: base 65, shifted by regime (bullish -5, bearish +15).
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ ET = ZoneInfo("America/New_York")
 
 
 class EquityMomentum:
-    """Aggressive momentum strategy for US equities during RTH."""
+    """Disciplined momentum strategy for US equities during RTH."""
 
     name: str = "equity_momentum"
-    # High-beta, liquid names — easy to day trade
+    # Focused on most liquid, high-beta names (reduced from 16 to 10)
     instruments: list[str] = [
         "TSLA",
         "NVDA",
@@ -46,12 +46,6 @@ class EquityMomentum:
         "MSFT",
         "QQQ",
         "SPY",
-        "IWM",  # ETFs for broad exposure
-        "COIN",
-        "MSTR",  # Crypto-correlated equities
-        "PLTR",
-        "SOFI",
-        "RIVN",  # High-beta growth
     ]
 
     # Trend confirmation conditions
@@ -60,23 +54,23 @@ class EquityMomentum:
 
     # Momentum conditions
     RSI_MOMENTUM_MIN = 50
-    RSI_MOMENTUM_MAX = 70
+    RSI_MOMENTUM_MAX = 65  # Tighter ceiling (was 70) — avoid exhaustion
     RSI_MOMENTUM_POINTS = 20
 
     # Mean-reversion alternative (oversold bounce)
-    RSI_OVERSOLD = 40
+    RSI_OVERSOLD = 30  # True oversold (was 40)
     RSI_OVERSOLD_POINTS = 25
 
     # MACD momentum
     MACD_MOMENTUM_POINTS = 20
 
     # Volume confirmation
-    VOLUME_RATIO_MIN = 1.5  # Higher bar for equities (more noise)
+    VOLUME_RATIO_MIN = 1.5
     VOLUME_POINTS = 15
 
-    BASE_THRESHOLD = 45
-    # Aggressive: bearish markets = opportunity to buy fear
-    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": -10}
+    BASE_THRESHOLD = 65  # Require 65 pts = strong multi-indicator confluence
+    # CORRECT: Bearish = HARDER to enter (capital preservation)
+    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 15}
 
     def eligible(self, instrument: str, regime: str) -> bool:
         """Only trade during regular trading hours (09:30-16:00 ET)."""
@@ -99,44 +93,42 @@ class EquityMomentum:
     ) -> SignalResult:
         """Score the signal from 0–115 based on six conditions.
 
-        Two entry paths:
-        1. Momentum breakout: price > SMA20, SMA20 > SMA50, RSI 50-70, MACD+
-        2. Oversold bounce: RSI < 40, price near support, volume spike
+        Two MUTUALLY EXCLUSIVE entry paths — only the stronger path scores:
+        1. Momentum breakout: price > SMA20, SMA20 > SMA50, RSI 50-65, MACD+
+        2. Oversold bounce: RSI < 30, volume spike
+        Trend and volume confirmation adds to whichever path is active.
         """
-        points = 0
-
         rsi_14 = indicators.rsi_14
         macd_hist = indicators.macd_histogram
         vol_ratio = indicators.volume_ratio
         sma_20 = indicators.sma_20
         sma_50 = indicators.sma_50
 
-        # === TREND CONFIRMATION ===
-        # Condition 1: Price above SMA(20)
+        # === TREND CONFIRMATION (shared) ===
+        trend_points = 0
         if sma_20 is not None and current_price > sma_20:
-            points += self.TREND_ABOVE_SMA20_POINTS
-
-        # Condition 2: Uptrend structure (SMA20 > SMA50)
+            trend_points += self.TREND_ABOVE_SMA20_POINTS
         if sma_20 is not None and sma_50 is not None and sma_20 > sma_50:
-            points += self.UPTREND_STRUCTURE_POINTS
+            trend_points += self.UPTREND_STRUCTURE_POINTS
 
         # === MOMENTUM PATH ===
-        # Condition 3: RSI in momentum zone (50-70)
+        mo_points = trend_points
         if rsi_14 is not None and self.RSI_MOMENTUM_MIN <= rsi_14 <= self.RSI_MOMENTUM_MAX:
-            points += self.RSI_MOMENTUM_POINTS
+            mo_points += self.RSI_MOMENTUM_POINTS
+        if macd_hist is not None and macd_hist > 0:
+            mo_points += self.MACD_MOMENTUM_POINTS
 
         # === MEAN REVERSION PATH ===
-        # Condition 4: RSI oversold (alternative entry)
+        mr_points = 0
         if rsi_14 is not None and rsi_14 < self.RSI_OVERSOLD:
-            points += self.RSI_OVERSOLD_POINTS
-
-        # === MACD CONFIRMATION ===
-        # Condition 5: MACD histogram positive
+            mr_points += self.RSI_OVERSOLD_POINTS
         if macd_hist is not None and macd_hist > 0:
-            points += self.MACD_MOMENTUM_POINTS
+            mr_points += self.MACD_MOMENTUM_POINTS
 
-        # === VOLUME CONFIRMATION ===
-        # Condition 6: Volume spike
+        # Take the stronger path (mutually exclusive)
+        points = max(mo_points, mr_points)
+
+        # === VOLUME CONFIRMATION (adds to either path) ===
         if vol_ratio is not None and vol_ratio >= self.VOLUME_RATIO_MIN:
             points += self.VOLUME_POINTS
 

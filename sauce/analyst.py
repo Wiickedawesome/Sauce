@@ -128,8 +128,7 @@ async def analyst_committee(
     """Run the two-call analyst committee.
 
     Returns an AnalystVerdict. On any LLM failure, returns a default
-    APPROVE verdict (we don't want LLM failures to block trading —
-    the deterministic signal + risk gate are the safety net).
+    REJECT verdict (fail-safe: don't open positions on broken analysis).
     """
     settings = get_settings()
 
@@ -159,10 +158,10 @@ async def analyst_committee(
         bear_case = analysis.get("bear_case", "No bear case provided")
 
     except (LLMError, json.JSONDecodeError, KeyError) as exc:
-        logger.warning("Analyst dual analysis failed (%s), defaulting to approve", exc)
+        logger.warning("Analyst dual analysis failed (%s), defaulting to reject", exc)
         return AnalystVerdict(
-            approve=True,
-            confidence=50,
+            approve=False,
+            confidence=0,
             bull_case="Analysis unavailable",
             bear_case="Analysis unavailable",
             reasoning=f"Committee skipped due to LLM error: {exc}",
@@ -197,10 +196,20 @@ async def analyst_committee(
         )
         verdict = json.loads(raw_verdict)
 
-        approve = bool(verdict.get("approve", True))
-        confidence = int(verdict.get("confidence", 50))
+        approve = bool(verdict.get("approve", False))
+        confidence = int(verdict.get("confidence", 0))
         confidence = max(0, min(100, confidence))
         reasoning = str(verdict.get("reasoning", "No reasoning provided"))
+
+        # Reject low-confidence approvals (PM uncertain = skip)
+        if approve and confidence < 60:
+            logger.info(
+                "ANALYST %s: approve overridden to REJECT — confidence %d < 60",
+                symbol,
+                confidence,
+            )
+            approve = False
+            reasoning = f"Low confidence ({confidence}) — {reasoning}"
 
         logger.info(
             "ANALYST %s: approve=%s confidence=%d — %s",
@@ -219,10 +228,10 @@ async def analyst_committee(
         )
 
     except (LLMError, json.JSONDecodeError, KeyError) as exc:
-        logger.warning("PM verdict failed (%s), defaulting to approve", exc)
+        logger.warning("PM verdict failed (%s), defaulting to reject", exc)
         return AnalystVerdict(
-            approve=True,
-            confidence=50,
+            approve=False,
+            confidence=0,
             bull_case=bull_case,
             bear_case=bear_case,
             reasoning=f"PM verdict skipped due to LLM error: {exc}",

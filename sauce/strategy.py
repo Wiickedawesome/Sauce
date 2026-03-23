@@ -97,18 +97,19 @@ class TierParams:
 
 
 # ── Tier Table ────────────────────────────────────────────────────────────────
-# AGGRESSIVE CONFIGURATION: Optimized for day/swing trading with 15-25% risk tolerance
+# DISCIPLINED CONFIGURATION: Capital preservation first, growth second.
+# At $1K seed tier: max 20% per position, max 8% daily drawdown.
 
 SEED_PARAMS = TierParams(
     tier="seed",
-    max_position_pct=0.40,  # 40% per position for conviction plays
-    max_concurrent=4,  # 4 concurrent positions
-    daily_loss_limit=0.20,  # 20% daily drawdown ceiling (aggressive)
-    stop_loss_pct=0.05,  # 5% stop (wider for swing holds)
-    trail_activation_pct=0.04,  # Trail kicks in at 4% gain (faster locks)
-    trail_pct=0.02,  # 2% trailing stop (tighter)
-    profit_target_pct=0.08,  # 8% target (faster rotation)
-    rsi_exhaustion_threshold=72,  # Exit earlier on exhaustion
+    max_position_pct=0.20,  # 20% per position (was 40%) — max $200 at risk per trade
+    max_concurrent=3,  # 3 concurrent positions (was 4) — 60% max exposure
+    daily_loss_limit=0.08,  # 8% daily drawdown ceiling (was 20%)
+    stop_loss_pct=0.03,  # 3% stop (was 5%) — tighter capital protection
+    trail_activation_pct=0.03,  # Trail kicks in at 3% gain
+    trail_pct=0.015,  # 1.5% trailing stop
+    profit_target_pct=0.06,  # 6% target — 2:1 R:R with 3% stop
+    rsi_exhaustion_threshold=72,  # Exit on RSI exhaustion
     max_hold_hours=48,  # 2 days max for day/swing positions
     time_stop_min_gain=0.01,  # Exit stale positions at 1% gain minimum
 )

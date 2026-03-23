@@ -27,7 +27,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
-from sauce.adapters.market_data import MarketDataError, get_history, get_quote
+from sauce.adapters.market_data import MarketDataError, get_history, get_quote, get_universe_snapshot
 from sauce.analyst import analyst_committee
 from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
@@ -179,149 +179,166 @@ async def _scan_entries(
 
     open_symbols = {p.symbol for p in open_positions}
 
+    # ── Pre-filter eligible instruments ──
+    eligible_instruments: list[tuple[Strategy, str]] = []
     for strategy in STRATEGIES:
         for instrument in strategy.instruments:
             if instrument in open_symbols:
                 continue  # already have a position
             if not strategy.eligible(instrument, regime):
                 continue
+            eligible_instruments.append((strategy, instrument))
 
-            try:
-                is_crypto = _is_crypto(instrument)
-                indicators = _fetch_indicators(instrument, is_crypto=is_crypto)
-                if indicators is None:
-                    logger.warning("No indicators for %s, skipping", instrument)
-                    continue
+    if not eligible_instruments:
+        logger.info("No eligible instruments this cycle")
+        return
 
-                # Get current price for BB scoring
-                quote = get_quote(instrument)
-                if quote is None:
-                    continue
-                current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
-                ask = float(quote.ask) if hasattr(quote, "ask") else current_price
+    # ── Batch-fetch quotes (1–2 API calls instead of N) ──
+    all_symbols = list({inst for _, inst in eligible_instruments})
+    quotes_map = get_universe_snapshot(all_symbols)
+    logger.info("Batch quotes fetched for %d symbols (%d returned)", len(all_symbols), len(quotes_map))
 
-                signal = strategy.score(indicators, instrument, regime, current_price)
-                log_signal(signal)
+    for strategy, instrument in eligible_instruments:
+        quote = quotes_map.get(instrument)
+        if quote is None:
+            logger.debug("No quote for %s in batch snapshot, skipping", instrument)
+            continue
+        current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
+        ask = float(quote.ask) if hasattr(quote, "ask") else current_price
 
-                if not signal.fired:
-                    continue
+        # Skip if price looks stale or zero
+        if current_price <= 0:
+            continue
 
-                # ── Analyst committee (2 LLM calls) ──
-                situation_desc = build_situation_description(
-                    symbol=instrument,
-                    regime=regime,
-                    score=signal.score,
-                    threshold=signal.threshold,
-                    rsi_14=signal.rsi_14,
-                    macd_hist=signal.macd_hist,
-                    bb_pct=signal.bb_pct,
-                    volume_ratio=signal.volume_ratio,
-                    current_price=current_price,
-                    strategy_name=strategy.name,
-                )
-                recalled = trade_memory.recall(situation_desc)
-                verdict = await analyst_committee(
-                    symbol=instrument,
-                    strategy_name=strategy.name,
-                    score=signal.score,
-                    threshold=signal.threshold,
-                    regime=regime,
-                    current_price=current_price,
-                    rsi_14=signal.rsi_14,
-                    macd_hist=signal.macd_hist,
-                    bb_pct=signal.bb_pct,
-                    volume_ratio=signal.volume_ratio,
-                    memories=recalled,
-                    loop_id=loop_id,
-                )
-                if not verdict.approve:
-                    logger.info(
-                        "ANALYST REJECTED %s: confidence=%d — %s",
-                        instrument,
-                        verdict.confidence,
-                        verdict.reasoning,
-                    )
-                    upsert_daily_stats(today, signals_skipped=1)
-                    continue
+        try:
+            is_crypto = _is_crypto(instrument)
+            indicators = _fetch_indicators(instrument, is_crypto=is_crypto)
+            if indicators is None:
+                logger.warning("No indicators for %s, skipping", instrument)
+                continue
 
+            signal = strategy.score(indicators, instrument, regime, current_price)
+            log_signal(signal)
+
+            if not signal.fired:
+                continue
+
+            # ── Analyst committee (2 LLM calls) ──
+            situation_desc = build_situation_description(
+                symbol=instrument,
+                regime=regime,
+                score=signal.score,
+                threshold=signal.threshold,
+                rsi_14=signal.rsi_14,
+                macd_hist=signal.macd_hist,
+                bb_pct=signal.bb_pct,
+                volume_ratio=signal.volume_ratio,
+                current_price=current_price,
+                strategy_name=strategy.name,
+            )
+            recalled = trade_memory.recall(situation_desc)
+            verdict = await analyst_committee(
+                symbol=instrument,
+                strategy_name=strategy.name,
+                score=signal.score,
+                threshold=signal.threshold,
+                regime=regime,
+                current_price=current_price,
+                rsi_14=signal.rsi_14,
+                macd_hist=signal.macd_hist,
+                bb_pct=signal.bb_pct,
+                volume_ratio=signal.volume_ratio,
+                memories=recalled,
+                loop_id=loop_id,
+            )
+            if not verdict.approve:
                 logger.info(
-                    "ANALYST APPROVED %s: confidence=%d — %s",
+                    "ANALYST REJECTED %s: confidence=%d — %s",
                     instrument,
                     verdict.confidence,
                     verdict.reasoning,
                 )
+                upsert_daily_stats(today, signals_skipped=1)
+                continue
 
-                # Risk gate
-                order_value = min(equity * tier.max_position_pct, buying_power * 0.95)
-                verdict = check_risk(
-                    daily_pnl=daily_pnl,
-                    equity=equity,
-                    open_position_count=len(open_positions),
-                    buying_power=buying_power,
-                    order_value=order_value,
-                    daily_loss_limit=tier.daily_loss_limit,
-                    max_concurrent=tier.max_concurrent,
-                )
-                if not verdict.passed:
-                    logger.info("Risk gate blocked %s: %s", instrument, verdict.reason)
-                    continue
+            logger.info(
+                "ANALYST APPROVED %s: confidence=%d — %s",
+                instrument,
+                verdict.confidence,
+                verdict.reasoning,
+            )
 
-                # Skip orders below broker minimum ($10)
-                if order_value < 10.0:
-                    logger.info("Skipping %s: order value $%.2f below $10 minimum", instrument, order_value)
-                    continue
+            # Risk gate
+            order_value = min(equity * tier.max_position_pct, buying_power * 0.95)
+            risk_verdict = check_risk(
+                daily_pnl=daily_pnl,
+                equity=equity,
+                open_position_count=len(open_positions),
+                buying_power=buying_power,
+                order_value=order_value,
+                daily_loss_limit=tier.daily_loss_limit,
+                max_concurrent=tier.max_concurrent,
+            )
+            if not risk_verdict.passed:
+                logger.info("Risk gate blocked %s: %s", instrument, risk_verdict.reason)
+                continue
 
-                # Build and place order
-                account_with_ask = {**account, "_ask": str(ask)}
-                order = strategy.build_order(signal, account_with_ask, tier)
-                broker_result = place_order(order)
-                broker_order_id = getattr(broker_result, "id", None)
+            # Skip orders below broker minimum ($10)
+            if order_value < 10.0:
+                logger.info("Skipping %s: order value $%.2f below $10 minimum", instrument, order_value)
+                continue
 
-                # Use broker's filled_qty when available (accounts for
-                # fees / fractional rounding), otherwise fall back to
-                # the qty we requested.
-                filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
-                filled_qty = float(str(filled_qty_raw)) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else order.qty
+            # Build and place order
+            account_with_ask = {**account, "_ask": str(ask)}
+            order = strategy.build_order(signal, account_with_ask, tier)
+            broker_result = place_order(order)
+            broker_order_id = getattr(broker_result, "id", None)
 
-                filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
-                filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else (order.limit_price or ask)
+            # Use broker's filled_qty when available (accounts for
+            # fees / fractional rounding), otherwise fall back to
+            # the qty we requested.
+            filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
+            filled_qty = float(str(filled_qty_raw)) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else order.qty
 
-                # Track position locally
-                position = Position(
-                    symbol=instrument,
-                    asset_class="crypto" if is_crypto else "equity",
-                    qty=filled_qty,
-                    entry_price=filled_price,
-                    high_water_price=filled_price,
-                    entry_time=datetime.now(UTC),
-                    broker_order_id=str(broker_order_id) if broker_order_id else None,
-                    strategy_name=strategy.name,
-                    stop_loss_price=order.stop_loss_price or 0.0,
-                    profit_target_price=order.take_profit_price or 0.0,
-                )
-                save_position(position)
-                open_positions.append(position)
-                upsert_daily_stats(today, orders_placed=1)
+            filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
+            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else (order.limit_price or ask)
 
-                # Deduct order cost so subsequent iterations see reduced buying power
-                order_cost = filled_qty * filled_price
-                buying_power = max(buying_power - order_cost, 0.0)
-                account["buying_power"] = str(buying_power)
+            # Track position locally
+            position = Position(
+                symbol=instrument,
+                asset_class="crypto" if is_crypto else "equity",
+                qty=filled_qty,
+                entry_price=filled_price,
+                high_water_price=filled_price,
+                entry_time=datetime.now(UTC),
+                broker_order_id=str(broker_order_id) if broker_order_id else None,
+                strategy_name=strategy.name,
+                stop_loss_price=order.stop_loss_price or 0.0,
+                profit_target_price=order.take_profit_price or 0.0,
+            )
+            save_position(position)
+            open_positions.append(position)
+            upsert_daily_stats(today, orders_placed=1)
 
-                logger.info(
-                    "ENTRY %s: score=%d threshold=%d qty=%.4f (filled=%.4f) price=%.2f",
-                    instrument,
-                    signal.score,
-                    signal.threshold,
-                    order.qty,
-                    filled_qty,
-                    filled_price,
-                )
+            # Deduct order cost so subsequent iterations see reduced buying power
+            order_cost = filled_qty * filled_price
+            buying_power = max(buying_power - order_cost, 0.0)
+            account["buying_power"] = str(buying_power)
 
-            except BrokerError as exc:
-                logger.error("Broker error for %s: %s", instrument, exc)
-            except Exception as exc:
-                logger.error("Unexpected error scanning %s: %s", instrument, exc)
+            logger.info(
+                "ENTRY %s: score=%d threshold=%d qty=%.4f (filled=%.4f) price=%.2f",
+                instrument,
+                signal.score,
+                signal.threshold,
+                order.qty,
+                filled_qty,
+                filled_price,
+            )
+
+        except BrokerError as exc:
+            logger.error("Broker error for %s: %s", instrument, exc)
+        except Exception as exc:
+            logger.error("Unexpected error scanning %s: %s", instrument, exc)
 
 
 # ── Exit Scan ─────────────────────────────────────────────────────────────────
@@ -349,9 +366,13 @@ async def _scan_exits(
     except BrokerError as exc:
         logger.warning("Could not fetch broker positions for exit scan: %s", exc)
 
+    # Batch-fetch quotes for all open positions (1–2 API calls instead of N)
+    exit_symbols = [p.symbol for p in open_positions]
+    exit_quotes_map = get_universe_snapshot(exit_symbols) if exit_symbols else {}
+
     for position in open_positions:
         try:
-            quote = get_quote(position.symbol)
+            quote = exit_quotes_map.get(position.symbol)
             if quote is None:
                 continue
             current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0

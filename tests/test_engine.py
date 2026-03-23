@@ -40,8 +40,8 @@ class TestTierTable:
     def test_seed_tier(self):
         tier = get_tier_params(1_000.0)
         assert tier.tier == "seed"
-        assert tier.max_concurrent == 4
-        assert tier.max_position_pct == 0.40
+        assert tier.max_concurrent == 3
+        assert tier.max_position_pct == 0.20
 
     def test_building_tier(self):
         tier = get_tier_params(25_000.0)
@@ -121,11 +121,12 @@ class TestCryptoMomentumReversion:
         assert result.side == "hold"
 
     def test_rsi_oversold_only(self):
-        """RSI < 45 → 25 pts + MACD dip 15 pts = 40, threshold 40 → fired."""
+        """RSI < 35 → 25 pts + MACD dip 15 pts = 40, threshold 60 → not fired."""
         ind = _make_indicators(rsi_14=30, volume_ratio=1.0, macd_histogram=-1.0)
         result = self.strategy.score(ind, "BTC/USD", "neutral", 100.0)
         assert result.score == 40  # RSI 25 + MACD dip 15
-        assert result.fired  # 40 >= 40 threshold
+        assert not result.fired  # 40 < 60 threshold
+        assert result.side == "hold"
 
     def test_all_conditions_met(self):
         """All non-contradictory conditions → max pts, definitely fired."""
@@ -144,43 +145,45 @@ class TestCryptoMomentumReversion:
         assert result.side == "buy"
 
     def test_all_conditions_with_momentum_shift(self):
-        """MACD positive = momentum shift (20 pts), not dip (0 pts)."""
+        """MACD positive with RSI oversold: mean-reversion wins (no MACD dip)."""
         ind = _make_indicators(
             rsi_14=20,
             bb_upper=110.0,
             bb_lower=95.0,
-            macd_histogram=0.5,  # positive = momentum shift (20 pts)
+            macd_histogram=0.5,  # positive: mo +20, but mr loses MACD dip
             volume_ratio=2.0,
         )
         result = self.strategy.score(ind, "ETH/USD", "neutral", 90.0)
-        # RSI 25 + BB 20 + MACD momentum 20 + Vol 20 = 85
-        assert result.score == 85
-        assert result.fired
+        # mr: RSI 25 + BB 20 = 45 (no MACD dip — histogram positive)
+        # mo: MACD 20 (RSI 20 not in 55-70 range) = 20
+        # max(45, 20) = 45 + vol 20 = 65
+        assert result.score == 65
+        assert result.fired  # 65 >= 60
         assert result.side == "buy"
 
     def test_regime_bullish_lowers_threshold(self):
-        """Bullish regime → threshold 40 (no shift), fires easily."""
+        """Bullish regime → threshold 55 (base 60, shift -5)."""
         ind = _make_indicators(
-            rsi_14=30,  # 25 pts (RSI < 45)
-            macd_histogram=0.5,  # 20 pts (momentum shift)
-            volume_ratio=1.0,
+            rsi_14=30,  # 25 pts (RSI < 35)
+            macd_histogram=-0.5,  # 15 pts (mr dip)
+            volume_ratio=2.0,  # 20 pts
         )
         result = self.strategy.score(ind, "BTC/USD", "bullish", 100.0)
-        assert result.threshold == 40  # bullish shift = 0
-        assert result.score == 45
-        assert result.fired
+        assert result.threshold == 55  # bullish shift = -5
+        assert result.score == 60  # RSI 25 + MACD dip 15 + vol 20
+        assert result.fired  # 60 >= 55
 
     def test_regime_bearish_raises_threshold(self):
-        """Bearish regime → threshold 30 (volatility = opportunity), easier to fire."""
+        """Bearish regime → threshold 70 (base 60, shift +10), harder to enter."""
         ind = _make_indicators(
-            rsi_14=30,  # 25 pts (RSI < 45)
-            macd_histogram=0.5,  # 20 pts (momentum shift)
-            volume_ratio=1.0,
+            rsi_14=30,  # 25 pts (RSI < 35)
+            macd_histogram=-0.5,  # 15 pts (mr dip)
+            volume_ratio=2.0,  # 20 pts
         )
         result = self.strategy.score(ind, "BTC/USD", "bearish", 100.0)
-        assert result.threshold == 30  # bearish shift = -10
-        assert result.score == 45
-        assert result.fired  # 45 >= 30
+        assert result.threshold == 70  # bearish shift = +10
+        assert result.score == 60  # RSI 25 + MACD dip 15 + vol 20
+        assert not result.fired  # 60 < 70
 
     def test_bb_pct_at_lower(self):
         """Price exactly at lower BB → bb_pct 0.0 → 25 pts."""
@@ -217,14 +220,14 @@ class TestCryptoMomentumReversion:
     def test_mean_reversion_typical_scenario(self):
         """Typical mean reversion setup: oversold + dip confirmed + volume."""
         ind = _make_indicators(
-            rsi_14=38,  # 25 pts (below 42)
+            rsi_14=30,  # 25 pts (below 35)
             bb_upper=110.0,
             bb_lower=95.0,
             macd_histogram=-2.0,  # 15 pts (dip confirmed)
             volume_ratio=1.5,  # 20 pts (volume spike)
         )
-        # Price at lower band area → bb_pct ~ 0.0
-        result = self.strategy.score(ind, "BTC/USD", "bearish", 95.0)
+        # Price at lower band area → bb_pct = (95-95)/(110-95) = 0.0 → < 0.20
+        result = self.strategy.score(ind, "BTC/USD", "neutral", 95.0)
         # RSI 25 + BB 20 + MACD dip 15 + Vol 20 = 80, threshold 60
         assert result.score == 80
         assert result.fired
@@ -235,7 +238,7 @@ class TestCryptoMomentumReversion:
             symbol="BTC/USD",
             side="buy",
             score=80,
-            threshold=65,
+            threshold=60,
             fired=True,
             rsi_14=30,
             macd_hist=0.5,
@@ -246,8 +249,8 @@ class TestCryptoMomentumReversion:
         )
         account = {"equity": "10000", "buying_power": "10000", "_ask": "50000"}
         order = self.strategy.build_order(signal, account, SEED_PARAMS)
-        # 40% of $10K = $4K / $50K ask = 0.08 BTC
-        assert order.qty == pytest.approx(0.08, rel=0.01)
+        # 20% of $10K = $2K / $50K ask = 0.04 BTC
+        assert order.qty == pytest.approx(0.04, rel=0.01)
         assert order.side == "buy"
         assert order.order_type == "limit"
         assert order.limit_price == pytest.approx(50000 * 1.001, rel=0.001)
@@ -255,9 +258,9 @@ class TestCryptoMomentumReversion:
     def test_build_exit_plan(self):
         pos = Position(symbol="BTC/USD", entry_price=50000)
         plan = self.strategy.build_exit_plan(pos, SEED_PARAMS)
-        assert plan.stop_loss_pct == 0.05
-        assert plan.trail_activation_pct == 0.04
-        assert plan.profit_target_pct == 0.08
+        assert plan.stop_loss_pct == 0.03
+        assert plan.trail_activation_pct == 0.03
+        assert plan.profit_target_pct == 0.06
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,5 @@
 """
-risk.py — Three-rule risk gate for Sauce.
+risk.py — Five-rule risk gate for Sauce.
 
 Before every entry order, the loop calls `check_risk()`. If ANY rule fails,
 the symbol is skipped (the loop continues to the next symbol).
@@ -8,6 +8,8 @@ Rules:
   1. Daily P&L   — today's realized + unrealized loss < tier.daily_loss_limit
   2. Position count — open positions < tier.max_concurrent
   3. Buying power — order value < available buying power
+  4. Minimum order — order value must be at least $1 (prevents dust trades)
+  5. Max portfolio exposure — total open positions × avg size < 80% of equity
 
 Returns a RiskVerdict with pass/fail and the specific reason if failed.
 """
@@ -35,7 +37,7 @@ def check_risk(
     daily_loss_limit: float,
     max_concurrent: int,
 ) -> RiskVerdict:
-    """Run the three risk rules. Returns immediately on first failure.
+    """Run the five risk rules. Returns immediately on first failure.
 
     Parameters
     ----------
@@ -78,5 +80,24 @@ def check_risk(
             rule="buying_power",
             reason=f"Order value ${order_value:,.2f} exceeds buying power ${buying_power:,.2f}",
         )
+
+    # Rule 4: Minimum order size (prevent dust trades)
+    if order_value < 1.0:
+        return RiskVerdict(
+            passed=False,
+            rule="min_order_size",
+            reason=f"Order value ${order_value:.2f} below $1.00 minimum",
+        )
+
+    # Rule 5: Max portfolio exposure (don't commit >80% of equity across all positions)
+    # Approximate: each existing position is ~(equity * max_position_pct), plus this one
+    if equity > 0:
+        exposure_after = (order_value + (open_position_count * order_value)) / equity
+        if exposure_after > 0.80:
+            return RiskVerdict(
+                passed=False,
+                rule="max_exposure",
+                reason=f"Total exposure {exposure_after:.0%} would exceed 80% of equity",
+            )
 
     return RiskVerdict(passed=True, rule="all", reason="")
