@@ -126,6 +126,13 @@ def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_confidence == 0.3
 
 
+def test_options_enabled_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_required(monkeypatch)
+    monkeypatch.delenv("OPTIONS_ENABLED", raising=False)
+    s = Settings(_env_file=None)
+    assert s.options_enabled is False
+
+
 # ── Trading universe parsing ──────────────────────────────────────────────────
 
 

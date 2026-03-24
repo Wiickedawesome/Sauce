@@ -19,10 +19,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from sauce.core.options_schemas import OptionContract, OptionsPosition
 from sauce.core.schemas import Indicators
 from sauce.exit_monitor import evaluate_exit
+from sauce.options_safety import check_options_position, validate_options_order
 from sauce.risk import check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion, _compute_bb_pct
+from sauce.strategies.options_momentum import OptionsMomentum
 from sauce.strategy import (
     SEED_PARAMS,
     ExitPlan,
@@ -284,6 +287,8 @@ class TestRiskGate:
             order_value=1000,
             daily_loss_limit=0.08,
             max_concurrent=2,
+            total_existing_exposure=1500,
+            max_portfolio_exposure=0.80,
         )
         assert v.passed
         assert v.rule == "all"
@@ -297,6 +302,8 @@ class TestRiskGate:
             order_value=1000,
             daily_loss_limit=0.08,
             max_concurrent=2,
+            total_existing_exposure=0,
+            max_portfolio_exposure=0.80,
         )
         assert not v.passed
         assert v.rule == "daily_pnl"
@@ -311,6 +318,8 @@ class TestRiskGate:
             order_value=1000,
             daily_loss_limit=0.08,
             max_concurrent=2,
+            total_existing_exposure=0,
+            max_portfolio_exposure=0.80,
         )
         assert not v.passed
         assert v.rule == "daily_pnl"
@@ -324,6 +333,8 @@ class TestRiskGate:
             order_value=1000,
             daily_loss_limit=0.08,
             max_concurrent=2,
+            total_existing_exposure=0,
+            max_portfolio_exposure=0.80,
         )
         assert not v.passed
         assert v.rule == "position_count"
@@ -337,6 +348,8 @@ class TestRiskGate:
             order_value=1000,
             daily_loss_limit=0.08,
             max_concurrent=2,
+            total_existing_exposure=0,
+            max_portfolio_exposure=0.80,
         )
         assert not v.passed
         assert v.rule == "buying_power"
@@ -351,9 +364,26 @@ class TestRiskGate:
             order_value=1000,
             daily_loss_limit=0.08,
             max_concurrent=2,
+            total_existing_exposure=9000,
+            max_portfolio_exposure=0.80,
         )
         assert not v.passed
         assert v.rule == "daily_pnl"
+
+    def test_actual_exposure_blocks_overcommit(self):
+        v = check_risk(
+            daily_pnl=0.0,
+            equity=1000,
+            open_position_count=2,
+            buying_power=500,
+            order_value=200,
+            daily_loss_limit=0.08,
+            max_concurrent=3,
+            total_existing_exposure=650,
+            max_portfolio_exposure=0.80,
+        )
+        assert not v.passed
+        assert v.rule == "max_exposure"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -721,3 +751,89 @@ class TestDatabase:
             assert json.loads(row.extra) == {"note": "test"}
         finally:
             session.close()
+
+    def test_save_and_load_option_position(self):
+        from sauce.db import load_open_option_positions, save_option_position
+
+        pos = OptionsPosition(
+            position_id="opt-pos-1",
+            underlying="SPY",
+            contract_symbol="SPY250321C00550000",
+            option_type="call",
+            qty=1,
+            entry_price=5.0,
+            entry_time=datetime.now(UTC),
+            expiration=datetime(2026, 3, 27, tzinfo=UTC).date(),
+            high_water_price=5.0,
+            dte_at_entry=10,
+        )
+        save_option_position(pos)
+        loaded = load_open_option_positions()
+        assert len(loaded) == 1
+        assert loaded[0].contract_symbol == "SPY250321C00550000"
+
+
+class TestOptionsPipeline:
+    def test_validate_options_order_respects_limits(self):
+        ok, reason = validate_options_order(200.0, equity=10_000.0, existing_options_value=500.0)
+        assert ok
+        assert reason == "ok"
+
+        ok, reason = validate_options_order(1200.0, equity=10_000.0, existing_options_value=1500.0)
+        assert not ok
+        assert "exceed" in reason or "premium" in reason
+
+    def test_check_options_position_dte_exit(self):
+        position = OptionsPosition(
+            position_id="opt-pos-2",
+            underlying="SPY",
+            contract_symbol="SPY250321C00550000",
+            option_type="call",
+            qty=1,
+            entry_price=4.0,
+            entry_time=datetime.now(UTC) - timedelta(hours=2),
+            expiration=datetime.now(UTC).date(),
+            high_water_price=4.5,
+            dte_at_entry=5,
+        )
+        signal = check_options_position(position, current_price=4.2, current_dte=1)
+        assert signal is not None
+        assert signal.reason == "dte_threshold"
+
+    def test_options_strategy_select_contract_prefers_target_delta(self):
+        strategy = OptionsMomentum()
+        signal = strategy.score(
+            Indicators(rsi_14=25, macd_histogram=0.5, volume_ratio=2.0, sma_20=100.0, atr_14=3.0),
+            "SPY",
+            "bullish",
+            101.0,
+        )
+        candidates = [
+            OptionContract(
+                underlying="SPY",
+                contract_symbol="SPY1",
+                option_type="call",
+                strike=100.0,
+                expiration=datetime(2026, 4, 17, tzinfo=UTC).date(),
+                dte=24,
+                delta=0.26,
+                bid=5.0,
+                ask=5.4,
+                open_interest=150,
+            ),
+            OptionContract(
+                underlying="SPY",
+                contract_symbol="SPY2",
+                option_type="call",
+                strike=102.0,
+                expiration=datetime(2026, 4, 17, tzinfo=UTC).date(),
+                dte=24,
+                delta=0.32,
+                bid=4.8,
+                ask=5.1,
+                open_interest=200,
+            ),
+        ]
+        selected = strategy.select_contract(signal, candidates, 101.0)
+        assert selected is not None
+        assert selected.contract_symbol == "SPY2"

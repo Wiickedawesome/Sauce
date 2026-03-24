@@ -8,6 +8,7 @@ Run on VPS:     docker exec sauce python scripts/diagnose.py
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -57,30 +58,39 @@ def run() -> None:
     print(f"  TRADING_PAUSE env/config: {settings.trading_pause}")
 
     # ── 2. Recent ops summaries ───────────────────────────────────────────────
-    print("\n[LAST 10 OPS SUMMARIES]")
-    rows = session.execute(
+    print("\n[TODAY SUMMARY]")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    row = session.execute(
         text(
-            "SELECT timestamp, "
-            "       json_extract(payload, '$.anomalies'), "
-            "       json_extract(payload, '$.summary') "
-            "FROM audit_events "
-            "WHERE event_type = 'ops_summary' "
-            "ORDER BY timestamp DESC LIMIT 10"
-        )
-    ).fetchall()
-    if not rows:
-        print("  (none found)")
-    for ts, anomalies_json, summary_json in rows:
-        s = json.loads(summary_json or "{}")
-        a = json.loads(anomalies_json or "[]")
-        print(
-            f"  {ts}  signals={s.get('signals_total', 0):2d} "
-            f"buy/sell={s.get('signals_buy_sell', 0):2d} "
-            f"vetoes={s.get('risk_vetoes', 0):2d} "
-            f"orders={s.get('orders_placed', 0):2d} "
-            f"supervisor={s.get('supervisor_action', '?'):7s} "
-            f"anomalies={a}"
-        )
+            "SELECT loop_runs, signals_fired, signals_skipped, orders_placed, trades_closed, "
+            "       realized_pnl_usd, ending_equity, regime, updated_at "
+            "FROM daily_summary WHERE date = :today LIMIT 1"
+        ),
+        {"today": today},
+    ).fetchone()
+    if not row:
+        print("  No daily summary row found for today")
+    else:
+        (
+            loop_runs,
+            signals_fired,
+            signals_skipped,
+            orders_placed,
+            trades_closed,
+            realized_pnl_usd,
+            ending_equity,
+            regime,
+            updated_at,
+        ) = row
+        print(f"  loop_runs      : {loop_runs}")
+        print(f"  signals_fired  : {signals_fired}")
+        print(f"  signals_skipped: {signals_skipped}")
+        print(f"  orders_placed  : {orders_placed}")
+        print(f"  trades_closed  : {trades_closed}")
+        print(f"  realized_pnl   : ${float(realized_pnl_usd or 0):,.2f}")
+        print(f"  ending_equity  : ${float(ending_equity or 0):,.2f}")
+        print(f"  regime         : {regime}")
+        print(f"  updated_at     : {updated_at}")
 
     # ── 3. Recent supervisor decisions ───────────────────────────────────────
     print("\n[LAST 10 SUPERVISOR DECISIONS]")
@@ -120,37 +130,35 @@ def run() -> None:
     print("\n[LAST 15 RESEARCH SIGNALS]")
     rows = session.execute(
         text(
-            "SELECT timestamp, symbol, "
-            "       json_extract(payload, '$.side'), "
-            "       json_extract(payload, '$.confidence'), "
-            "       COALESCE(json_extract(payload, '$.reasoning'), json_extract(payload, '$.reason')) "
-            "FROM audit_events "
-            "WHERE event_type = 'signal' "
+            "SELECT timestamp, symbol, side, score, threshold, strategy_name "
+            "FROM signal_log "
             "ORDER BY timestamp DESC LIMIT 15"
         )
     ).fetchall()
     if not rows:
         print("  (none found)")
-    for ts, sym, side, conf, reason in rows:
+    for ts, sym, side, score, threshold, strategy_name in rows:
         print(
             f"  {ts}  symbol={sym!s:12s}  side={side!s:6s}  "
-            f"conf={str(conf):5s}  reason={str(reason or '')[:60]!r}"
+            f"score={int(score):3d}/{int(threshold):3d}  strategy={strategy_name!s}"
         )
 
     # ── 6. Latest loop_end timestamps ─────────────────────────────────────────
     print("\n[LAST 5 LOOP RUNS]")
     rows = session.execute(
         text(
-            "SELECT loop_id, timestamp "
-            "FROM audit_events "
-            "WHERE event_type = 'loop_end' "
-            "ORDER BY timestamp DESC LIMIT 5"
+            "SELECT s.loop_id, s.timestamp, e.timestamp, json_extract(e.payload, '$.status') "
+            "FROM audit_events s "
+            "LEFT JOIN audit_events e "
+            "  ON e.loop_id = s.loop_id AND e.event_type = 'loop_end' "
+            "WHERE s.event_type = 'loop_start' "
+            "ORDER BY s.timestamp DESC LIMIT 5"
         )
     ).fetchall()
     if not rows:
         print("  (none found)")
-    for loop_id, ts in rows:
-        print(f"  {ts}  loop_id={loop_id}")
+    for loop_id, start_ts, end_ts, status in rows:
+        print(f"  start={start_ts}  end={end_ts}  status={status or 'missing'}  loop_id={loop_id}")
 
     session.close()
     print("\n" + "=" * 70)

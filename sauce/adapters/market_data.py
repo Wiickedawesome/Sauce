@@ -22,6 +22,7 @@ import pandas as pd
 
 from sauce.adapters.utils import call_with_retry
 from sauce.core.config import get_settings
+from sauce.core.options_schemas import OptionContract
 from sauce.core.schemas import PriceReference
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,20 @@ def _get_crypto_client() -> Any:
 
     s = get_settings()
     return CryptoHistoricalDataClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key)
+
+
+def _get_option_client() -> Any:
+    from alpaca.data.historical.option import OptionHistoricalDataClient
+
+    s = get_settings()
+    return OptionHistoricalDataClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key)
+
+
+def _get_option_contract_client() -> Any:
+    from alpaca.trading.client import TradingClient
+
+    s = get_settings()
+    return TradingClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key, paper=s.alpaca_paper)
 
 
 def is_crypto(symbol: str) -> bool:
@@ -355,6 +370,129 @@ def get_bulk_equity_bars(
             result[symbols[0]] = _normalise_bars_df(df, symbols[0]).tail(bars)
 
     return result
+
+
+def get_option_chain(
+    underlying: str,
+    current_price: float,
+    option_type: str | None = None,
+) -> list[OptionContract]:
+    """Fetch option contracts for an underlying and enrich them with quotes and greeks."""
+    from alpaca.data.requests import OptionChainRequest
+    from alpaca.trading.enums import ContractType
+    from alpaca.trading.requests import GetOptionContractsRequest
+
+    settings = get_settings()
+    option_type_enum = None
+    if option_type == "call":
+        option_type_enum = ContractType.CALL
+    elif option_type == "put":
+        option_type_enum = ContractType.PUT
+
+    contract_client = _get_option_contract_client()
+    option_client = _get_option_client()
+    today = datetime.now(UTC).date()
+    strike_low = max(current_price * 0.75, 0.01)
+    strike_high = max(current_price * 1.25, strike_low + 1)
+
+    contracts_response = call_with_retry(
+        contract_client.get_option_contracts,
+        GetOptionContractsRequest(
+            underlying_symbols=[underlying],
+            type=option_type_enum,
+            expiration_date_gte=today + timedelta(days=settings.options_dte_min),
+            expiration_date_lte=today + timedelta(days=settings.options_dte_max),
+            strike_price_gte=f"{strike_low:.2f}",
+            strike_price_lte=f"{strike_high:.2f}",
+            limit=200,
+        ),
+    )
+    contracts = getattr(contracts_response, "option_contracts", None) or []
+
+    snapshots = call_with_retry(
+        option_client.get_option_chain,
+        OptionChainRequest(
+            underlying_symbol=underlying,
+            type=option_type_enum,
+            strike_price_gte=strike_low,
+            strike_price_lte=strike_high,
+            expiration_date_gte=today + timedelta(days=settings.options_dte_min),
+            expiration_date_lte=today + timedelta(days=settings.options_dte_max),
+        ),
+    )
+
+    result: list[OptionContract] = []
+    for contract in contracts:
+        symbol = str(getattr(contract, "symbol", ""))
+        if not symbol:
+            continue
+        snapshot = snapshots.get(symbol) if isinstance(snapshots, dict) else None
+        latest_quote = getattr(snapshot, "latest_quote", None)
+        greeks = getattr(snapshot, "greeks", None)
+        bid = float(getattr(latest_quote, "bid_price", 0.0) or 0.0)
+        ask = float(getattr(latest_quote, "ask_price", 0.0) or 0.0)
+        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else max(bid, ask)
+        expiration = getattr(contract, "expiration_date", today)
+        dte = max((expiration - today).days, 0)
+        result.append(
+            OptionContract(
+                underlying=underlying,
+                contract_symbol=symbol,
+                option_type=str(getattr(contract, "type", "")).lower(),
+                strike=float(getattr(contract, "strike_price", 0.0) or 0.0),
+                expiration=expiration,
+                dte=dte,
+                delta=(
+                    float(getattr(greeks, "delta", 0.0))
+                    if greeks and getattr(greeks, "delta", None) is not None
+                    else None
+                ),
+                implied_volatility=(
+                    float(getattr(snapshot, "implied_volatility", 0.0))
+                    if snapshot and getattr(snapshot, "implied_volatility", None) is not None
+                    else None
+                ),
+                bid=bid if bid > 0 else None,
+                ask=ask if ask > 0 else None,
+                mid=mid if mid > 0 else None,
+                open_interest=int(getattr(contract, "open_interest", 0) or 0),
+                volume=None,
+            )
+        )
+
+    return result
+
+
+def get_option_quotes(symbols: list[str]) -> dict[str, PriceReference]:
+    """Fetch latest bid/ask/mid quotes for option contracts."""
+    from alpaca.data.requests import OptionLatestQuoteRequest
+
+    if not symbols:
+        return {}
+
+    client = _get_option_client()
+    response = call_with_retry(
+        client.get_option_latest_quote,
+        OptionLatestQuoteRequest(symbol_or_symbols=symbols),
+    )
+
+    result: dict[str, PriceReference] = {}
+    for symbol, quote in response.items():
+        bid = float(getattr(quote, "bid_price", 0.0) or 0.0)
+        ask = float(getattr(quote, "ask_price", 0.0) or 0.0)
+        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else max(bid, ask)
+        as_of = _parse_timestamp(getattr(quote, "timestamp", None))
+        result[symbol] = PriceReference(symbol=symbol, bid=bid, ask=ask, mid=mid, as_of=as_of)
+
+    return result
+
+
+def get_option_quote(symbol: str) -> PriceReference:
+    """Fetch the latest quote for a single option contract."""
+    quotes = get_option_quotes([symbol])
+    if symbol not in quotes:
+        raise MarketDataError(f"No option quote returned for {symbol}")
+    return quotes[symbol]
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

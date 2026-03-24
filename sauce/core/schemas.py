@@ -151,6 +151,10 @@ class AuditEvent(StrictModel):
         "error",
         "llm_call",
         "llm_response",
+        "loop_start",
+        "loop_end",
+        "safety_check",
+        "supervisor_decision",
         "options_order_submitted",
     ]
     symbol: str | None = None

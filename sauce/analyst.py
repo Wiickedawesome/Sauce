@@ -209,11 +209,13 @@ async def analyst_committee(
         reasoning = str(verdict.get("reasoning", "No reasoning provided"))
 
         # Reject low-confidence approvals (PM uncertain = skip)
-        if approve and confidence < 60:
+        min_confidence_pct = int(settings.min_confidence * 100)
+        if approve and confidence < min_confidence_pct:
             logger.info(
-                "ANALYST %s: approve overridden to REJECT — confidence %d < 60",
+                "ANALYST %s: approve overridden to REJECT — confidence %d < %d",
                 symbol,
                 confidence,
+                min_confidence_pct,
             )
             approve = False
             reasoning = f"Low confidence ({confidence}) — {reasoning}"

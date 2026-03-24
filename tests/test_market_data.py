@@ -380,3 +380,62 @@ def test_get_universe_snapshot_equity_only(
     mock_crypto_client.get_crypto_latest_quote.assert_not_called()
     assert "AAPL" in result
     clear_cache()
+
+
+def test_get_option_quotes_returns_price_references(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import market_data
+
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
+    mock_quote = make_quote_mock("SPY250321C00550000", bid=5.0, ask=5.5, ts=ts)
+    mock_client = MagicMock()
+    mock_client.get_option_latest_quote.return_value = {"SPY250321C00550000": mock_quote}
+
+    with patch("sauce.adapters.market_data._get_option_client", return_value=mock_client):
+        result = market_data.get_option_quotes(["SPY250321C00550000"])
+
+    assert "SPY250321C00550000" in result
+    assert isinstance(result["SPY250321C00550000"], PriceReference)
+    clear_cache()
+
+
+def test_get_option_chain_normalizes_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import market_data
+
+    contract = MagicMock()
+    contract.symbol = "SPY250321C00550000"
+    contract.type = "call"
+    contract.strike_price = 550.0
+    contract.expiration_date = datetime(2026, 4, 17, tzinfo=UTC).date()
+    contract.open_interest = 250
+
+    greeks = MagicMock()
+    greeks.delta = 0.31
+    quote = make_quote_mock(
+        "SPY250321C00550000",
+        bid=5.0,
+        ask=5.4,
+        ts=datetime(2026, 3, 24, 15, 30, 0, tzinfo=UTC),
+    )
+    snapshot = MagicMock()
+    snapshot.latest_quote = quote
+    snapshot.greeks = greeks
+    snapshot.implied_volatility = 0.22
+
+    contract_client = MagicMock()
+    contract_client.get_option_contracts.return_value.option_contracts = [contract]
+    option_client = MagicMock()
+    option_client.get_option_chain.return_value = {"SPY250321C00550000": snapshot}
+
+    with (
+        patch("sauce.adapters.market_data._get_option_contract_client", return_value=contract_client),
+        patch("sauce.adapters.market_data._get_option_client", return_value=option_client),
+    ):
+        result = market_data.get_option_chain("SPY", 540.0, "call")
+
+    assert len(result) == 1
+    assert result[0].contract_symbol == "SPY250321C00550000"
+    assert result[0].delta == pytest.approx(0.31)
+    assert result[0].bid == pytest.approx(5.0)
+    clear_cache()

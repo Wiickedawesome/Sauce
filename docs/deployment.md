@@ -91,6 +91,7 @@ docker/
 | `ALPACA_PAPER` | No | `true` | Set `false` for live trading |
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
 | `LLM_MODEL` | No | `claude-sonnet-4-6` | Anthropic model name |
+| `OPTIONS_ENABLED` | No | `false` | Enable the integrated options pipeline explicitly |
 | `TRADING_PAUSE` | No | `false` | Emergency kill switch |
 | `DB_PATH` | No | `data/sauce.db` | SQLite database path |
 

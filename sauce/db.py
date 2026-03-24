@@ -16,13 +16,16 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
 
 from sauce.adapters.db import Base, get_session
-from sauce.memory import MemoryEntry
+from sauce.core.options_schemas import OptionsPosition
 from sauce.strategy import Position, SignalResult
+
+if TYPE_CHECKING:
+    from sauce.memory import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +139,51 @@ class TradeMemoryRow(Base):
     outcome: str = Column(Text, nullable=False)
     lesson: str = Column(Text, nullable=False)
     created_at: datetime = Column(DateTime, nullable=False)
+
+
+class OptionsPositionRow(Base):
+    """Open options position. Mutable until closed."""
+
+    __tablename__ = "options_positions"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    position_id: str = Column(String(36), nullable=False, unique=True, index=True)
+    underlying: str = Column(String(20), nullable=False, index=True)
+    contract_symbol: str = Column(String(64), nullable=False, unique=True, index=True)
+    option_type: str = Column(String(8), nullable=False)
+    qty: int = Column(Integer, nullable=False)
+    entry_price: float = Column(Float, nullable=False)
+    entry_time: datetime = Column(DateTime, nullable=False)
+    expiration = Column(Date, nullable=False)
+    high_water_price: float = Column(Float, nullable=False, default=0.0)
+    stop_loss_price: float | None = Column(Float, nullable=True)
+    take_profit_price: float | None = Column(Float, nullable=True)
+    dte_at_entry: int = Column(Integer, nullable=False)
+    strategy_name: str = Column(String(64), nullable=False)
+    broker_order_id: str | None = Column(String(64), nullable=True)
+    status: str = Column(String(12), nullable=False, default="open", index=True)
+
+
+class OptionsTradeRow(Base):
+    """Completed options trade record. Append-only."""
+
+    __tablename__ = "options_trades"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id: str = Column(String(36), nullable=False, unique=True, index=True)
+    underlying: str = Column(String(20), nullable=False, index=True)
+    contract_symbol: str = Column(String(64), nullable=False, index=True)
+    option_type: str = Column(String(8), nullable=False)
+    qty: int = Column(Integer, nullable=False)
+    entry_price: float = Column(Float, nullable=False)
+    exit_price: float = Column(Float, nullable=False)
+    realized_pnl: float = Column(Float, nullable=False)
+    strategy_name: str = Column(String(64), nullable=False)
+    exit_trigger: str = Column(String(32), nullable=False)
+    entry_time: datetime = Column(DateTime, nullable=False)
+    exit_time: datetime = Column(DateTime, nullable=False)
+    hold_hours: float = Column(Float, nullable=False)
+    broker_order_id: str | None = Column(String(64), nullable=True)
 
 
 # ── Signal Persistence ────────────────────────────────────────────────────────
@@ -258,6 +306,140 @@ def load_open_positions(db_path: str | None = None) -> list[Position]:
             )
             for row in rows
         ]
+    finally:
+        session.close()
+
+
+def save_option_position(position: OptionsPosition, db_path: str | None = None) -> None:
+    """Insert a new open options position."""
+    session = get_session(db_path)
+    try:
+        row = OptionsPositionRow(
+            position_id=position.position_id,
+            underlying=position.underlying,
+            contract_symbol=position.contract_symbol,
+            option_type=position.option_type,
+            qty=position.qty,
+            entry_price=position.entry_price,
+            entry_time=position.entry_time,
+            expiration=position.expiration,
+            high_water_price=position.high_water_price,
+            stop_loss_price=position.stop_loss_price,
+            take_profit_price=position.take_profit_price,
+            dte_at_entry=position.dte_at_entry,
+            strategy_name=position.strategy_name,
+            broker_order_id=position.broker_order_id,
+            status="open",
+        )
+        session.add(row)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("Failed to save options position %s: %s", position.position_id, exc)
+    finally:
+        session.close()
+
+
+def update_option_position(position: OptionsPosition, db_path: str | None = None) -> None:
+    """Update the tracked high-water mark or exits for an open options position."""
+    session = get_session(db_path)
+    try:
+        row = session.query(OptionsPositionRow).filter_by(position_id=position.position_id, status="open").first()
+        if row is None:
+            logger.warning("Options position %s not found for update", position.position_id)
+            return
+        row.high_water_price = position.high_water_price
+        row.stop_loss_price = position.stop_loss_price
+        row.take_profit_price = position.take_profit_price
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("Failed to update options position %s: %s", position.position_id, exc)
+    finally:
+        session.close()
+
+
+def close_option_position(position_id: str, db_path: str | None = None) -> None:
+    """Mark an options position as closed."""
+    session = get_session(db_path)
+    try:
+        row = session.query(OptionsPositionRow).filter_by(position_id=position_id, status="open").first()
+        if row is None:
+            return
+        row.status = "closed"
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("Failed to close options position %s: %s", position_id, exc)
+    finally:
+        session.close()
+
+
+def load_open_option_positions(db_path: str | None = None) -> list[OptionsPosition]:
+    """Load all open options positions from DB."""
+    session = get_session(db_path)
+    try:
+        rows = session.query(OptionsPositionRow).filter_by(status="open").all()
+        return [
+            OptionsPosition(
+                position_id=row.position_id,
+                underlying=row.underlying,
+                contract_symbol=row.contract_symbol,
+                option_type=row.option_type,
+                qty=row.qty,
+                entry_price=row.entry_price,
+                entry_time=row.entry_time.replace(tzinfo=UTC) if row.entry_time.tzinfo is None else row.entry_time,
+                expiration=row.expiration,
+                high_water_price=row.high_water_price,
+                stop_loss_price=row.stop_loss_price,
+                take_profit_price=row.take_profit_price,
+                dte_at_entry=row.dte_at_entry,
+                strategy_name=row.strategy_name,
+                broker_order_id=row.broker_order_id,
+            )
+            for row in rows
+        ]
+    finally:
+        session.close()
+
+
+def log_option_trade(
+    position: OptionsPosition,
+    exit_price: float,
+    exit_trigger: str,
+    exit_time: datetime | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Record a completed options trade."""
+    if exit_time is None:
+        exit_time = datetime.now(UTC)
+
+    hold_hours = (exit_time - position.entry_time).total_seconds() / 3600
+    realized_pnl = (exit_price - position.entry_price) * position.qty * 100
+
+    session = get_session(db_path)
+    try:
+        row = OptionsTradeRow(
+            trade_id=position.position_id,
+            underlying=position.underlying,
+            contract_symbol=position.contract_symbol,
+            option_type=position.option_type,
+            qty=position.qty,
+            entry_price=position.entry_price,
+            exit_price=exit_price,
+            realized_pnl=realized_pnl,
+            strategy_name=position.strategy_name,
+            exit_trigger=exit_trigger,
+            entry_time=position.entry_time,
+            exit_time=exit_time,
+            hold_hours=hold_hours,
+            broker_order_id=position.broker_order_id,
+        )
+        session.add(row)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("Failed to log options trade for %s: %s", position.contract_symbol, exc)
     finally:
         session.close()
 
@@ -435,6 +617,8 @@ def save_memory(entry: MemoryEntry, db_path: str | None = None) -> None:
 
 def load_all_memories(db_path: str | None = None) -> list[MemoryEntry]:
     """Load all trade memories from the DB for BM25 index construction."""
+    from sauce.memory import MemoryEntry
+
     session = get_session(db_path)
     try:
         rows = session.query(TradeMemoryRow).order_by(TradeMemoryRow.id).all()

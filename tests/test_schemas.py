@@ -133,3 +133,14 @@ def test_audit_event_loop_id_auto_generated() -> None:
     e1 = AuditEvent(event_type="error")
     e2 = AuditEvent(event_type="llm_call")
     assert e1.loop_id != e2.loop_id  # each gets a unique UUID
+
+
+def test_audit_event_accepts_loop_boundaries_and_safety_events() -> None:
+    start = AuditEvent(event_type="loop_start")
+    safety = AuditEvent(event_type="safety_check")
+    supervisor = AuditEvent(event_type="supervisor_decision")
+    end = AuditEvent(event_type="loop_end")
+    assert start.event_type == "loop_start"
+    assert safety.event_type == "safety_check"
+    assert supervisor.event_type == "supervisor_decision"
+    assert end.event_type == "loop_end"

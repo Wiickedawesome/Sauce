@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sauce.core.options_schemas import OptionsOrder
 from sauce.core.schemas import Order
 
 # ── Env setup ─────────────────────────────────────────────────────────────────
@@ -402,3 +403,50 @@ def test_get_recent_orders_returns_empty_on_error(monkeypatch):
         result = broker.get_recent_orders(loop_id="test-loop")
 
     assert result == []
+
+
+def test_place_option_order_calls_submit_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import broker
+
+    order = OptionsOrder(
+        underlying="SPY",
+        contract_symbol="SPY250321C00550000",
+        option_type="call",
+        side="buy",
+        qty=1,
+        limit_price=5.25,
+    )
+    mock_client = MagicMock()
+    resp = MagicMock()
+    resp.id = "opt-order-1"
+    resp.status = "accepted"
+    mock_client.submit_order.return_value = resp
+
+    with patch("sauce.adapters.broker._get_trading_client", return_value=mock_client):
+        with patch("sauce.adapters.db.log_event"):
+            result = broker.place_option_order(order, loop_id="loop-options")
+
+    assert mock_client.submit_order.called
+    assert result["id"] == "opt-order-1"
+
+
+def test_get_option_positions_filters_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import broker
+
+    option_pos = MagicMock()
+    option_pos.asset_class = "option"
+    option_pos.symbol = "SPY250321C00550000"
+    equity_pos = MagicMock()
+    equity_pos.asset_class = "us_equity"
+    equity_pos.symbol = "SPY"
+    mock_client = MagicMock()
+    mock_client.get_all_positions.return_value = [option_pos, equity_pos]
+
+    with patch("sauce.adapters.broker._get_trading_client", return_value=mock_client):
+        with patch("sauce.adapters.db.log_event"):
+            result = broker.get_option_positions(loop_id="loop-options")
+
+    assert len(result) == 1
+    assert result[0]["symbol"] == "SPY250321C00550000"

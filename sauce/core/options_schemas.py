@@ -93,6 +93,7 @@ class OptionsPosition(StrictModel):
     qty: int = Field(..., gt=0)
     entry_price: float = Field(..., gt=0.0, description="Premium paid per contract")
     entry_time: datetime
+    expiration: date
     high_water_price: float = Field(..., ge=0.0, description="Highest premium since entry")
     stop_loss_price: float | None = None
     take_profit_price: float | None = None

@@ -24,22 +24,45 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sauce.adapters.broker import BrokerError, get_account, get_positions, place_order
-from sauce.adapters.market_data import MarketDataError, get_history, get_quote, get_universe_snapshot
+from sauce.adapters.db import log_event
+from sauce.adapters.broker import (
+    BrokerError,
+    get_account,
+    get_option_positions,
+    get_positions,
+    get_recent_orders,
+    place_option_order,
+    place_order,
+)
+from sauce.adapters.market_data import (
+    MarketDataError,
+    get_history,
+    get_option_chain,
+    get_option_quotes,
+    get_quote,
+    get_universe_snapshot,
+)
 from sauce.analyst import analyst_committee
 from sauce.core.config import get_settings
-from sauce.core.schemas import Indicators, Order
+from sauce.core.options_schemas import OptionsOrder, OptionsPosition, OptionsSignalResult
+from sauce.core.schemas import AuditEvent, Indicators, Order, PriceReference
 from sauce.db import (
     close_position,
+    close_option_position,
     get_daily_regime,
     load_all_memories,
+    load_open_option_positions,
     load_open_positions,
     log_signal,
+    log_option_trade,
     log_trade,
     save_memory,
+    save_option_position,
     save_position,
+    update_option_position,
     update_position,
     upsert_daily_stats,
 )
@@ -47,18 +70,38 @@ from sauce.exit_monitor import evaluate_exit
 from sauce.indicators.core import compute_all
 from sauce.memory import MemoryEntry, TradeMemory, build_outcome_description, build_situation_description
 from sauce.morning_brief import get_regime
+from sauce.options_safety import check_options_position, validate_options_order
 from sauce.reflection import reflect_on_trade
 from sauce.risk import check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion
 from sauce.strategies.equity_momentum import EquityMomentum
+from sauce.strategies.options_momentum import OptionsMomentum
 from sauce.strategy import Position, Strategy, get_tier_params
 
 logger = logging.getLogger(__name__)
+
+_PENDING_ORDER_STATUSES = {
+    "accepted",
+    "accepted_for_bidding",
+    "held",
+    "new",
+    "partially_filled",
+    "pending_new",
+    "pending_replace",
+}
+_FILLED_ORDER_STATUSES = {"filled", "partially_filled"}
 
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 
 STRATEGIES: list[Strategy] = [CryptoMomentumReversion(), EquityMomentum()]
+OPTIONS_STRATEGY = OptionsMomentum()
+
+
+@dataclass(frozen=True, slots=True)
+class SupervisorDecision:
+    action: str
+    reason: str
 
 
 def _is_crypto(symbol: str) -> bool:
@@ -78,6 +121,171 @@ def _hour_et() -> int:
     from zoneinfo import ZoneInfo
 
     return datetime.now(ZoneInfo("America/New_York")).hour
+
+
+def _audit_event(loop_id: str, event_type: str, payload: dict[str, object], symbol: str | None = None) -> None:
+    settings = get_settings()
+    log_event(
+        AuditEvent(
+            loop_id=loop_id,
+            event_type=event_type,
+            symbol=symbol,
+            payload=payload,
+            timestamp=datetime.now(UTC),
+            prompt_version=settings.prompt_version,
+        )
+    )
+
+
+def _is_quote_fresh(quote: PriceReference, ttl_seconds: int, now: datetime | None = None) -> bool:
+    ref_now = now or datetime.now(UTC)
+    quote_time = quote.as_of if quote.as_of.tzinfo is not None else quote.as_of.replace(tzinfo=UTC)
+    return (ref_now - quote_time).total_seconds() <= ttl_seconds
+
+
+def _pending_order_symbols(recent_orders: list[dict[str, object]]) -> set[str]:
+    pending_symbols: set[str] = set()
+    for order in recent_orders:
+        status = str(order.get("status", "")).strip().lower()
+        symbol = str(order.get("symbol", "")).strip().upper()
+        if status in _PENDING_ORDER_STATUSES and symbol:
+            pending_symbols.add(symbol)
+    return pending_symbols
+
+
+def _should_persist_position(status: str, filled_qty: float) -> bool:
+    return status in _FILLED_ORDER_STATUSES and filled_qty > 0
+
+
+def _pending_option_underlyings(recent_orders: list[dict[str, object]], underlyings: list[str]) -> set[str]:
+    pending: set[str] = set()
+    ordered_underlyings = sorted({underlying.upper() for underlying in underlyings}, key=len, reverse=True)
+    for order in recent_orders:
+        status = str(order.get("status", "")).strip().lower()
+        symbol = str(order.get("symbol", "")).strip().upper()
+        if status not in _PENDING_ORDER_STATUSES or not symbol:
+            continue
+        for underlying in ordered_underlyings:
+            if symbol.startswith(underlying):
+                pending.add(underlying)
+                break
+    return pending
+
+
+def _broker_position_exposure(broker_positions: list[dict[str, object]]) -> float:
+    total = 0.0
+    for position in broker_positions:
+        market_value = position.get("market_value") or 0
+        try:
+            total += abs(float(str(market_value)))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _supervisor_review(
+    symbol: str,
+    order: Order,
+    snapshot_quote: PriceReference,
+    fresh_quote: PriceReference,
+    buying_power: float,
+    loop_id: str,
+) -> SupervisorDecision:
+    settings = get_settings()
+
+    if settings.trading_pause:
+        decision = SupervisorDecision(action="abort", reason="TRADING_PAUSE enabled")
+    elif not _is_quote_fresh(fresh_quote, settings.data_ttl_seconds):
+        decision = SupervisorDecision(action="abort", reason="fresh quote is stale")
+    elif order.qty <= 0:
+        decision = SupervisorDecision(action="abort", reason="order quantity is zero")
+    else:
+        baseline = snapshot_quote.mid if snapshot_quote.mid > 0 else fresh_quote.mid
+        deviation = abs(fresh_quote.mid - baseline) / baseline if baseline > 0 else 1.0
+        order_price = order.limit_price or order.stop_price or fresh_quote.ask or fresh_quote.mid
+        order_value = order.qty * order_price
+        if deviation > settings.max_price_deviation:
+            decision = SupervisorDecision(
+                action="abort",
+                reason=(
+                    f"price deviation {deviation:.2%} exceeds "
+                    f"limit {settings.max_price_deviation:.2%}"
+                ),
+            )
+        elif order_value > buying_power:
+            decision = SupervisorDecision(
+                action="abort",
+                reason=f"order value ${order_value:,.2f} exceeds buying power ${buying_power:,.2f}",
+            )
+        else:
+            decision = SupervisorDecision(
+                action="execute",
+                reason="risk approved and fresh quote within deviation threshold",
+            )
+
+    _audit_event(
+        loop_id,
+        "supervisor_decision",
+        {
+            "action": decision.action,
+            "reason": decision.reason,
+            "order_type": order.order_type,
+            "qty": order.qty,
+            "limit_price": order.limit_price,
+            "quote_mid": fresh_quote.mid,
+        },
+        symbol=symbol,
+    )
+    return decision
+
+
+def _supervisor_review_option(
+    underlying: str,
+    contract_symbol: str,
+    order: OptionsOrder,
+    snapshot_quote: PriceReference,
+    fresh_quote: PriceReference,
+    buying_power: float,
+    loop_id: str,
+) -> SupervisorDecision:
+    settings = get_settings()
+    baseline = snapshot_quote.mid if snapshot_quote.mid > 0 else fresh_quote.mid
+    deviation = abs(fresh_quote.mid - baseline) / baseline if baseline > 0 else 1.0
+    order_value = order.qty * order.limit_price * 100
+
+    if settings.trading_pause:
+        decision = SupervisorDecision(action="abort", reason="TRADING_PAUSE enabled")
+    elif not _is_quote_fresh(fresh_quote, settings.data_ttl_seconds):
+        decision = SupervisorDecision(action="abort", reason="fresh option quote is stale")
+    elif order.qty <= 0:
+        decision = SupervisorDecision(action="abort", reason="options order quantity is zero")
+    elif deviation > settings.max_price_deviation:
+        decision = SupervisorDecision(
+            action="abort",
+            reason=f"option price deviation {deviation:.2%} exceeds limit {settings.max_price_deviation:.2%}",
+        )
+    elif order_value > buying_power:
+        decision = SupervisorDecision(
+            action="abort",
+            reason=f"option premium ${order_value:,.2f} exceeds buying power ${buying_power:,.2f}",
+        )
+    else:
+        decision = SupervisorDecision(action="execute", reason="options preflight checks passed")
+
+    _audit_event(
+        loop_id,
+        "supervisor_decision",
+        {
+            "action": decision.action,
+            "reason": decision.reason,
+            "contract_symbol": contract_symbol,
+            "qty": order.qty,
+            "limit_price": order.limit_price,
+            "quote_mid": fresh_quote.mid,
+        },
+        symbol=underlying,
+    )
+    return decision
 
 
 def _fetch_indicators(symbol: str, is_crypto: bool) -> Indicators | None:
@@ -163,11 +371,13 @@ async def _scan_entries(
     regime: str,
     account: dict[str, str],
     open_positions: list[Position],
+    broker_positions: list[dict[str, object]],
+    recent_orders: list[dict[str, object]],
     trade_memory: TradeMemory,
     loop_id: str = "entry",
 ) -> None:
     """Score each strategy instrument for entry signals."""
-    get_settings()
+    settings = get_settings()
     equity = float(account.get("equity", "0"))
     buying_power = float(account.get("buying_power", "0"))
     tier = get_tier_params(equity)
@@ -178,12 +388,15 @@ async def _scan_entries(
     daily_pnl = (equity - starting) / starting if starting > 0 else 0.0
 
     open_symbols = {p.symbol for p in open_positions}
+    pending_symbols = _pending_order_symbols(recent_orders)
+    actual_open_position_count = len(broker_positions)
+    total_existing_exposure = _broker_position_exposure(broker_positions)
 
     # ── Pre-filter eligible instruments ──
     eligible_instruments: list[tuple[Strategy, str]] = []
     for strategy in STRATEGIES:
         for instrument in strategy.instruments:
-            if instrument in open_symbols:
+            if instrument in open_symbols or instrument in pending_symbols:
                 continue  # already have a position
             if not strategy.eligible(instrument, regime):
                 continue
@@ -203,8 +416,22 @@ async def _scan_entries(
         if quote is None:
             logger.debug("No quote for %s in batch snapshot, skipping", instrument)
             continue
+        if not _is_quote_fresh(quote, settings.data_ttl_seconds):
+            _audit_event(
+                loop_id,
+                "safety_check",
+                {
+                    "paused": False,
+                    "action": "skip_symbol",
+                    "reason": "stale quote",
+                    "quote_as_of": quote.as_of.isoformat(),
+                    "ttl_seconds": settings.data_ttl_seconds,
+                },
+                symbol=instrument,
+            )
+            logger.info("Skipping %s: stale snapshot quote", instrument)
+            continue
         current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
-        ask = float(quote.ask) if hasattr(quote, "ask") else current_price
 
         # Skip if price looks stale or zero
         if current_price <= 0:
@@ -268,18 +495,49 @@ async def _scan_entries(
                 verdict.reasoning,
             )
 
+            fresh_quote = get_quote(instrument)
+            if not _is_quote_fresh(fresh_quote, settings.data_ttl_seconds):
+                _audit_event(
+                    loop_id,
+                    "supervisor_decision",
+                    {
+                        "action": "abort",
+                        "reason": "fresh quote is stale",
+                        "quote_as_of": fresh_quote.as_of.isoformat(),
+                    },
+                    symbol=instrument,
+                )
+                logger.info("Supervisor aborted %s: fresh quote is stale", instrument)
+                continue
+
+            account_with_ask = {**account, "_ask": str(fresh_quote.ask or fresh_quote.mid)}
+            order = strategy.build_order(signal, account_with_ask, tier)
+            order_value = order.qty * (order.limit_price or order.stop_price or fresh_quote.ask or fresh_quote.mid)
+
             # Risk gate
-            order_value = min(equity * tier.max_position_pct, buying_power * 0.95)
             risk_verdict = check_risk(
                 daily_pnl=daily_pnl,
                 equity=equity,
-                open_position_count=len(open_positions),
+                open_position_count=actual_open_position_count,
                 buying_power=buying_power,
                 order_value=order_value,
                 daily_loss_limit=tier.daily_loss_limit,
                 max_concurrent=tier.max_concurrent,
+                total_existing_exposure=total_existing_exposure,
+                max_portfolio_exposure=settings.max_portfolio_exposure,
             )
             if not risk_verdict.passed:
+                _audit_event(
+                    loop_id,
+                    "supervisor_decision",
+                    {
+                        "action": "abort",
+                        "reason": risk_verdict.reason,
+                        "rule": risk_verdict.rule,
+                        "order_value": order_value,
+                    },
+                    symbol=instrument,
+                )
                 logger.info("Risk gate blocked %s: %s", instrument, risk_verdict.reason)
                 continue
 
@@ -288,22 +546,45 @@ async def _scan_entries(
                 logger.info("Skipping %s: order value $%.2f below $10 minimum", instrument, order_value)
                 continue
 
-            # Build and place order
-            account_with_ask = {**account, "_ask": str(ask)}
-            order = strategy.build_order(signal, account_with_ask, tier)
-            broker_result = place_order(order)
+            decision = _supervisor_review(
+                instrument,
+                order,
+                quote,
+                fresh_quote,
+                buying_power,
+                loop_id,
+            )
+            if decision.action != "execute":
+                logger.info("Supervisor aborted %s: %s", instrument, decision.reason)
+                continue
+
+            broker_result = place_order(order, loop_id)
             broker_order_id = getattr(broker_result, "id", None)
+            status = str(
+                broker_result.get("status") if isinstance(broker_result, dict) else getattr(broker_result, "status", "")
+            ).lower()
 
             # Use broker's filled_qty when available (accounts for
             # fees / fractional rounding), otherwise fall back to
             # the qty we requested.
             filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
-            filled_qty = float(str(filled_qty_raw)) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else order.qty
+            filled_qty = float(str(filled_qty_raw)) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else 0.0
+
+            if not _should_persist_position(status, filled_qty):
+                pending_symbols.add(instrument)
+                logger.info(
+                    "Order for %s status=%s filled_qty=%.4f — not persisting position until broker reports a fill",
+                    instrument,
+                    status or "unknown",
+                    filled_qty,
+                )
+                continue
 
             filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
-            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else (order.limit_price or ask)
+            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else (order.limit_price or fresh_quote.ask)
 
             # Track position locally
+            is_crypto = _is_crypto(instrument)
             position = Position(
                 symbol=instrument,
                 asset_class="crypto" if is_crypto else "equity",
@@ -324,6 +605,8 @@ async def _scan_entries(
             order_cost = filled_qty * filled_price
             buying_power = max(buying_power - order_cost, 0.0)
             account["buying_power"] = str(buying_power)
+            total_existing_exposure += order_cost
+            actual_open_position_count += 1
 
             logger.info(
                 "ENTRY %s: score=%d threshold=%d qty=%.4f (filled=%.4f) price=%.2f",
@@ -339,6 +622,189 @@ async def _scan_entries(
             logger.error("Broker error for %s: %s", instrument, exc)
         except Exception as exc:
             logger.error("Unexpected error scanning %s: %s", instrument, exc)
+
+
+async def _scan_option_entries(
+    regime: str,
+    account: dict[str, str],
+    open_option_positions: list[OptionsPosition],
+    broker_positions: list[dict[str, object]],
+    recent_orders: list[dict[str, object]],
+    trade_memory: TradeMemory,
+    loop_id: str = "options-entry",
+) -> None:
+    """Scan approved underlyings for options entries and place option orders."""
+    settings = get_settings()
+    if not settings.options_enabled:
+        return
+
+    equity = float(account.get("equity", "0"))
+    buying_power = float(account.get("buying_power", "0"))
+    tier = get_tier_params(equity)
+    today = _today()
+    starting = float(account.get("last_equity", equity))
+    daily_pnl = (equity - starting) / starting if starting > 0 else 0.0
+
+    open_underlyings = {position.underlying for position in open_option_positions}
+    pending_underlyings = _pending_option_underlyings(recent_orders, OPTIONS_STRATEGY.instruments)
+    actual_open_position_count = len(broker_positions)
+    total_existing_exposure = _broker_position_exposure(broker_positions)
+    existing_options_value = sum(position.entry_price * position.qty * 100 for position in open_option_positions)
+
+    eligible_underlyings = [
+        underlying
+        for underlying in OPTIONS_STRATEGY.instruments
+        if underlying not in open_underlyings
+        and underlying not in pending_underlyings
+        and OPTIONS_STRATEGY.eligible(underlying, regime)
+    ]
+    if not eligible_underlyings:
+        return
+
+    quotes_map = get_universe_snapshot(eligible_underlyings)
+    for underlying in eligible_underlyings:
+        quote = quotes_map.get(underlying)
+        if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
+            continue
+
+        try:
+            indicators = _fetch_indicators(underlying, is_crypto=False)
+            if indicators is None:
+                continue
+
+            signal = OPTIONS_STRATEGY.score(indicators, underlying, regime, quote.mid)
+            if not signal.fired:
+                continue
+
+            situation_desc = build_situation_description(
+                symbol=underlying,
+                regime=regime,
+                score=signal.score,
+                threshold=signal.threshold,
+                rsi_14=signal.rsi_14,
+                macd_hist=signal.macd_hist,
+                bb_pct=None,
+                volume_ratio=None,
+                current_price=quote.mid,
+                strategy_name=OPTIONS_STRATEGY.name,
+            )
+            recalled = trade_memory.recall(situation_desc)
+            verdict = await analyst_committee(
+                symbol=underlying,
+                strategy_name=OPTIONS_STRATEGY.name,
+                score=signal.score,
+                threshold=signal.threshold,
+                regime=regime,
+                current_price=quote.mid,
+                rsi_14=signal.rsi_14,
+                macd_hist=signal.macd_hist,
+                bb_pct=None,
+                volume_ratio=None,
+                memories=recalled,
+                loop_id=loop_id,
+            )
+            if not verdict.approve:
+                continue
+
+            contracts = get_option_chain(underlying, quote.mid, signal.option_type)
+            contract = OPTIONS_STRATEGY.select_contract(signal, contracts, quote.mid)
+            if contract is None:
+                continue
+
+            premium_total = (contract.ask or contract.mid or 0.0) * 100
+            is_valid, reason = validate_options_order(
+                premium_total=premium_total,
+                equity=equity,
+                existing_options_value=existing_options_value,
+            )
+            if not is_valid:
+                _audit_event(
+                    loop_id,
+                    "supervisor_decision",
+                    {"action": "abort", "reason": reason, "contract_symbol": contract.contract_symbol},
+                    symbol=underlying,
+                )
+                continue
+
+            order = OPTIONS_STRATEGY.build_order(signal, contract, account, tier)
+            order_value = order.qty * order.limit_price * 100
+            risk_verdict = check_risk(
+                daily_pnl=daily_pnl,
+                equity=equity,
+                open_position_count=actual_open_position_count,
+                buying_power=buying_power,
+                order_value=order_value,
+                daily_loss_limit=tier.daily_loss_limit,
+                max_concurrent=tier.max_concurrent,
+                total_existing_exposure=total_existing_exposure,
+                max_portfolio_exposure=settings.max_portfolio_exposure,
+            )
+            if not risk_verdict.passed:
+                continue
+
+            fresh_option_quote = get_option_quotes([contract.contract_symbol]).get(contract.contract_symbol)
+            if fresh_option_quote is None:
+                continue
+            snapshot_option_quote = PriceReference(
+                symbol=contract.contract_symbol,
+                bid=contract.bid or 0.0,
+                ask=contract.ask or 0.0,
+                mid=contract.mid or max(contract.bid or 0.0, contract.ask or 0.0),
+                as_of=fresh_option_quote.as_of,
+            )
+            decision = _supervisor_review_option(
+                underlying,
+                contract.contract_symbol,
+                order,
+                snapshot_option_quote,
+                fresh_option_quote,
+                buying_power,
+                loop_id,
+            )
+            if decision.action != "execute":
+                continue
+
+            broker_result = place_option_order(order, loop_id)
+            status = str(
+                broker_result.get("status") if isinstance(broker_result, dict) else getattr(broker_result, "status", "")
+            ).lower()
+            filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
+            filled_qty = int(float(str(filled_qty_raw))) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else 0
+            if not _should_persist_position(status, float(filled_qty)):
+                pending_underlyings.add(underlying)
+                continue
+
+            filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
+            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else order.limit_price
+            broker_order_id = broker_result.get("id") if isinstance(broker_result, dict) else getattr(broker_result, "id", None)
+            option_position = OptionsPosition(
+                position_id=str(uuid.uuid4()),
+                underlying=underlying,
+                contract_symbol=contract.contract_symbol,
+                option_type=signal.option_type,
+                qty=filled_qty,
+                entry_price=filled_price,
+                entry_time=datetime.now(UTC),
+                expiration=contract.expiration,
+                high_water_price=filled_price,
+                stop_loss_price=order.stop_loss_price,
+                take_profit_price=order.take_profit_price,
+                dte_at_entry=contract.dte,
+                strategy_name=OPTIONS_STRATEGY.name,
+                broker_order_id=str(broker_order_id) if broker_order_id else None,
+            )
+            save_option_position(option_position)
+            open_option_positions.append(option_position)
+            upsert_daily_stats(today, orders_placed=1)
+            cost = filled_qty * filled_price * 100
+            existing_options_value += cost
+            buying_power = max(buying_power - cost, 0.0)
+            total_existing_exposure += cost
+            actual_open_position_count += 1
+        except BrokerError as exc:
+            logger.error("Options broker error for %s: %s", underlying, exc)
+        except Exception as exc:
+            logger.error("Unexpected error scanning options for %s: %s", underlying, exc)
 
 
 # ── Exit Scan ─────────────────────────────────────────────────────────────────
@@ -358,7 +824,7 @@ async def _scan_exits(
     # Fetch broker positions once to get actual qty (may differ from DB due to fees)
     broker_qty_map: dict[str, float] = {}
     try:
-        broker_positions = get_positions()
+        broker_positions = get_positions(loop_id)
         for bp in broker_positions:
             sym = str(bp.get("symbol", ""))
             qty_val = bp.get("qty") or bp.get("qty_available") or 0
@@ -494,6 +960,72 @@ async def _scan_exits(
             logger.error("Unexpected error on exit scan for %s: %s", position.symbol, exc)
 
 
+async def _scan_option_exits(
+    open_option_positions: list[OptionsPosition],
+    loop_id: str = "options-exit",
+) -> None:
+    """Check open options positions for exit conditions and place exit orders."""
+    if not open_option_positions:
+        return
+
+    settings = get_settings()
+    today = _today()
+    broker_option_qty_map: dict[str, int] = {}
+    try:
+        for broker_position in get_option_positions(loop_id):
+            symbol = str(broker_position.get("symbol", ""))
+            qty_val = broker_position.get("qty") or broker_position.get("qty_available") or 0
+            broker_option_qty_map[symbol] = int(float(str(qty_val)))
+    except Exception as exc:
+        logger.warning("Could not fetch broker option positions for exit scan: %s", exc)
+
+    quotes_map = get_option_quotes([position.contract_symbol for position in open_option_positions])
+    for position in open_option_positions:
+        try:
+            quote = quotes_map.get(position.contract_symbol)
+            if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
+                continue
+
+            current_bid = quote.bid if quote.bid > 0 else quote.mid
+            if current_bid <= 0:
+                continue
+            current_dte = max((position.expiration - datetime.now(UTC).date()).days, 0)
+            indicators = _fetch_indicators(position.underlying, is_crypto=False)
+
+            if current_bid > position.high_water_price:
+                position = position.model_copy(update={"high_water_price": current_bid})
+                update_option_position(position)
+
+            exit_signal = check_options_position(position, current_bid, current_dte, indicators)
+            if exit_signal is None:
+                continue
+
+            sell_qty = broker_option_qty_map.get(position.contract_symbol, position.qty)
+            if sell_qty <= 0:
+                continue
+
+            exit_order = OPTIONS_STRATEGY.build_exit_order(position.model_copy(update={"qty": sell_qty}), current_bid, exit_signal.reason)
+            broker_result = place_option_order(exit_order, loop_id)
+            status = str(
+                broker_result.get("status") if isinstance(broker_result, dict) else getattr(broker_result, "status", "")
+            ).lower()
+            filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
+            filled_qty = int(float(str(filled_qty_raw))) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else 0
+            if not _should_persist_position(status, float(filled_qty)):
+                continue
+
+            filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
+            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else exit_order.limit_price
+            settled_position = position.model_copy(update={"qty": filled_qty})
+            log_option_trade(settled_position, filled_price, exit_signal.reason)
+            close_option_position(position.position_id)
+            upsert_daily_stats(today, trades_closed=1)
+        except BrokerError as exc:
+            logger.error("Broker error exiting option %s: %s", position.contract_symbol, exc)
+        except Exception as exc:
+            logger.error("Unexpected error on options exit scan for %s: %s", position.contract_symbol, exc)
+
+
 def _find_strategy(name: str) -> Strategy | None:
     """Find a registered strategy by name."""
     for s in STRATEGIES:
@@ -507,9 +1039,23 @@ def _find_strategy(name: str) -> Strategy | None:
 
 async def run_cycle() -> None:
     """Run a single trading cycle. Called by cron — no internal loop."""
+    settings = get_settings()
     cycle_id = str(uuid.uuid4())[:8]
     today = _today()
     regime = "neutral"
+    loop_status = "ok"
+    loop_error: str | None = None
+
+    _audit_event(
+        cycle_id,
+        "loop_start",
+        {
+            "paper": settings.alpaca_paper,
+            "prompt_version": settings.prompt_version,
+            "strategy_count": len(STRATEGIES),
+            "options_enabled": settings.options_enabled,
+        },
+    )
 
     try:
         # Morning brief: check DB cache first (avoids duplicate LLM calls
@@ -531,16 +1077,73 @@ async def run_cycle() -> None:
             logger.info("Morning brief: regime=%s", regime)
 
         # Account state
-        account = get_account()
+        account = get_account(cycle_id)
         equity = float(account.get("equity", "0"))
         upsert_daily_stats(today, loop_runs=1, ending_equity=equity)
 
         if equity <= 0:
             logger.error("Account equity is $0 — skipping cycle")
+            loop_status = "halted"
             return
+
+        starting = float(account.get("last_equity", equity))
+        daily_pnl = (equity - starting) / starting if starting > 0 else 0.0
+        tier = get_tier_params(equity)
+        daily_loss_limit = min(settings.max_daily_loss_pct, tier.daily_loss_limit)
+
+        if settings.trading_pause:
+            _audit_event(
+                cycle_id,
+                "safety_check",
+                {
+                    "paused": True,
+                    "action": "halt",
+                    "reason": "TRADING_PAUSE enabled",
+                },
+            )
+            logger.warning("Cycle %s halted: TRADING_PAUSE enabled", cycle_id)
+            loop_status = "halted"
+            return
+
+        if daily_pnl <= -daily_loss_limit:
+            _audit_event(
+                cycle_id,
+                "safety_check",
+                {
+                    "paused": True,
+                    "action": "halt",
+                    "reason": "daily loss limit breached",
+                    "daily_pnl": daily_pnl,
+                    "daily_loss_limit": daily_loss_limit,
+                },
+            )
+            logger.warning(
+                "Cycle %s halted: daily loss %.2f%% exceeds limit %.2f%%",
+                cycle_id,
+                daily_pnl * 100,
+                daily_loss_limit * 100,
+            )
+            loop_status = "halted"
+            return
+
+        _audit_event(
+            cycle_id,
+            "safety_check",
+            {
+                "paused": False,
+                "action": "continue",
+                "reason": "preflight checks passed",
+                "daily_pnl": daily_pnl,
+                "daily_loss_limit": daily_loss_limit,
+            },
+        )
+
+        broker_positions = get_positions(cycle_id)
+        recent_orders = get_recent_orders(cycle_id)
 
         # Load positions
         open_positions = load_open_positions()
+        open_option_positions = load_open_option_positions()
 
         # Load trade memory (BM25 index for past reflections)
         memory_entries = load_all_memories()
@@ -548,22 +1151,38 @@ async def run_cycle() -> None:
         logger.info("Trade memory loaded: %d entries", trade_memory.size)
 
         # Entry scan (async — includes analyst committee)
-        await _scan_entries(regime, account, open_positions, trade_memory, cycle_id)
+        await _scan_entries(regime, account, open_positions, broker_positions, recent_orders, trade_memory, cycle_id)
+        await _scan_option_entries(regime, account, open_option_positions, broker_positions, recent_orders, trade_memory, cycle_id)
 
         # Exit scan (async — includes post-trade reflection)
         if open_positions:
             await _scan_exits(open_positions, equity, regime, trade_memory, cycle_id)
+        if open_option_positions:
+            await _scan_option_exits(open_option_positions, cycle_id)
 
         logger.info(
-            "Cycle %s complete — equity=$%.2f, positions=%d, regime=%s",
+            "Cycle %s complete — equity=$%.2f, positions=%d, options=%d, regime=%s",
             cycle_id,
             equity,
             len(open_positions),
+            len(open_option_positions),
             regime,
         )
 
     except Exception as exc:
+        loop_status = "failed"
+        loop_error = str(exc)
         logger.error("Cycle %s failed: %s", cycle_id, exc, exc_info=True)
+    finally:
+        _audit_event(
+            cycle_id,
+            "loop_end",
+            {
+                "status": loop_status,
+                "regime": regime,
+                "error": loop_error,
+            },
+        )
 
 
 def main() -> None:

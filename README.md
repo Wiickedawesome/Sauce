@@ -126,6 +126,7 @@ All configuration lives in `.env`. No value is hardcoded in source code.
 | `MAX_PORTFOLIO_EXPOSURE` | `1.0` | Max total exposure (1.0 = no leverage) |
 | `MAX_DAILY_LOSS_PCT` | `0.03` | Auto-pause threshold (3% daily drawdown) |
 | `TRADING_PAUSE` | `false` | Set `true` to halt all trading immediately |
+| `OPTIONS_ENABLED` | `false` | Enable the options entry/exit pipeline explicitly |
 
 See `sauce/core/config.py` for the complete list of configuration options.
 
@@ -190,14 +191,16 @@ Every loop run passes through a layered set of guards before any order can reach
 ```
 1. TRADING_PAUSE flag          -- hard stop, checked first, no exceptions
 2. Market hours check          -- equities: 09:30-16:00 ET weekdays only
-3. Daily loss limit            -- auto-pause when drawdown exceeds threshold
-4. Data freshness check        -- stale data blocks the signal, not just the order
-5. Confidence floor            -- sub-threshold signals become hold before risk
-6. Risk agent veto             -- position limits, exposure, volatility
-7. Price deviation check       -- execution aborts if quote moved since signal
-8. Supervisor veto             -- Claude reviews all orders before broker call
+3. Daily loss limit            -- cycle halts when drawdown exceeds threshold
+4. Data freshness check        -- stale quotes block the symbol before execution
+5. Confidence floor            -- analyst approvals below configured confidence are rejected
+6. Risk gate                   -- daily loss, position count, buying power, exposure
+7. Price deviation check       -- execution aborts if the live quote drifted since signal
+8. Supervisor preflight        -- final veto before broker.place_order()
 ```
+No order reaches `broker.place_order()` without passing all eight layers. Loop boundaries, safety checks, broker actions, and supervisor decisions are written to append-only SQLite audit events.
 
+Options trading is integrated into `sauce.loop`, including contract selection, order submission, local position persistence, and exit scanning. It still defaults to `false` so options remain an explicit opt-in.
 No order reaches `broker.place_order()` without passing all eight layers. Every layer writes an `AuditEvent` to SQLite before and after. The audit table is append-only — no `UPDATE` or `DELETE` is ever issued.
 
 ---

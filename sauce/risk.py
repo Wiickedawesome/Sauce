@@ -36,6 +36,8 @@ def check_risk(
     order_value: float,
     daily_loss_limit: float,
     max_concurrent: int,
+    total_existing_exposure: float = 0.0,
+    max_portfolio_exposure: float = 0.80,
 ) -> RiskVerdict:
     """Run the five risk rules. Returns immediately on first failure.
 
@@ -56,6 +58,10 @@ def check_risk(
         Maximum allowed daily loss as a fraction (from TierParams). Example: 0.08.
     max_concurrent : int
         Maximum allowed open positions (from TierParams).
+    total_existing_exposure : float
+        Sum of actual market values for existing open positions.
+    max_portfolio_exposure : float
+        Maximum fraction of equity that may be committed after the new order.
     """
     # Rule 1: Daily P&L gate
     if daily_pnl <= -daily_loss_limit:
@@ -89,15 +95,17 @@ def check_risk(
             reason=f"Order value ${order_value:.2f} below $1.00 minimum",
         )
 
-    # Rule 5: Max portfolio exposure (don't commit >80% of equity across all positions)
-    # Approximate: each existing position is ~(equity * max_position_pct), plus this one
+    # Rule 5: Max portfolio exposure using actual position market values.
     if equity > 0:
-        exposure_after = (order_value + (open_position_count * order_value)) / equity
-        if exposure_after > 0.80:
+        exposure_after = (total_existing_exposure + order_value) / equity
+        if exposure_after > max_portfolio_exposure:
             return RiskVerdict(
                 passed=False,
                 rule="max_exposure",
-                reason=f"Total exposure {exposure_after:.0%} would exceed 80% of equity",
+                reason=(
+                    f"Total exposure {exposure_after:.0%} would exceed "
+                    f"{max_portfolio_exposure:.0%} of equity"
+                ),
             )
 
     return RiskVerdict(passed=True, rule="all", reason="")

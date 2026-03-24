@@ -97,8 +97,9 @@ class Settings(BaseSettings):
 
     # ── Options Parameters ────────────────────────────────────────────────────
     options_enabled: bool = Field(
-        default=True,
-        description="Enable options trading. Default True for aggressive strategy.",
+        default=False,
+        description="Enable the options entry and exit pipeline. Defaults to False so "
+        "options trading is an explicit opt-in.",
     )
     options_dte_min: int = Field(
         default=7,
