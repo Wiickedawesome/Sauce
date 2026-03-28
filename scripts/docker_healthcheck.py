@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Docker HEALTHCHECK script — verifies cron + recent loop completion."""
+"""Docker HEALTHCHECK script — verifies cron + recent successful loop completion."""
+
+import json
 
 import os
 import sqlite3
@@ -19,11 +21,12 @@ def main() -> int:
         print("UNHEALTHY: cron process not found")
         return 1
 
-    # 2. Check last loop_end timestamp in audit DB
+    # 2. Check last loop_end timestamp and status in audit DB
     try:
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute(
-            "SELECT MAX(timestamp) FROM audit_events WHERE event_type = 'loop_end'"
+            "SELECT timestamp, payload FROM audit_events WHERE event_type = 'loop_end' "
+            "ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
     except Exception:
         # DB doesn't exist yet (first boot) — cron is running, that's enough
@@ -33,6 +36,14 @@ def main() -> int:
     if ts is None:
         # No loop has run yet — cron is running, acceptable during startup
         return 0
+
+    payload: dict[str, object] = {}
+    if row and row[1]:
+        try:
+            payload = json.loads(row[1])
+        except json.JSONDecodeError:
+            print(f"UNHEALTHY: cannot parse loop_end payload: {row[1]}")
+            return 1
 
     try:
         if "+" in ts or "Z" in ts:
@@ -48,6 +59,11 @@ def main() -> int:
 
     if age_minutes > MAX_AGE_MINUTES:
         print(f"UNHEALTHY: last loop_end was {age_minutes:.0f} min ago (limit: {MAX_AGE_MINUTES})")
+        return 1
+
+    status = str(payload.get("status", "unknown"))
+    if status == "failed":
+        print(f"UNHEALTHY: last loop_end status was failed with error={payload.get('error')!r}")
         return 1
 
     # 3. Check for orphaned loop_start (started but never finished — crash indicator)

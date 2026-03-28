@@ -249,13 +249,14 @@ def save_position(position: Position, db_path: str | None = None) -> None:
 
 
 def update_position(position: Position, db_path: str | None = None) -> None:
-    """Update trailing-stop state for an open position."""
+    """Update mutable state for an open position."""
     session = get_session(db_path)
     try:
         row = session.query(PositionRow).filter_by(position_id=position.id, status="open").first()
         if row is None:
             logger.warning("Position %s not found for update", position.id)
             return
+        row.qty = position.qty
         row.high_water_price = position.high_water_price
         row.trailing_stop_price = position.trailing_stop_price
         row.trailing_active = position.trailing_active
@@ -348,6 +349,7 @@ def update_option_position(position: OptionsPosition, db_path: str | None = None
         if row is None:
             logger.warning("Options position %s not found for update", position.position_id)
             return
+        row.qty = position.qty
         row.high_water_price = position.high_water_price
         row.stop_loss_price = position.stop_loss_price
         row.take_profit_price = position.take_profit_price

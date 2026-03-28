@@ -6,7 +6,7 @@
 #
 # Contract:
 #   - Logs a timestamped START and END line on every run.
-#   - A non-zero exit from the Python process is logged but does NOT crash cron.
+#   - A non-zero exit from the Python process is logged and preserved for cron/health checks.
 #   - Activates the virtual environment before running Python.
 #   - All stdout/stderr from Python is captured by the cron redirect (>> cron.log).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -62,10 +62,8 @@ elif [[ -f "${APP_DIR}/.env" ]]; then
 fi
 
 # ── Run the loop ──────────────────────────────────────────────────────────────
-# `|| true` ensures this script exits 0 even if the loop errors out.
-# The Python process logs its own errors to the audit DB before exiting.
-# Cron should never see a failure exit code here — that would trigger alert
-# noise without adding information (errors are in the DB, not cron's job).
+# Preserve the Python exit code so cron, Docker health checks, and heartbeat
+# monitors can distinguish a healthy cycle from a failed one.
 exit_code=0
 python -m sauce.loop || exit_code=$?
 
@@ -81,8 +79,9 @@ echo "----------------------------------------"
 # monitor after every loop run. Use a 35-minute interval on the monitor side
 # so one missed cron cycle doesn't immediately fire an alert.
 # shellcheck source=/dev/null
-[[ -f "${APP_DIR}/.env" ]] && source "${APP_DIR}/.env" || true
-[[ -n "${HEARTBEAT_URL:-}" ]] && curl -fsS --retry 3 "${HEARTBEAT_URL}" > /dev/null 2>&1 || true
+if [[ "${exit_code}" -eq 0 ]]; then
+    [[ -f "${APP_DIR}/.env" ]] && source "${APP_DIR}/.env" || true
+    [[ -n "${HEARTBEAT_URL:-}" ]] && curl -fsS --retry 3 "${HEARTBEAT_URL}" > /dev/null 2>&1 || true
+fi
 
-# Always exit 0 so cron does not treat a loop error as a cron failure.
-exit 0
+exit "${exit_code}"

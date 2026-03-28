@@ -655,6 +655,25 @@ class TestDatabase:
         assert loaded[0].high_water_price == 160.0
         assert loaded[0].trailing_stop_price == pytest.approx(156.8)
 
+    def test_update_position_persists_qty(self):
+        from sauce.db import load_open_positions, save_position, update_position
+
+        pos = Position(
+            id="pos-qty",
+            symbol="BTC/USD",
+            qty=1.0,
+            entry_price=50000.0,
+            strategy_name="test",
+        )
+        save_position(pos)
+
+        pos.qty = 0.4
+        update_position(pos)
+
+        loaded = load_open_positions()
+        assert len(loaded) == 1
+        assert loaded[0].qty == pytest.approx(0.4)
+
     def test_log_signal(self):
         from sauce.adapters.db import get_session
         from sauce.db import SignalLogRow, log_signal
@@ -771,6 +790,30 @@ class TestDatabase:
         loaded = load_open_option_positions()
         assert len(loaded) == 1
         assert loaded[0].contract_symbol == "SPY250321C00550000"
+
+    def test_update_option_position_persists_qty(self):
+        from sauce.db import load_open_option_positions, save_option_position, update_option_position
+
+        pos = OptionsPosition(
+            position_id="opt-pos-qty",
+            underlying="SPY",
+            contract_symbol="SPY250321C00550000",
+            option_type="call",
+            qty=2,
+            entry_price=5.0,
+            entry_time=datetime.now(UTC),
+            expiration=datetime(2026, 3, 27, tzinfo=UTC).date(),
+            high_water_price=5.0,
+            dte_at_entry=10,
+        )
+        save_option_position(pos)
+
+        pos.qty = 1
+        update_option_position(pos)
+
+        loaded = load_open_option_positions()
+        assert len(loaded) == 1
+        assert loaded[0].qty == 1
 
 
 class TestOptionsPipeline:

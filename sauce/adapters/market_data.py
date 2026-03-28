@@ -251,6 +251,11 @@ def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
         except Exception as exc:
             logger.error("Crypto snapshot failed for %s: %s", crypto_symbols, exc)
 
+    if symbols and not result:
+        raise MarketDataError(
+            f"get_universe_snapshot({symbols}) returned no quotes for {len(symbols)} requested symbols"
+        )
+
     return result
 
 

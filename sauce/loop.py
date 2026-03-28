@@ -157,6 +157,92 @@ def _should_persist_position(status: str, filled_qty: float) -> bool:
     return status in _FILLED_ORDER_STATUSES and filled_qty > 0
 
 
+def _symbol_aliases(symbol: str) -> tuple[str, ...]:
+    upper_symbol = symbol.strip().upper()
+    normalized_symbol = upper_symbol.replace("/", "")
+    if normalized_symbol == upper_symbol:
+        return (upper_symbol,)
+    return (upper_symbol, normalized_symbol)
+
+
+def _broker_result_field(result: dict[str, object] | object, field_name: str) -> object | None:
+    if isinstance(result, dict):
+        return result.get(field_name)
+    return getattr(result, field_name, None)
+
+
+def _parse_positive_float(value: object | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_fill_details(result: dict[str, object] | object) -> tuple[str, float, float | None]:
+    status = str(_broker_result_field(result, "status") or "").lower()
+    filled_qty = _parse_positive_float(_broker_result_field(result, "filled_qty")) or 0.0
+    filled_price = _parse_positive_float(_broker_result_field(result, "filled_avg_price"))
+    return status, filled_qty, filled_price
+
+
+def _find_broker_position(symbol: str, broker_positions: list[dict[str, object]]) -> dict[str, object] | None:
+    wanted_aliases = set(_symbol_aliases(symbol))
+    for broker_position in broker_positions:
+        broker_symbol = str(broker_position.get("symbol", ""))
+        if wanted_aliases.intersection(_symbol_aliases(broker_symbol)):
+            return broker_position
+    return None
+
+
+def _reconcile_entry_fill(
+    symbol: str,
+    loop_id: str,
+    initial_qty: float,
+    initial_price: float | None,
+) -> tuple[float, float | None]:
+    try:
+        broker_position = _find_broker_position(symbol, get_positions(loop_id))
+    except BrokerError as exc:
+        logger.warning("Could not reconcile broker fill for %s: %s", symbol, exc)
+        return initial_qty, initial_price
+
+    if broker_position is None:
+        return initial_qty, initial_price
+
+    broker_qty = _parse_positive_float(
+        broker_position.get("qty") or broker_position.get("qty_available")
+    )
+    broker_price = _parse_positive_float(broker_position.get("avg_entry_price"))
+    return broker_qty or initial_qty, broker_price or initial_price
+
+
+def _audit_missing_quotes(loop_id: str, stage: str, requested_symbols: list[str], quotes_map: dict[str, PriceReference]) -> None:
+    missing_symbols = sorted(set(requested_symbols) - set(quotes_map))
+    if not missing_symbols:
+        return
+
+    logger.warning(
+        "Batch snapshot missing %d/%d symbols during %s: %s",
+        len(missing_symbols),
+        len(requested_symbols),
+        stage,
+        ", ".join(missing_symbols),
+    )
+    _audit_event(
+        loop_id,
+        "error",
+        {
+            "stage": stage,
+            "error": "batch snapshot missing symbols",
+            "requested_symbols": requested_symbols,
+            "missing_symbols": missing_symbols,
+        },
+    )
+
+
 def _pending_option_underlyings(recent_orders: list[dict[str, object]], underlyings: list[str]) -> set[str]:
     pending: set[str] = set()
     ordered_underlyings = sorted({underlying.upper() for underlying in underlyings}, key=len, reverse=True)
@@ -409,12 +495,13 @@ async def _scan_entries(
     # ── Batch-fetch quotes (1–2 API calls instead of N) ──
     all_symbols = list({inst for _, inst in eligible_instruments})
     quotes_map = get_universe_snapshot(all_symbols)
+    _audit_missing_quotes(loop_id, "entry_batch_quotes", all_symbols, quotes_map)
     logger.info("Batch quotes fetched for %d symbols (%d returned)", len(all_symbols), len(quotes_map))
 
     for strategy, instrument in eligible_instruments:
         quote = quotes_map.get(instrument)
         if quote is None:
-            logger.debug("No quote for %s in batch snapshot, skipping", instrument)
+            logger.warning("No quote for %s in batch snapshot, skipping", instrument)
             continue
         if not _is_quote_fresh(quote, settings.data_ttl_seconds):
             _audit_event(
@@ -559,16 +646,8 @@ async def _scan_entries(
                 continue
 
             broker_result = place_order(order, loop_id)
-            broker_order_id = getattr(broker_result, "id", None)
-            status = str(
-                broker_result.get("status") if isinstance(broker_result, dict) else getattr(broker_result, "status", "")
-            ).lower()
-
-            # Use broker's filled_qty when available (accounts for
-            # fees / fractional rounding), otherwise fall back to
-            # the qty we requested.
-            filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
-            filled_qty = float(str(filled_qty_raw)) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else 0.0
+            broker_order_id = _broker_result_field(broker_result, "id")
+            status, filled_qty, filled_price = _extract_fill_details(broker_result)
 
             if not _should_persist_position(status, filled_qty):
                 pending_symbols.add(instrument)
@@ -580,8 +659,30 @@ async def _scan_entries(
                 )
                 continue
 
-            filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
-            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else (order.limit_price or fresh_quote.ask)
+            fallback_entry_price = order.limit_price or fresh_quote.ask or fresh_quote.mid
+            filled_qty, filled_price = _reconcile_entry_fill(
+                instrument,
+                loop_id,
+                filled_qty,
+                filled_price,
+            )
+            if filled_price is None:
+                filled_price = fallback_entry_price
+                logger.warning(
+                    "Filled order for %s missing avg price; using fallback entry price %.4f",
+                    instrument,
+                    filled_price,
+                )
+                _audit_event(
+                    loop_id,
+                    "error",
+                    {
+                        "stage": "entry_fill_reconciliation",
+                        "error": "filled order missing avg entry price",
+                        "fallback_entry_price": filled_price,
+                    },
+                    symbol=instrument,
+                )
 
             # Track position locally
             is_crypto = _is_crypto(instrument)
@@ -662,9 +763,12 @@ async def _scan_option_entries(
         return
 
     quotes_map = get_universe_snapshot(eligible_underlyings)
+    _audit_missing_quotes(loop_id, "options_entry_batch_quotes", eligible_underlyings, quotes_map)
     for underlying in eligible_underlyings:
         quote = quotes_map.get(underlying)
         if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
+            if quote is None:
+                logger.warning("No quote for %s in options batch snapshot, skipping", underlying)
             continue
 
         try:
@@ -711,7 +815,8 @@ async def _scan_option_entries(
             if contract is None:
                 continue
 
-            premium_total = (contract.ask or contract.mid or 0.0) * 100
+            order = OPTIONS_STRATEGY.build_order(signal, contract, account, tier)
+            premium_total = order.qty * (contract.ask or order.limit_price or contract.mid or 0.0) * 100
             is_valid, reason = validate_options_order(
                 premium_total=premium_total,
                 equity=equity,
@@ -726,7 +831,6 @@ async def _scan_option_entries(
                 )
                 continue
 
-            order = OPTIONS_STRATEGY.build_order(signal, contract, account, tier)
             order_value = order.qty * order.limit_price * 100
             risk_verdict = check_risk(
                 daily_pnl=daily_pnl,
@@ -828,18 +932,22 @@ async def _scan_exits(
         for bp in broker_positions:
             sym = str(bp.get("symbol", ""))
             qty_val = bp.get("qty") or bp.get("qty_available") or 0
-            broker_qty_map[sym] = float(str(qty_val))
+            parsed_qty = float(str(qty_val))
+            for alias in _symbol_aliases(sym):
+                broker_qty_map[alias] = parsed_qty
     except BrokerError as exc:
         logger.warning("Could not fetch broker positions for exit scan: %s", exc)
 
     # Batch-fetch quotes for all open positions (1–2 API calls instead of N)
     exit_symbols = [p.symbol for p in open_positions]
     exit_quotes_map = get_universe_snapshot(exit_symbols) if exit_symbols else {}
+    _audit_missing_quotes(loop_id, "exit_batch_quotes", exit_symbols, exit_quotes_map)
 
     for position in open_positions:
         try:
             quote = exit_quotes_map.get(position.symbol)
             if quote is None:
+                logger.warning("No exit quote for %s, skipping this cycle", position.symbol)
                 continue
             current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
 
@@ -855,6 +963,11 @@ async def _scan_exits(
                 continue
             plan = strategy.build_exit_plan(position, tier)
 
+            previous_trailing_state = (
+                position.trailing_active,
+                position.high_water_price,
+                position.trailing_stop_price,
+            )
             exit_signal, updated_pos = evaluate_exit(
                 position,
                 plan,
@@ -866,9 +979,10 @@ async def _scan_exits(
 
             # Always persist trailing state updates
             if (
-                updated_pos.trailing_active != position.trailing_active
-                or updated_pos.high_water_price != position.high_water_price
-            ):
+                updated_pos.trailing_active,
+                updated_pos.high_water_price,
+                updated_pos.trailing_stop_price,
+            ) != previous_trailing_state:
                 update_position(updated_pos)
 
             if exit_signal is None:
@@ -876,8 +990,7 @@ async def _scan_exits(
 
             # Use broker's actual qty (accounts for fees/rounding),
             # fall back to DB qty if broker lookup unavailable.
-            broker_symbol = position.symbol.replace("/", "")
-            sell_qty = broker_qty_map.get(broker_symbol, position.qty)
+            sell_qty = broker_qty_map.get(position.symbol.upper(), position.qty)
             if sell_qty <= 0:
                 logger.warning(
                     "Broker reports 0 qty for %s, skipping sell", position.symbol
@@ -903,22 +1016,68 @@ async def _scan_exits(
                 prompt_version="v2",
                 source="execution",
             )
-            place_order(sell_order)
-            log_trade(position, current_price, exit_signal.trigger)
+            broker_result = place_order(sell_order, loop_id)
+            status, executed_qty, executed_price = _extract_fill_details(broker_result)
+            if not _should_persist_position(status, executed_qty):
+                logger.info(
+                    "Exit order for %s status=%s filled_qty=%.4f — keeping position open",
+                    position.symbol,
+                    status or "unknown",
+                    executed_qty,
+                )
+                continue
+
+            executed_qty = min(executed_qty, position.qty)
+            if executed_qty <= 0:
+                logger.warning("Exit order for %s reported no executable quantity", position.symbol)
+                continue
+
+            exit_price = executed_price or current_price
+            exited_position = Position(
+                id=position.id,
+                symbol=position.symbol,
+                asset_class=position.asset_class,
+                qty=executed_qty,
+                entry_price=position.entry_price,
+                high_water_price=position.high_water_price,
+                trailing_stop_price=position.trailing_stop_price,
+                trailing_active=position.trailing_active,
+                entry_time=position.entry_time,
+                broker_order_id=position.broker_order_id,
+                strategy_name=position.strategy_name,
+                stop_loss_price=position.stop_loss_price,
+                profit_target_price=position.profit_target_price,
+            )
+            log_trade(exited_position, exit_price, exit_signal.trigger)
+
+            remaining_qty = max(position.qty - executed_qty, 0.0)
+            if remaining_qty > 0:
+                position.qty = remaining_qty
+                update_position(position)
+                logger.info(
+                    "PARTIAL EXIT %s: filled=%.4f remaining=%.4f price=%.4f reason=%s",
+                    position.symbol,
+                    executed_qty,
+                    remaining_qty,
+                    exit_price,
+                    exit_signal.reason,
+                )
+                continue
+
             close_position(position.id)
             upsert_daily_stats(today, trades_closed=1)
             logger.info(
                 "EXIT %s: trigger=%s price=%.4f reason=%s",
                 position.symbol,
                 exit_signal.trigger,
-                current_price,
+                exit_price,
                 exit_signal.reason,
             )
 
             # ── Post-trade reflection (1 LLM call) ──
             try:
                 hold_hrs = (datetime.now(UTC) - position.entry_time).total_seconds() / 3600
-                realized_pnl = (current_price - position.entry_price) * position.qty
+                realized_pnl = (exit_price - position.entry_price) * executed_qty
                 sit = build_situation_description(
                     symbol=position.symbol,
                     regime=regime,
@@ -928,13 +1087,13 @@ async def _scan_exits(
                     macd_hist=None,
                     bb_pct=None,
                     volume_ratio=None,
-                    current_price=current_price,
+                    current_price=exit_price,
                     strategy_name=position.strategy_name,
                 )
                 out = build_outcome_description(
                     symbol=position.symbol,
                     entry_price=position.entry_price,
-                    exit_price=current_price,
+                    exit_price=exit_price,
                     exit_trigger=exit_signal.trigger,
                     hold_hours=hold_hrs,
                     realized_pnl=realized_pnl,
@@ -980,10 +1139,18 @@ async def _scan_option_exits(
         logger.warning("Could not fetch broker option positions for exit scan: %s", exc)
 
     quotes_map = get_option_quotes([position.contract_symbol for position in open_option_positions])
+    _audit_missing_quotes(
+        loop_id,
+        "options_exit_batch_quotes",
+        [position.contract_symbol for position in open_option_positions],
+        quotes_map,
+    )
     for position in open_option_positions:
         try:
             quote = quotes_map.get(position.contract_symbol)
             if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
+                if quote is None:
+                    logger.warning("No option quote for %s, skipping this cycle", position.contract_symbol)
                 continue
 
             current_bid = quote.bid if quote.bid > 0 else quote.mid
@@ -1006,20 +1173,37 @@ async def _scan_option_exits(
 
             exit_order = OPTIONS_STRATEGY.build_exit_order(position.model_copy(update={"qty": sell_qty}), current_bid, exit_signal.reason)
             broker_result = place_option_order(exit_order, loop_id)
-            status = str(
-                broker_result.get("status") if isinstance(broker_result, dict) else getattr(broker_result, "status", "")
-            ).lower()
-            filled_qty_raw = broker_result.get("filled_qty") if isinstance(broker_result, dict) else getattr(broker_result, "filled_qty", None)
-            filled_qty = int(float(str(filled_qty_raw))) if filled_qty_raw and float(str(filled_qty_raw)) > 0 else 0
-            if not _should_persist_position(status, float(filled_qty)):
+            status, filled_qty, filled_price = _extract_fill_details(broker_result)
+            executed_qty = int(min(float(sell_qty), filled_qty, float(position.qty)))
+            if not _should_persist_position(status, float(executed_qty)):
                 continue
 
-            filled_price_raw = broker_result.get("filled_avg_price") if isinstance(broker_result, dict) else getattr(broker_result, "filled_avg_price", None)
-            filled_price = float(str(filled_price_raw)) if filled_price_raw and float(str(filled_price_raw)) > 0 else exit_order.limit_price
-            settled_position = position.model_copy(update={"qty": filled_qty})
-            log_option_trade(settled_position, filled_price, exit_signal.reason)
+            exit_price = filled_price or exit_order.limit_price
+            settled_position = position.model_copy(update={"qty": executed_qty})
+            log_option_trade(settled_position, exit_price, exit_signal.reason)
+
+            remaining_qty = position.qty - executed_qty
+            if remaining_qty > 0:
+                update_option_position(position.model_copy(update={"qty": remaining_qty}))
+                logger.info(
+                    "PARTIAL OPTION EXIT %s: filled=%d remaining=%d price=%.4f reason=%s",
+                    position.contract_symbol,
+                    executed_qty,
+                    remaining_qty,
+                    exit_price,
+                    exit_signal.reason,
+                )
+                continue
+
             close_option_position(position.position_id)
             upsert_daily_stats(today, trades_closed=1)
+            logger.info(
+                "OPTION EXIT %s: trigger=%s price=%.4f reason=%s",
+                position.contract_symbol,
+                exit_signal.reason,
+                exit_price,
+                exit_signal.reason,
+            )
         except BrokerError as exc:
             logger.error("Broker error exiting option %s: %s", position.contract_symbol, exc)
         except Exception as exc:
@@ -1045,6 +1229,7 @@ async def run_cycle() -> None:
     regime = "neutral"
     loop_status = "ok"
     loop_error: str | None = None
+    fatal_exc: Exception | None = None
 
     _audit_event(
         cycle_id,
@@ -1058,6 +1243,20 @@ async def run_cycle() -> None:
     )
 
     try:
+        if settings.trading_pause:
+            _audit_event(
+                cycle_id,
+                "safety_check",
+                {
+                    "paused": True,
+                    "action": "halt",
+                    "reason": "TRADING_PAUSE enabled",
+                },
+            )
+            logger.warning("Cycle %s halted: TRADING_PAUSE enabled", cycle_id)
+            loop_status = "halted"
+            return
+
         # Morning brief: check DB cache first (avoids duplicate LLM calls
         # if cron fires multiple times before the first cycle finishes).
         cached_regime = get_daily_regime(today)
@@ -1090,20 +1289,6 @@ async def run_cycle() -> None:
         daily_pnl = (equity - starting) / starting if starting > 0 else 0.0
         tier = get_tier_params(equity)
         daily_loss_limit = min(settings.max_daily_loss_pct, tier.daily_loss_limit)
-
-        if settings.trading_pause:
-            _audit_event(
-                cycle_id,
-                "safety_check",
-                {
-                    "paused": True,
-                    "action": "halt",
-                    "reason": "TRADING_PAUSE enabled",
-                },
-            )
-            logger.warning("Cycle %s halted: TRADING_PAUSE enabled", cycle_id)
-            loop_status = "halted"
-            return
 
         if daily_pnl <= -daily_loss_limit:
             _audit_event(
@@ -1172,6 +1357,7 @@ async def run_cycle() -> None:
     except Exception as exc:
         loop_status = "failed"
         loop_error = str(exc)
+        fatal_exc = exc
         logger.error("Cycle %s failed: %s", cycle_id, exc, exc_info=True)
     finally:
         _audit_event(
@@ -1183,6 +1369,9 @@ async def run_cycle() -> None:
                 "error": loop_error,
             },
         )
+
+    if fatal_exc is not None:
+        raise fatal_exc
 
 
 def main() -> None:

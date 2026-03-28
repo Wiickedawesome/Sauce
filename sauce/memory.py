@@ -12,9 +12,45 @@ Sauce's live trading context (positions, indicators, P&L).
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
-from rank_bm25 import BM25Plus
+try:
+    from rank_bm25 import BM25Plus
+except ModuleNotFoundError:
+    class BM25Plus:  # type: ignore[no-redef]
+        """Minimal BM25-style fallback when rank_bm25 is unavailable."""
+
+        def __init__(self, corpus: list[list[str]]) -> None:
+            self._corpus = corpus
+            self._doc_count = len(corpus)
+            self._avgdl = (
+                sum(len(document) for document in corpus) / self._doc_count if self._doc_count else 0.0
+            )
+            self._doc_freq: dict[str, int] = {}
+            for document in corpus:
+                for token in set(document):
+                    self._doc_freq[token] = self._doc_freq.get(token, 0) + 1
+
+        def get_scores(self, query_tokens: list[str]) -> list[float]:
+            if not self._corpus:
+                return []
+
+            unique_query = [token for token in dict.fromkeys(query_tokens) if token]
+            scores: list[float] = []
+            for document in self._corpus:
+                doc_len = len(document)
+                score = 0.0
+                for token in unique_query:
+                    term_freq = document.count(token)
+                    if term_freq == 0:
+                        continue
+                    doc_freq = self._doc_freq.get(token, 0)
+                    idf = math.log(1 + ((self._doc_count - doc_freq + 0.5) / (doc_freq + 0.5)))
+                    norm = 1.2 * (1 - 0.75 + 0.75 * (doc_len / self._avgdl if self._avgdl else 1.0))
+                    score += idf * ((term_freq * 2.2) / (term_freq + norm))
+                scores.append(score)
+            return scores
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +75,8 @@ class TradeMemory:
     def __init__(self, entries: list[MemoryEntry] | None = None) -> None:
         self._entries: list[MemoryEntry] = list(entries) if entries else []
         self._index: BM25Plus | None = None
+        if not hasattr(BM25Plus, "__module__") or BM25Plus.__module__ == __name__:
+            logger.warning("rank_bm25 not installed; TradeMemory is using the built-in fallback scorer")
         if self._entries:
             self._rebuild_index()
 

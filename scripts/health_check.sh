@@ -7,8 +7,9 @@
 # Checks:
 #   1. Docker container 'sauce' is in "running" state.
 #   2. cron.log was written within the last 70 minutes (just over 2 cron cycles).
-#   3. Broker account auth works from inside the live container.
-#   4. Market data auth works from inside the live container.
+#   3. Latest loop_end status is not failed.
+#   4. Broker account auth works from inside the live container.
+#   5. Market data auth works from inside the live container.
 #
 # Usage: bash scripts/health_check.sh
 # Env:   VPS_APP_PATH or script-local APP_PATH default below.
@@ -50,6 +51,21 @@ fi
 
 # ── 3. Broker + Market Data auth inside container ────────────────────────────
 if [[ "${STATUS}" == "running" ]]; then
+  LAST_LOOP_STATUS=$(docker exec "${CONTAINER_NAME}" sqlite3 /app/data/sauce.db \
+    "SELECT json_extract(payload, '$.status') FROM audit_events WHERE event_type = 'loop_end' ORDER BY timestamp DESC LIMIT 1;" \
+    2>/tmp/sauce_health_check_status_error.txt || true)
+
+  if [[ -z "${LAST_LOOP_STATUS}" ]]; then
+    echo "FAIL: could not determine latest loop_end status"
+    cat /tmp/sauce_health_check_status_error.txt 2>/dev/null || true
+    FAIL=1
+  elif [[ "${LAST_LOOP_STATUS}" == "failed" ]]; then
+    echo "FAIL: latest loop_end status is failed"
+    FAIL=1
+  else
+    echo "OK:   latest loop_end status is ${LAST_LOOP_STATUS}"
+  fi
+
   if docker exec "${CONTAINER_NAME}" /app/.venv/bin/python -c '
 from sauce.adapters.broker import get_account
 from sauce.adapters.market_data import get_history

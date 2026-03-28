@@ -318,6 +318,22 @@ def test_get_universe_snapshot_merges_equity_and_crypto(
     assert "MSFT" in result
     assert "BTC/USD" in result
     assert all(isinstance(v, PriceReference) for v in result.values())
+
+
+def test_get_universe_snapshot_raises_when_no_quotes_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters.market_data import MarketDataError, get_universe_snapshot
+
+    mock_stock_client = MagicMock()
+    mock_stock_client.get_stock_latest_quote.side_effect = Exception("snapshot down")
+
+    with patch("sauce.adapters.market_data._get_stock_client", return_value=mock_stock_client):
+        with pytest.raises(MarketDataError, match="returned no quotes"):
+            get_universe_snapshot(["AAPL"])
+
+    clear_cache()
     clear_cache()
 
 
