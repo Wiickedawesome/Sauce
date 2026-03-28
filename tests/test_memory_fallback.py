@@ -7,6 +7,9 @@ import uuid
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_trade_memory_fallback_without_rank_bm25(monkeypatch) -> None:
     real_import = builtins.__import__
 
@@ -20,7 +23,7 @@ def test_trade_memory_fallback_without_rank_bm25(monkeypatch) -> None:
     module_name = f"memory_fallback_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(
         module_name,
-        Path("/home/wicked/Projects/Sauce/sauce/memory.py"),
+        REPO_ROOT / "sauce" / "memory.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

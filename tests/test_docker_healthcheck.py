@@ -7,13 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _load_healthcheck_module(db_path: Path, interval: str = "30"):
     import os
 
     os.environ["DB_PATH"] = str(db_path)
     os.environ["LOOP_INTERVAL_MINUTES"] = interval
 
-    script_path = Path("/home/wicked/Projects/Sauce/scripts/docker_healthcheck.py")
+    script_path = REPO_ROOT / "scripts" / "docker_healthcheck.py"
     module_name = f"docker_healthcheck_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     assert spec is not None and spec.loader is not None
