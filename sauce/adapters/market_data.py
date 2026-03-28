@@ -27,6 +27,11 @@ from sauce.core.schemas import PriceReference
 
 logger = logging.getLogger(__name__)
 
+_SNAPSHOT_FAILURE_COUNTS: dict[str, int] = {}
+_SNAPSHOT_SUPPRESS_UNTIL: dict[str, datetime] = {}
+_SNAPSHOT_FAILURE_THRESHOLD = 3
+_SNAPSHOT_SUPPRESS_FOR = timedelta(hours=6)
+
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
@@ -75,6 +80,74 @@ def is_crypto(symbol: str) -> bool:
 
 # Backward-compatible alias for any external callers.
 _is_crypto = is_crypto
+
+
+def _quote_is_fresh(quote: PriceReference, ttl_seconds: int, now: datetime | None = None) -> bool:
+    ref_now = now or datetime.now(UTC)
+    quote_time = quote.as_of if quote.as_of.tzinfo is not None else quote.as_of.replace(tzinfo=UTC)
+    return (ref_now - quote_time).total_seconds() <= ttl_seconds
+
+
+def _is_snapshot_suppressed(symbol: str, now: datetime) -> bool:
+    suppressed_until = _SNAPSHOT_SUPPRESS_UNTIL.get(symbol)
+    if suppressed_until is None:
+        return False
+    if suppressed_until <= now:
+        _SNAPSHOT_SUPPRESS_UNTIL.pop(symbol, None)
+        _SNAPSHOT_FAILURE_COUNTS.pop(symbol, None)
+        return False
+    return True
+
+
+def _mark_snapshot_available(symbol: str) -> None:
+    _SNAPSHOT_FAILURE_COUNTS.pop(symbol, None)
+    _SNAPSHOT_SUPPRESS_UNTIL.pop(symbol, None)
+
+
+def _record_snapshot_failure(symbol: str, now: datetime) -> None:
+    failures = _SNAPSHOT_FAILURE_COUNTS.get(symbol, 0) + 1
+    _SNAPSHOT_FAILURE_COUNTS[symbol] = failures
+    if failures < _SNAPSHOT_FAILURE_THRESHOLD:
+        return
+
+    suppressed_until = now + _SNAPSHOT_SUPPRESS_FOR
+    _SNAPSHOT_SUPPRESS_UNTIL[symbol] = suppressed_until
+    logger.warning(
+        "Suppressing %s from batch snapshots until %s after %d consecutive quote failures",
+        symbol,
+        suppressed_until.isoformat(),
+        failures,
+    )
+
+
+def _recover_batch_quotes(
+    symbols: list[str],
+    result: dict[str, PriceReference],
+    ttl_seconds: int,
+    now: datetime,
+) -> None:
+    if not symbols:
+        return
+
+    missing_symbols = [symbol for symbol in symbols if symbol not in result]
+    stale_symbols = [
+        symbol for symbol, quote in result.items()
+        if symbol in symbols and not _quote_is_fresh(quote, ttl_seconds, now)
+    ]
+    recovery_symbols = sorted(set(missing_symbols + stale_symbols))
+
+    for symbol in recovery_symbols:
+        try:
+            recovered_quote = get_quote(symbol)
+        except MarketDataError:
+            _record_snapshot_failure(symbol, now)
+            continue
+
+        result[symbol] = recovered_quote
+        if _quote_is_fresh(recovered_quote, ttl_seconds, now):
+            _mark_snapshot_available(symbol)
+        else:
+            _record_snapshot_failure(symbol, now)
 
 
 # ── get_quote ─────────────────────────────────────────────────────────────────
@@ -232,8 +305,16 @@ def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     Symbols that fail to fetch are logged and omitted from the result.
     This means a partial result is possible — consumers must check presence.
     """
-    equity_symbols = [s for s in symbols if not _is_crypto(s)]
-    crypto_symbols = [s for s in symbols if _is_crypto(s)]
+    settings = get_settings()
+    now = datetime.now(UTC)
+    active_symbols = [s for s in symbols if not _is_snapshot_suppressed(s, now)]
+
+    if not active_symbols:
+        logger.info("All %d requested symbols are temporarily suppressed from snapshot retries", len(symbols))
+        return {}
+
+    equity_symbols = [s for s in active_symbols if not _is_crypto(s)]
+    crypto_symbols = [s for s in active_symbols if _is_crypto(s)]
 
     result: dict[str, PriceReference] = {}
 
@@ -251,9 +332,11 @@ def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
         except Exception as exc:
             logger.error("Crypto snapshot failed for %s: %s", crypto_symbols, exc)
 
-    if symbols and not result:
+    _recover_batch_quotes(active_symbols, result, settings.data_ttl_seconds, now)
+
+    if active_symbols and not result:
         raise MarketDataError(
-            f"get_universe_snapshot({symbols}) returned no quotes for {len(symbols)} requested symbols"
+            f"get_universe_snapshot({active_symbols}) returned no quotes for {len(active_symbols)} requested symbols"
         )
 
     return result

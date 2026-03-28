@@ -501,7 +501,6 @@ async def _scan_entries(
     for strategy, instrument in eligible_instruments:
         quote = quotes_map.get(instrument)
         if quote is None:
-            logger.warning("No quote for %s in batch snapshot, skipping", instrument)
             continue
         if not _is_quote_fresh(quote, settings.data_ttl_seconds):
             _audit_event(
@@ -767,8 +766,6 @@ async def _scan_option_entries(
     for underlying in eligible_underlyings:
         quote = quotes_map.get(underlying)
         if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
-            if quote is None:
-                logger.warning("No quote for %s in options batch snapshot, skipping", underlying)
             continue
 
         try:
@@ -947,7 +944,6 @@ async def _scan_exits(
         try:
             quote = exit_quotes_map.get(position.symbol)
             if quote is None:
-                logger.warning("No exit quote for %s, skipping this cycle", position.symbol)
                 continue
             current_price = float(quote.mid) if hasattr(quote, "mid") else 0.0
 
@@ -1149,8 +1145,6 @@ async def _scan_option_exits(
         try:
             quote = quotes_map.get(position.contract_symbol)
             if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
-                if quote is None:
-                    logger.warning("No option quote for %s, skipping this cycle", position.contract_symbol)
                 continue
 
             current_bid = quote.bid if quote.bid > 0 else quote.mid

@@ -363,6 +363,69 @@ def test_get_universe_snapshot_partial_failure_does_not_crash(
     clear_cache()
 
 
+def test_get_universe_snapshot_recovers_missing_symbol_individually(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import market_data
+
+    market_data._SNAPSHOT_FAILURE_COUNTS.clear()
+    market_data._SNAPSHOT_SUPPRESS_UNTIL.clear()
+
+    ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
+    recovered = PriceReference(symbol="ETH/USD", bid=2000.0, ask=2001.0, mid=2000.5, as_of=ts)
+
+    mock_crypto_client = MagicMock()
+    mock_crypto_client.get_crypto_latest_quote.return_value = {}
+
+    with (
+        patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
+        patch("sauce.adapters.market_data.get_quote", return_value=recovered) as mock_get_quote,
+    ):
+        result = market_data.get_universe_snapshot(["ETH/USD"])
+
+    assert result["ETH/USD"] == recovered
+    mock_get_quote.assert_called_once_with("ETH/USD")
+    clear_cache()
+
+
+def test_get_universe_snapshot_suppresses_chronic_missing_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import market_data
+    from sauce.adapters.market_data import MarketDataError
+
+    market_data._SNAPSHOT_FAILURE_COUNTS.clear()
+    market_data._SNAPSHOT_SUPPRESS_UNTIL.clear()
+
+    now = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
+    mock_crypto_client = MagicMock()
+    mock_crypto_client.get_crypto_latest_quote.return_value = {}
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(market_data, "datetime", FrozenDateTime)
+
+    with (
+        patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
+        patch("sauce.adapters.market_data.get_quote", side_effect=MarketDataError("no quote")) as mock_get_quote,
+    ):
+        for _ in range(3):
+            with pytest.raises(MarketDataError, match="returned no quotes"):
+                market_data.get_universe_snapshot(["APT/USD"])
+
+        result = market_data.get_universe_snapshot(["APT/USD"])
+
+    assert result == {}
+    assert mock_crypto_client.get_crypto_latest_quote.call_count == 3
+    assert mock_get_quote.call_count == 3
+    clear_cache()
+
+
 def test_get_universe_snapshot_empty_list_returns_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
