@@ -595,6 +595,59 @@ def upsert_instrument_meta(
         session.close()
 
 
+def load_instrument_meta_extra(symbol: str, db_path: str | None = None) -> dict[str, Any]:
+    """Load the JSON extra payload for an instrument, if present."""
+    session = get_session(db_path)
+    try:
+        row = session.query(InstrumentMetaRow).filter_by(symbol=symbol).first()
+        if row is None or not row.extra:
+            return {}
+        try:
+            value = json.loads(row.extra)
+        except json.JSONDecodeError:
+            logger.warning("Invalid instrument meta JSON for %s", symbol)
+            return {}
+        return value if isinstance(value, dict) else {}
+    finally:
+        session.close()
+
+
+def merge_instrument_meta_extra(
+    symbol: str,
+    asset_class: str,
+    extra_updates: dict[str, Any],
+    db_path: str | None = None,
+) -> None:
+    """Merge JSON metadata into instrument_meta.extra without losing existing keys."""
+    session = get_session(db_path)
+    try:
+        row = session.query(InstrumentMetaRow).filter_by(symbol=symbol).first()
+        if row is None:
+            row = InstrumentMetaRow(
+                symbol=symbol,
+                asset_class=asset_class,
+                strategy_name="market_data",
+                extra="{}",
+            )
+            session.add(row)
+
+        current_extra: dict[str, Any]
+        try:
+            parsed = json.loads(row.extra or "{}")
+            current_extra = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            current_extra = {}
+
+        current_extra.update(extra_updates)
+        row.extra = json.dumps(current_extra)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error("Failed to merge instrument meta for %s: %s", symbol, exc)
+    finally:
+        session.close()
+
+
 # ── Trade Memory ──────────────────────────────────────────────────────────────
 
 

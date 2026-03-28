@@ -264,6 +264,86 @@ async def test_scan_entries_uses_broker_avg_entry_price_when_fill_price_missing(
 
 
 @pytest.mark.asyncio
+async def test_scan_entries_overrides_analyst_rejection_in_paper_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    get_settings.cache_clear()
+
+    class FakeStrategy:
+        name = "fake_strategy"
+        instruments = ["BTC/USD"]
+
+        def eligible(self, instrument: str, regime: str) -> bool:
+            return True
+
+        def score(self, indicators, instrument: str, regime: str, current_price: float) -> SignalResult:
+            return SignalResult(
+                symbol=instrument,
+                side="buy",
+                score=60,
+                threshold=60,
+                fired=True,
+                rsi_14=55.0,
+                macd_hist=0.2,
+                bb_pct=0.1,
+                volume_ratio=1.5,
+                regime=regime,
+                strategy_name=self.name,
+            )
+
+        def build_order(self, signal: SignalResult, account: dict[str, object], tier) -> Order:
+            return Order(
+                symbol=signal.symbol,
+                side="buy",
+                qty=1.0,
+                order_type="limit",
+                time_in_force="gtc",
+                limit_price=100.0,
+                as_of=quote.as_of,
+                prompt_version="v2",
+            )
+
+    quote = PriceReference(symbol="BTC/USD", bid=100.0, ask=100.0, mid=100.0, as_of=datetime.now(UTC))
+    save_position = MagicMock()
+
+    monkeypatch.setattr("sauce.loop.STRATEGIES", [FakeStrategy()])
+    monkeypatch.setattr("sauce.loop.get_snapshot_candidates", lambda symbols: symbols)
+    monkeypatch.setattr("sauce.loop.get_universe_snapshot", MagicMock(return_value={"BTC/USD": quote}))
+    monkeypatch.setattr("sauce.loop._fetch_indicators", MagicMock(return_value=object()))
+    monkeypatch.setattr(
+        "sauce.loop.analyst_committee",
+        AsyncMock(
+            return_value=AnalystVerdict(
+                approve=False,
+                confidence=90,
+                bull_case="bull",
+                bear_case="bear",
+                reasoning="llm veto",
+            )
+        ),
+    )
+    monkeypatch.setattr("sauce.loop.get_quote", MagicMock(return_value=quote))
+    monkeypatch.setattr("sauce.loop.check_risk", MagicMock(return_value=RiskVerdict(True, "all", "")))
+    monkeypatch.setattr("sauce.loop._supervisor_review", MagicMock(return_value=SimpleNamespace(action="execute", reason="ok")))
+    monkeypatch.setattr("sauce.loop.place_order", MagicMock(return_value={"id": "ord-1", "status": "filled", "filled_qty": "1.0", "filled_avg_price": "100.0"}))
+    monkeypatch.setattr("sauce.loop.get_positions", MagicMock(return_value=[{"symbol": "BTC/USD", "qty": "1.0", "avg_entry_price": "100.0"}]))
+    monkeypatch.setattr("sauce.loop.save_position", save_position)
+    monkeypatch.setattr("sauce.loop.log_signal", MagicMock())
+    monkeypatch.setattr("sauce.loop.upsert_daily_stats", MagicMock())
+    monkeypatch.setattr("sauce.loop._audit_event", MagicMock())
+
+    await _scan_entries(
+        regime="bearish",
+        account={"equity": "1000", "buying_power": "1000", "last_equity": "1000"},
+        open_positions=[],
+        broker_positions=[],
+        recent_orders=[],
+        trade_memory=TradeMemory(),
+    )
+
+    assert save_position.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_scan_option_entries_rejects_oversized_actual_premium(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPTIONS_ENABLED", "true")
     get_settings.cache_clear()

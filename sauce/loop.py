@@ -43,6 +43,7 @@ from sauce.adapters.market_data import (
     get_option_chain,
     get_option_quotes,
     get_quote,
+    get_snapshot_candidates,
     get_universe_snapshot,
 )
 from sauce.analyst import analyst_committee
@@ -217,6 +218,11 @@ def _reconcile_entry_fill(
     )
     broker_price = _parse_positive_float(broker_position.get("avg_entry_price"))
     return broker_qty or initial_qty, broker_price or initial_price
+
+
+def _paper_mode_overrides_analyst(verdict: AnalystVerdict, score: int, threshold: int) -> bool:
+    settings = get_settings()
+    return settings.alpaca_paper and (not verdict.approve) and score >= threshold
 
 
 def _audit_missing_quotes(loop_id: str, stage: str, requested_symbols: list[str], quotes_map: dict[str, PriceReference]) -> None:
@@ -494,9 +500,10 @@ async def _scan_entries(
 
     # ── Batch-fetch quotes (1–2 API calls instead of N) ──
     all_symbols = list({inst for _, inst in eligible_instruments})
-    quotes_map = get_universe_snapshot(all_symbols)
-    _audit_missing_quotes(loop_id, "entry_batch_quotes", all_symbols, quotes_map)
-    logger.info("Batch quotes fetched for %d symbols (%d returned)", len(all_symbols), len(quotes_map))
+    snapshot_symbols = get_snapshot_candidates(all_symbols)
+    quotes_map = get_universe_snapshot(snapshot_symbols)
+    _audit_missing_quotes(loop_id, "entry_batch_quotes", snapshot_symbols, quotes_map)
+    logger.info("Batch quotes fetched for %d symbols (%d returned)", len(snapshot_symbols), len(quotes_map))
 
     for strategy, instrument in eligible_instruments:
         quote = quotes_map.get(instrument)
@@ -565,14 +572,36 @@ async def _scan_entries(
                 loop_id=loop_id,
             )
             if not verdict.approve:
-                logger.info(
-                    "ANALYST REJECTED %s: confidence=%d — %s",
-                    instrument,
-                    verdict.confidence,
-                    verdict.reasoning,
-                )
-                upsert_daily_stats(today, signals_skipped=1)
-                continue
+                if _paper_mode_overrides_analyst(verdict, signal.score, signal.threshold):
+                    logger.warning(
+                        "PAPER ANALYST OVERRIDE %s: score=%d threshold=%d confidence=%d — %s",
+                        instrument,
+                        signal.score,
+                        signal.threshold,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                    _audit_event(
+                        loop_id,
+                        "supervisor_decision",
+                        {
+                            "action": "paper_override",
+                            "reason": verdict.reasoning,
+                            "confidence": verdict.confidence,
+                            "score": signal.score,
+                            "threshold": signal.threshold,
+                        },
+                        symbol=instrument,
+                    )
+                else:
+                    logger.info(
+                        "ANALYST REJECTED %s: confidence=%d — %s",
+                        instrument,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                    upsert_daily_stats(today, signals_skipped=1)
+                    continue
 
             logger.info(
                 "ANALYST APPROVED %s: confidence=%d — %s",
@@ -761,8 +790,9 @@ async def _scan_option_entries(
     if not eligible_underlyings:
         return
 
-    quotes_map = get_universe_snapshot(eligible_underlyings)
-    _audit_missing_quotes(loop_id, "options_entry_batch_quotes", eligible_underlyings, quotes_map)
+    snapshot_underlyings = get_snapshot_candidates(eligible_underlyings)
+    quotes_map = get_universe_snapshot(snapshot_underlyings)
+    _audit_missing_quotes(loop_id, "options_entry_batch_quotes", snapshot_underlyings, quotes_map)
     for underlying in eligible_underlyings:
         quote = quotes_map.get(underlying)
         if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
@@ -805,7 +835,17 @@ async def _scan_option_entries(
                 loop_id=loop_id,
             )
             if not verdict.approve:
-                continue
+                if _paper_mode_overrides_analyst(verdict, signal.score, signal.threshold):
+                    logger.warning(
+                        "PAPER ANALYST OVERRIDE %s: score=%d threshold=%d confidence=%d — %s",
+                        underlying,
+                        signal.score,
+                        signal.threshold,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                else:
+                    continue
 
             contracts = get_option_chain(underlying, quote.mid, signal.option_type)
             contract = OPTIONS_STRATEGY.select_contract(signal, contracts, quote.mid)

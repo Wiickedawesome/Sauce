@@ -369,9 +369,6 @@ def test_get_universe_snapshot_recovers_missing_symbol_individually(
     set_env(monkeypatch)
     from sauce.adapters import market_data
 
-    market_data._SNAPSHOT_FAILURE_COUNTS.clear()
-    market_data._SNAPSHOT_SUPPRESS_UNTIL.clear()
-
     ts = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     recovered = PriceReference(symbol="ETH/USD", bid=2000.0, ask=2001.0, mid=2000.5, as_of=ts)
 
@@ -396,9 +393,6 @@ def test_get_universe_snapshot_suppresses_chronic_missing_symbols(
     from sauce.adapters import market_data
     from sauce.adapters.market_data import MarketDataError
 
-    market_data._SNAPSHOT_FAILURE_COUNTS.clear()
-    market_data._SNAPSHOT_SUPPRESS_UNTIL.clear()
-
     now = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
     mock_crypto_client = MagicMock()
     mock_crypto_client.get_crypto_latest_quote.return_value = {}
@@ -418,9 +412,9 @@ def test_get_universe_snapshot_suppresses_chronic_missing_symbols(
             with pytest.raises(MarketDataError, match="returned no quotes"):
                 market_data.get_universe_snapshot(["APT/USD"])
 
-        result = market_data.get_universe_snapshot(["APT/USD"])
+        result = market_data.get_snapshot_candidates(["APT/USD"])
 
-    assert result == {}
+    assert result == []
     assert mock_crypto_client.get_crypto_latest_quote.call_count == 3
     assert mock_get_quote.call_count == 3
     clear_cache()

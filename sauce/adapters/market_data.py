@@ -24,13 +24,14 @@ from sauce.adapters.utils import call_with_retry
 from sauce.core.config import get_settings
 from sauce.core.options_schemas import OptionContract
 from sauce.core.schemas import PriceReference
+from sauce.db import load_instrument_meta_extra, merge_instrument_meta_extra
 
 logger = logging.getLogger(__name__)
 
-_SNAPSHOT_FAILURE_COUNTS: dict[str, int] = {}
-_SNAPSHOT_SUPPRESS_UNTIL: dict[str, datetime] = {}
 _SNAPSHOT_FAILURE_THRESHOLD = 3
 _SNAPSHOT_SUPPRESS_FOR = timedelta(hours=6)
+_SNAPSHOT_FAILURES_KEY = "snapshot_failures"
+_SNAPSHOT_SUPPRESS_UNTIL_KEY = "snapshot_suppress_until"
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
@@ -88,36 +89,74 @@ def _quote_is_fresh(quote: PriceReference, ttl_seconds: int, now: datetime | Non
     return (ref_now - quote_time).total_seconds() <= ttl_seconds
 
 
+def _load_snapshot_state(symbol: str) -> tuple[int, datetime | None]:
+    extra = load_instrument_meta_extra(symbol)
+    failures_raw = extra.get(_SNAPSHOT_FAILURES_KEY, 0)
+    suppress_raw = extra.get(_SNAPSHOT_SUPPRESS_UNTIL_KEY)
+
+    try:
+        failures = int(failures_raw)
+    except (TypeError, ValueError):
+        failures = 0
+
+    suppressed_until: datetime | None = None
+    if isinstance(suppress_raw, str) and suppress_raw:
+        try:
+            suppressed_until = datetime.fromisoformat(suppress_raw.replace("Z", "+00:00"))
+            if suppressed_until.tzinfo is None:
+                suppressed_until = suppressed_until.replace(tzinfo=UTC)
+        except ValueError:
+            suppressed_until = None
+
+    return failures, suppressed_until
+
+
+def _save_snapshot_state(symbol: str, failures: int, suppressed_until: datetime | None) -> None:
+    merge_instrument_meta_extra(
+        symbol=symbol,
+        asset_class="crypto" if _is_crypto(symbol) else "equity",
+        extra_updates={
+            _SNAPSHOT_FAILURES_KEY: max(failures, 0),
+            _SNAPSHOT_SUPPRESS_UNTIL_KEY: suppressed_until.isoformat() if suppressed_until else None,
+        },
+    )
+
+
 def _is_snapshot_suppressed(symbol: str, now: datetime) -> bool:
-    suppressed_until = _SNAPSHOT_SUPPRESS_UNTIL.get(symbol)
+    failures, suppressed_until = _load_snapshot_state(symbol)
     if suppressed_until is None:
         return False
     if suppressed_until <= now:
-        _SNAPSHOT_SUPPRESS_UNTIL.pop(symbol, None)
-        _SNAPSHOT_FAILURE_COUNTS.pop(symbol, None)
+        _save_snapshot_state(symbol, 0, None)
         return False
     return True
 
 
 def _mark_snapshot_available(symbol: str) -> None:
-    _SNAPSHOT_FAILURE_COUNTS.pop(symbol, None)
-    _SNAPSHOT_SUPPRESS_UNTIL.pop(symbol, None)
+    _save_snapshot_state(symbol, 0, None)
 
 
 def _record_snapshot_failure(symbol: str, now: datetime) -> None:
-    failures = _SNAPSHOT_FAILURE_COUNTS.get(symbol, 0) + 1
-    _SNAPSHOT_FAILURE_COUNTS[symbol] = failures
+    failures, _suppressed_until = _load_snapshot_state(symbol)
+    failures += 1
     if failures < _SNAPSHOT_FAILURE_THRESHOLD:
+        _save_snapshot_state(symbol, failures, None)
         return
 
     suppressed_until = now + _SNAPSHOT_SUPPRESS_FOR
-    _SNAPSHOT_SUPPRESS_UNTIL[symbol] = suppressed_until
+    _save_snapshot_state(symbol, failures, suppressed_until)
     logger.warning(
         "Suppressing %s from batch snapshots until %s after %d consecutive quote failures",
         symbol,
         suppressed_until.isoformat(),
         failures,
     )
+
+
+def get_snapshot_candidates(symbols: list[str], now: datetime | None = None) -> list[str]:
+    """Return symbols that are not currently suppressed for entry batch scans."""
+    ref_now = now or datetime.now(UTC)
+    return [symbol for symbol in symbols if not _is_snapshot_suppressed(symbol, ref_now)]
 
 
 def _recover_batch_quotes(
