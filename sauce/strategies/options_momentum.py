@@ -59,8 +59,9 @@ class OptionsMomentum:
     MIN_OPEN_INTEREST = 100
     MAX_SPREAD_PCT = 0.10  # Max 10% bid-ask spread
 
-    def __init__(self) -> None:
-        self._settings = get_settings()
+    @property
+    def _settings(self):
+        return get_settings()
 
     @property
     def instruments(self) -> list[str]:
