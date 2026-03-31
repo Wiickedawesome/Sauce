@@ -49,7 +49,7 @@ class CryptoMomentumReversion:
     UPTREND_STRUCTURE_POINTS = 10  # SMA20 > SMA50 → sustained uptrend
 
     # Scoring condition thresholds — DISCIPLINED
-    RSI_OVERSOLD = 35  # True oversold: RSI must be < 35
+    RSI_OVERSOLD = 40  # Oversold: RSI must be < 40 (was 35 — too strict for normal dips)
     RSI_POINTS = 25
 
     BB_PROXIMITY = 0.20  # Lower 20% of BB range (tight)
@@ -64,11 +64,11 @@ class CryptoMomentumReversion:
     VOLUME_POINTS = 10
 
     # Momentum breakout conditions
-    MOMENTUM_RSI_MIN = 55  # RSI 55-70 = bullish momentum
+    MOMENTUM_RSI_MIN = 50  # RSI 50-70 = bullish momentum (was 55 — catches recovering setups)
     MOMENTUM_RSI_MAX = 70
     MOMENTUM_POINTS = 15
 
-    BASE_THRESHOLD = 50  # Require multi-indicator confluence
+    BASE_THRESHOLD = 45  # Require multi-indicator confluence (was 50 — threshold had no margin)
     # CORRECT: Bearish = HARDER to enter (capital preservation)
     REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 10}
 

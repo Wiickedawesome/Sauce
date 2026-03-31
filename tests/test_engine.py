@@ -118,7 +118,7 @@ class TestCryptoMomentumReversion:
     def test_no_conditions_met(self):
         """No scoring conditions met → score 0, not fired."""
         ind = _make_indicators(
-            rsi_14=50, volume_ratio=0.3, macd_histogram=0.0,
+            rsi_14=49, volume_ratio=0.3, macd_histogram=0.0,
             sma_20=105.0, sma_50=110.0,  # no trend (price < SMA20, SMA20 < SMA50)
         )
         result = self.strategy.score(ind, "BTC/USD", "neutral", 100.0)
@@ -171,28 +171,28 @@ class TestCryptoMomentumReversion:
         assert result.side == "buy"
 
     def test_regime_bullish_lowers_threshold(self):
-        """Bullish regime → threshold 45 (base 50, shift -5)."""
+        """Bullish regime → threshold 40 (base 45, shift -5)."""
         ind = _make_indicators(
-            rsi_14=30,  # 25 pts (RSI < 35)
+            rsi_14=30,  # 25 pts (RSI < 40)
             macd_histogram=-0.5,  # 15 pts (mr dip)
             volume_ratio=2.0,  # 10 pts
         )
         result = self.strategy.score(ind, "BTC/USD", "bullish", 100.0)
-        assert result.threshold == 45  # bullish shift = -5
+        assert result.threshold == 40  # bullish shift = -5
         assert result.score == 50  # RSI 25 + MACD dip 15 + vol 10
-        assert result.fired  # 50 >= 45
+        assert result.fired  # 50 >= 40
 
     def test_regime_bearish_raises_threshold(self):
-        """Bearish regime → threshold 60 (base 50, shift +10), harder to enter."""
+        """Bearish regime → threshold 55 (base 45, shift +10), harder to enter."""
         ind = _make_indicators(
-            rsi_14=30,  # 25 pts (RSI < 35)
+            rsi_14=30,  # 25 pts (RSI < 40)
             macd_histogram=-0.5,  # 15 pts (mr dip)
             volume_ratio=2.0,  # 10 pts
         )
         result = self.strategy.score(ind, "BTC/USD", "bearish", 100.0)
-        assert result.threshold == 60  # bearish shift = +10
+        assert result.threshold == 55  # bearish shift = +10
         assert result.score == 50  # RSI 25 + MACD dip 15 + vol 10
-        assert not result.fired  # 50 < 60
+        assert not result.fired  # 50 < 55
 
     def test_bb_pct_at_lower(self):
         """Price exactly at lower BB → bb_pct 0.0 → 25 pts."""
@@ -268,7 +268,7 @@ class TestCryptoMomentumReversion:
         pos = Position(symbol="BTC/USD", entry_price=50000)
         plan = self.strategy.build_exit_plan(pos, SEED_PARAMS)
         assert plan.stop_loss_pct == 0.03
-        assert plan.trail_activation_pct == 0.03
+        assert plan.trail_activation_pct == 0.02
         assert plan.profit_target_pct == 0.06
 
 

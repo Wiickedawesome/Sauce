@@ -60,7 +60,7 @@ class EquityMomentum:
     VOLUME_RATIO_MIN = 1.5
     VOLUME_POINTS = 15
 
-    BASE_THRESHOLD = 65  # Require 65 pts = strong multi-indicator confluence
+    BASE_THRESHOLD = 60  # Require 60 pts = strong confluence (was 65 — MR path could never fire at neutral)
     # CORRECT: Bearish = HARDER to enter (capital preservation)
     REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 15}
 

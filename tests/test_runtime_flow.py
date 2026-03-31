@@ -26,21 +26,36 @@ def _capture_events(events: list[AuditEvent]):
 
 @pytest.mark.asyncio
 async def test_run_cycle_paused_before_external_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TRADING_PAUSE blocks new entries but exits (and pre-exit broker calls) still run."""
     monkeypatch.setenv("TRADING_PAUSE", "true")
     get_settings.cache_clear()
 
     events: list[AuditEvent] = []
     mock_get_regime = AsyncMock()
-    mock_get_account = MagicMock()
+    mock_get_account = MagicMock(return_value={"equity": "1000.0", "last_equity": "1000.0"})
+    mock_scan_entries = AsyncMock()
 
     monkeypatch.setattr("sauce.loop.log_event", _capture_events(events))
     monkeypatch.setattr("sauce.loop.get_regime", mock_get_regime)
     monkeypatch.setattr("sauce.loop.get_account", mock_get_account)
+    # Return cached regime so LLM call is skipped regardless of time-of-day.
+    monkeypatch.setattr("sauce.loop.get_daily_regime", MagicMock(return_value="neutral"))
+    monkeypatch.setattr("sauce.loop.upsert_daily_stats", MagicMock())
+    monkeypatch.setattr("sauce.loop.get_positions", MagicMock(return_value=[]))
+    monkeypatch.setattr("sauce.loop.get_recent_orders", MagicMock(return_value=[]))
+    monkeypatch.setattr("sauce.loop.load_open_positions", MagicMock(return_value=[]))
+    monkeypatch.setattr("sauce.loop.load_open_option_positions", MagicMock(return_value=[]))
+    monkeypatch.setattr("sauce.loop.load_all_memories", MagicMock(return_value=[]))
+    monkeypatch.setattr("sauce.loop._scan_entries", mock_scan_entries)
 
     await run_cycle()
 
+    # Regime served from cache — LLM call skipped.
     assert mock_get_regime.await_count == 0
-    assert mock_get_account.call_count == 0
+    # Account IS fetched: exits must run before the pause check.
+    assert mock_get_account.call_count == 1
+    # No new entries allowed when paused.
+    assert mock_scan_entries.await_count == 0
 
     safety_events = [event for event in events if event.event_type == "safety_check"]
     assert safety_events

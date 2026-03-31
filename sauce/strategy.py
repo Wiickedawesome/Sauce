@@ -106,12 +106,12 @@ SEED_PARAMS = TierParams(
     max_concurrent=3,  # 3 concurrent positions (was 4) — 60% max exposure
     daily_loss_limit=0.08,  # 8% daily drawdown ceiling (was 20%)
     stop_loss_pct=0.03,  # 3% stop (was 5%) — tighter capital protection
-    trail_activation_pct=0.03,  # Trail kicks in at 3% gain
+    trail_activation_pct=0.02,  # Trail kicks in at 2% gain (was 3% — protect profits sooner)
     trail_pct=0.015,  # 1.5% trailing stop
     profit_target_pct=0.06,  # 6% target — 2:1 R:R with 3% stop
     rsi_exhaustion_threshold=72,  # Exit on RSI exhaustion
-    max_hold_hours=48,  # 2 days max for day/swing positions
-    time_stop_min_gain=0.01,  # Exit stale positions at 1% gain minimum
+    max_hold_hours=24,  # 1 day max hold — recycle capital faster (was 48h)
+    time_stop_min_gain=0.005,  # Exit stale trades at 0.5% gain min (was 1% — exit dead money sooner)
 )
 
 BUILDING_PARAMS = TierParams(

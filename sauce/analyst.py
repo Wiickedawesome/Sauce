@@ -45,7 +45,7 @@ class AnalystVerdict:
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 DUAL_ANALYSIS_SYSTEM = """\
-You are two financial analysts debating a proposed cryptocurrency trade.
+You are two financial analysts debating a proposed trade.
 
 First, present the BULL CASE — reasons this trade will succeed.
 Then, present the BEAR CASE — reasons this trade will fail or underperform.

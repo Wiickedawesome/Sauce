@@ -77,7 +77,7 @@ from sauce.risk import check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion
 from sauce.strategies.equity_momentum import EquityMomentum
 from sauce.strategies.options_momentum import OptionsMomentum
-from sauce.strategy import Position, Strategy, get_tier_params
+from sauce.strategy import Position, Strategy, TierParams, get_tier_params
 
 logger = logging.getLogger(__name__)
 
@@ -296,12 +296,15 @@ def _supervisor_review(
         deviation = abs(fresh_quote.mid - baseline) / baseline if baseline > 0 else 1.0
         order_price = order.limit_price or order.stop_price or fresh_quote.ask or fresh_quote.mid
         order_value = order.qty * order_price
-        if deviation > settings.max_price_deviation:
+        # Crypto is volatile 24/7; allow 2.5x wider price deviation tolerance
+        # to survive normal movement during the ~5-10 s LLM analysis window.
+        max_dev = settings.max_price_deviation * 2.5 if _is_crypto(symbol) else settings.max_price_deviation
+        if deviation > max_dev:
             decision = SupervisorDecision(
                 action="abort",
                 reason=(
                     f"price deviation {deviation:.2%} exceeds "
-                    f"limit {settings.max_price_deviation:.2%}"
+                    f"limit {max_dev:.2%}"
                 ),
             )
         elif order_value > buying_power:
@@ -751,6 +754,7 @@ async def _scan_entries(
             logger.error("Broker error for %s: %s", instrument, exc)
         except Exception as exc:
             logger.error("Unexpected error scanning %s: %s", instrument, exc)
+            _audit_event(loop_id, "supervisor_decision", {"action": "error", "stage": "entry_scan", "reason": str(exc)}, symbol=instrument)
 
 
 async def _scan_option_entries(
@@ -996,6 +1000,12 @@ async def _scan_exits(
             # Get exit plan from strategy
             strategy = _find_strategy(position.strategy_name)
             if strategy is None:
+                logger.warning(
+                    "EXIT SKIPPED %s: strategy '%s' not registered — "
+                    "position cannot be managed by exit engine",
+                    position.symbol,
+                    position.strategy_name,
+                )
                 continue
             plan = strategy.build_exit_plan(position, tier)
 
@@ -1252,6 +1262,77 @@ def _find_strategy(name: str) -> Strategy | None:
     return None
 
 
+def _reconcile_broker_positions(
+    open_positions: list[Position],
+    broker_positions: list[dict[str, object]],
+    tier: TierParams,
+) -> None:
+    """Create DB records for broker positions not yet tracked locally.
+
+    Handles positions opened outside the current DB (manual orders, prior code
+    versions, DB migrations). Saves a minimal record with tier-based stops so
+    the exit monitor can manage them on the very next cycle.
+    """
+    settings = get_settings()
+    for bp in broker_positions:
+        broker_symbol = str(bp.get("symbol", "")).strip().upper()
+        if not broker_symbol:
+            continue
+
+        # Robust alias matching handles broker's slash-free form (DOGEUSD vs DOGE/USD).
+        already_tracked = any(
+            bool(set(_symbol_aliases(broker_symbol)) & set(_symbol_aliases(p.symbol)))
+            for p in open_positions
+        )
+        if already_tracked:
+            continue
+
+        qty = _parse_positive_float(bp.get("qty") or bp.get("qty_available"))
+        entry_price = _parse_positive_float(bp.get("avg_entry_price"))
+        if not qty or not entry_price:
+            continue
+
+        # Prefer broker's explicit asset_class; fall back to symbol heuristic.
+        asset_class_raw = str(bp.get("asset_class", "")).lower()
+        is_crypto_pos = "crypto" in asset_class_raw or _is_crypto(broker_symbol)
+
+        # Broker sends crypto without slash (DOGEUSD). Restore canonical form.
+        if is_crypto_pos and "/" not in broker_symbol and broker_symbol.endswith("USD"):
+            canonical = broker_symbol[:-3] + "/USD"
+            if canonical not in settings.crypto_universe:
+                canonical = broker_symbol  # unknown pair — keep broker form
+        else:
+            canonical = broker_symbol
+
+        asset_class = "crypto" if is_crypto_pos else "equity"
+        strategy_name = "crypto_momentum" if is_crypto_pos else "equity_momentum"
+
+        position = Position(
+            symbol=canonical,
+            asset_class=asset_class,
+            qty=qty,
+            entry_price=entry_price,
+            high_water_price=entry_price,
+            entry_time=datetime.now(UTC),
+            broker_order_id=None,
+            strategy_name=strategy_name,
+            stop_loss_price=round(entry_price * (1 - tier.stop_loss_pct), 8),
+            profit_target_price=round(entry_price * (1 + tier.profit_target_pct), 8),
+        )
+        save_position(position)
+        open_positions.append(position)
+        logger.warning(
+            "RECONCILED orphan broker position %s: qty=%.8f entry=%.6f "
+            "stop=%.6f target=%.6f strategy=%s",
+            canonical,
+            qty,
+            entry_price,
+            position.stop_loss_price,
+            position.profit_target_price,
+            strategy_name,
+        )
+
+
 # ── Main Cycle ─────────────────────────────────────────────────────────────
 
 
@@ -1277,20 +1358,6 @@ async def run_cycle() -> None:
     )
 
     try:
-        if settings.trading_pause:
-            _audit_event(
-                cycle_id,
-                "safety_check",
-                {
-                    "paused": True,
-                    "action": "halt",
-                    "reason": "TRADING_PAUSE enabled",
-                },
-            )
-            logger.warning("Cycle %s halted: TRADING_PAUSE enabled", cycle_id)
-            loop_status = "halted"
-            return
-
         # Morning brief: check DB cache first (avoids duplicate LLM calls
         # if cron fires multiple times before the first cycle finishes).
         cached_regime = get_daily_regime(today)
@@ -1309,7 +1376,7 @@ async def run_cycle() -> None:
             upsert_daily_stats(today, regime=regime)
             logger.info("Morning brief: regime=%s", regime)
 
-        # Account state
+        # Account state (needed for both exit and entry sizing)
         account = get_account(cycle_id)
         equity = float(account.get("equity", "0"))
         upsert_daily_stats(today, loop_runs=1, ending_equity=equity)
@@ -1324,6 +1391,46 @@ async def run_cycle() -> None:
         tier = get_tier_params(equity)
         daily_loss_limit = min(settings.max_daily_loss_pct, tier.daily_loss_limit)
 
+        broker_positions = get_positions(cycle_id)
+        recent_orders = get_recent_orders(cycle_id)
+
+        # Load positions
+        open_positions = load_open_positions()
+        open_option_positions = load_open_option_positions()
+
+        # Reconcile: import any broker positions not yet in our DB.
+        # Handles positions entered outside the current DB (manual orders,
+        # prior code version, DB migration) so the exit engine can see them.
+        _reconcile_broker_positions(open_positions, broker_positions, tier)
+
+        # Load trade memory (BM25 index for past reflections)
+        memory_entries = load_all_memories()
+        trade_memory = TradeMemory(memory_entries)
+        logger.info("Trade memory loaded: %d entries", trade_memory.size)
+
+        # Exit scan runs BEFORE the TRADING_PAUSE check.
+        # Open positions must always be monitored for stops and profit targets
+        # even when new entries are disabled.
+        if open_positions:
+            await _scan_exits(open_positions, equity, regime, trade_memory, cycle_id)
+        if open_option_positions:
+            await _scan_option_exits(open_option_positions, cycle_id)
+
+        # TRADING_PAUSE halts new entries only — exits already ran above.
+        if settings.trading_pause:
+            _audit_event(
+                cycle_id,
+                "safety_check",
+                {
+                    "paused": True,
+                    "action": "halt",
+                    "reason": "TRADING_PAUSE enabled",
+                },
+            )
+            logger.warning("Cycle %s: new entries halted — TRADING_PAUSE enabled", cycle_id)
+            loop_status = "halted"
+            return
+
         if daily_pnl <= -daily_loss_limit:
             _audit_event(
                 cycle_id,
@@ -1337,7 +1444,7 @@ async def run_cycle() -> None:
                 },
             )
             logger.warning(
-                "Cycle %s halted: daily loss %.2f%% exceeds limit %.2f%%",
+                "Cycle %s: new entries halted — daily loss %.2f%% exceeds limit %.2f%%",
                 cycle_id,
                 daily_pnl * 100,
                 daily_loss_limit * 100,
@@ -1357,27 +1464,9 @@ async def run_cycle() -> None:
             },
         )
 
-        broker_positions = get_positions(cycle_id)
-        recent_orders = get_recent_orders(cycle_id)
-
-        # Load positions
-        open_positions = load_open_positions()
-        open_option_positions = load_open_option_positions()
-
-        # Load trade memory (BM25 index for past reflections)
-        memory_entries = load_all_memories()
-        trade_memory = TradeMemory(memory_entries)
-        logger.info("Trade memory loaded: %d entries", trade_memory.size)
-
         # Entry scan (async — includes analyst committee)
         await _scan_entries(regime, account, open_positions, broker_positions, recent_orders, trade_memory, cycle_id)
         await _scan_option_entries(regime, account, open_option_positions, broker_positions, recent_orders, trade_memory, cycle_id)
-
-        # Exit scan (async — includes post-trade reflection)
-        if open_positions:
-            await _scan_exits(open_positions, equity, regime, trade_memory, cycle_id)
-        if open_option_positions:
-            await _scan_option_exits(open_option_positions, cycle_id)
 
         logger.info(
             "Cycle %s complete — equity=$%.2f, positions=%d, options=%d, regime=%s",
