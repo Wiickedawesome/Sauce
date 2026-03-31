@@ -58,10 +58,9 @@ class Settings(BaseSettings):
     trading_universe_crypto: str = Field(
         default=(
             "BTC/USD,ETH/USD,SOL/USD,LINK/USD,AVAX/USD,DOGE/USD,XRP/USD,"
-            "ADA/USD,DOT/USD,MATIC/USD,UNI/USD,AAVE/USD,SHIB/USD,LTC/USD,"
-            "BCH/USD,ALGO/USD,ATOM/USD,FIL/USD,NEAR/USD,APT/USD,"
-            "ARB/USD,OP/USD,MKR/USD,GRT/USD,RENDER/USD,INJ/USD,SUI/USD,"
-            "SEI/USD,PEPE/USD,FET/USD"
+            "ADA/USD,DOT/USD,UNI/USD,AAVE/USD,SHIB/USD,LTC/USD,"
+            "BCH/USD,FIL/USD,"
+            "ARB/USD,GRT/USD,RENDER/USD,PEPE/USD"
         ),
         description="Comma-separated Alpaca crypto pairs",
     )

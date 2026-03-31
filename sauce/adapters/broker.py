@@ -489,6 +489,13 @@ def place_order(order: Order, loop_id: str = "unset") -> dict[str, Any]:
         submitted = client.submit_order(order_data=order_request)
         result: dict[str, Any] = submitted.__dict__
 
+        # Ensure 'id' is present — Pydantic v2 model __dict__ may not
+        # include mapped attributes reliably across SDK versions.
+        if "id" not in result or result["id"] is None:
+            raw_id = getattr(submitted, "id", None)
+            if raw_id is not None:
+                result["id"] = raw_id
+
         log_event(
             AuditEvent(
                 loop_id=loop_id,
@@ -732,6 +739,13 @@ def place_option_order(
 
         submitted = client.submit_order(order_data=order_request)
         result: dict[str, Any] = submitted.__dict__
+
+        # Ensure 'id' is present — Pydantic v2 model __dict__ may not
+        # include mapped attributes reliably across SDK versions.
+        if "id" not in result or result["id"] is None:
+            raw_id = getattr(submitted, "id", None)
+            if raw_id is not None:
+                result["id"] = raw_id
 
         log_event(
             AuditEvent(

@@ -546,6 +546,8 @@ async def _scan_entries(
             if not signal.fired:
                 continue
 
+            upsert_daily_stats(today, signals_fired=1)
+
             # ── Analyst committee (2 LLM calls) ──
             situation_desc = build_situation_description(
                 symbol=instrument,
@@ -661,6 +663,17 @@ async def _scan_entries(
 
             # Skip orders below broker minimum ($10)
             if order_value < 10.0:
+                _audit_event(
+                    loop_id,
+                    "supervisor_decision",
+                    {
+                        "action": "abort",
+                        "reason": f"order value ${order_value:.2f} below $10 minimum",
+                        "rule": "min_order_value",
+                        "order_value": order_value,
+                    },
+                    symbol=instrument,
+                )
                 logger.info("Skipping %s: order value $%.2f below $10 minimum", instrument, order_value)
                 continue
 
@@ -682,6 +695,16 @@ async def _scan_entries(
 
             if not _should_persist_position(status, filled_qty):
                 pending_symbols.add(instrument)
+                _audit_event(
+                    loop_id,
+                    "supervisor_decision",
+                    {
+                        "action": "pending",
+                        "reason": f"order submitted but status={status or 'unknown'}, filled_qty={filled_qty:.4f}",
+                        "broker_order_id": str(broker_order_id) if broker_order_id else None,
+                    },
+                    symbol=instrument,
+                )
                 logger.info(
                     "Order for %s status=%s filled_qty=%.4f — not persisting position until broker reports a fill",
                     instrument,
@@ -752,6 +775,12 @@ async def _scan_entries(
 
         except BrokerError as exc:
             logger.error("Broker error for %s: %s", instrument, exc)
+            _audit_event(
+                loop_id,
+                "supervisor_decision",
+                {"action": "error", "stage": "entry_order", "reason": str(exc)[:500]},
+                symbol=instrument,
+            )
         except Exception as exc:
             logger.error("Unexpected error scanning %s: %s", instrument, exc)
             _audit_event(loop_id, "supervisor_decision", {"action": "error", "stage": "entry_scan", "reason": str(exc)}, symbol=instrument)
@@ -986,6 +1015,20 @@ async def _scan_exits(
 
     for position in open_positions:
         try:
+            # Skip positions that don't exist at broker (stale DB records).
+            # Use alias matching to handle slash differences (AAVE/USD vs AAVEUSD).
+            pos_aliases = set(_symbol_aliases(position.symbol))
+            broker_qty = None
+            for alias in pos_aliases:
+                if alias in broker_qty_map:
+                    broker_qty = broker_qty_map[alias]
+                    break
+            if broker_qty is not None and broker_qty <= 0:
+                logger.warning(
+                    "Broker reports 0 qty for %s, skipping exit scan", position.symbol
+                )
+                continue
+
             quote = exit_quotes_map.get(position.symbol)
             if quote is None:
                 continue
@@ -1036,7 +1079,7 @@ async def _scan_exits(
 
             # Use broker's actual qty (accounts for fees/rounding),
             # fall back to DB qty if broker lookup unavailable.
-            sell_qty = broker_qty_map.get(position.symbol.upper(), position.qty)
+            sell_qty = broker_qty if broker_qty is not None else position.qty
             if sell_qty <= 0:
                 logger.warning(
                     "Broker reports 0 qty for %s, skipping sell", position.symbol
@@ -1333,6 +1376,57 @@ def _reconcile_broker_positions(
         )
 
 
+def _reconcile_stale_positions(
+    open_positions: list[Position],
+    broker_positions: list[dict[str, object]],
+    loop_id: str,
+) -> None:
+    """Close DB positions that no longer exist at the broker.
+
+    Builds a set of broker-known symbols (with aliases for slash-free forms)
+    and closes any DB position whose symbol has no broker counterpart.
+    This prevents the exit scan from repeatedly trying to sell phantom positions.
+    """
+    # Build the set of symbols the broker actually holds.
+    broker_symbols: set[str] = set()
+    for bp in broker_positions:
+        sym = str(bp.get("symbol", "")).strip().upper()
+        if sym:
+            for alias in _symbol_aliases(sym):
+                broker_symbols.add(alias)
+
+    stale: list[Position] = []
+    for position in open_positions:
+        pos_aliases = set(_symbol_aliases(position.symbol))
+        if not pos_aliases.intersection(broker_symbols):
+            stale.append(position)
+
+    for position in stale:
+        close_position(position.id)
+        open_positions.remove(position)
+        logger.warning(
+            "RECONCILED stale DB position %s (id=%s): broker does not hold this symbol — "
+            "marking closed (qty=%.8f entry=%.6f)",
+            position.symbol,
+            position.id,
+            position.qty,
+            position.entry_price,
+        )
+        _audit_event(
+            loop_id,
+            "supervisor_decision",
+            {
+                "action": "broker_reconciliation",
+                "reason": "DB position not found at broker — closing stale record",
+                "symbol": position.symbol,
+                "position_id": position.id,
+                "qty": position.qty,
+                "entry_price": position.entry_price,
+            },
+            symbol=position.symbol,
+        )
+
+
 # ── Main Cycle ─────────────────────────────────────────────────────────────
 
 
@@ -1402,6 +1496,10 @@ async def run_cycle() -> None:
         # Handles positions entered outside the current DB (manual orders,
         # prior code version, DB migration) so the exit engine can see them.
         _reconcile_broker_positions(open_positions, broker_positions, tier)
+
+        # Reverse reconciliation: close DB positions that no longer exist at broker.
+        # Prevents phantom sell attempts and false position-count inflation.
+        _reconcile_stale_positions(open_positions, broker_positions, cycle_id)
 
         # Load trade memory (BM25 index for past reflections)
         memory_entries = load_all_memories()
