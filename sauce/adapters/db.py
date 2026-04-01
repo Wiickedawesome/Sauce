@@ -1,14 +1,19 @@
 """
-adapters/db.py — SQLite adapter via SQLAlchemy.
+adapters/db.py — Database adapter supporting SQLite and PostgreSQL (Supabase).
 
 Provides the shared ORM Base, engine factory, session factory, and audit
 logging used by both the trading engine (sauce/db.py) and adapters.
+
+Database Selection:
+- If SUPABASE_DB_URL is set → PostgreSQL via Supabase
+- Otherwise → SQLite fallback at DB_PATH
 
 Rules:
 - ALL writes to audit_events are append-only. No UPDATE or DELETE — ever.
 - Every broker and LLM action must call log_event() before and after.
 - get_engine() is the single source of the DB connection.
-- Tables are created automatically on first run (create_all).
+- Tables are created automatically on first run (create_all) for SQLite only.
+  For PostgreSQL/Supabase, run migrations via `supabase db push`.
 """
 
 import json
@@ -26,14 +31,33 @@ from sauce.core.schemas import AuditEvent
 logger = logging.getLogger(__name__)
 
 
-def _default_db_path() -> str:
-    """Resolve the DB path from settings (config / env var), not a hardcoded string."""
+def _get_db_config() -> tuple[str, bool]:
+    """
+    Determine database URL and type from settings.
+
+    Returns:
+        (db_url, is_postgres): URL string and True if PostgreSQL, False if SQLite
+    """
     try:
         from sauce.core.config import get_settings
 
-        return str(get_settings().db_path)
+        settings = get_settings()
+        if settings.use_supabase and settings.supabase_db_url:
+            return settings.supabase_db_url, True
+        return f"sqlite:///{settings.db_path}", False
     except Exception:  # noqa: BLE001 — during early init or test isolation
-        return os.environ.get("DB_PATH", "data/sauce.db")
+        # Fallback to env vars for test isolation
+        supabase_url = os.environ.get("SUPABASE_DB_URL", "")
+        if supabase_url:
+            return supabase_url, True
+        db_path = os.environ.get("DB_PATH", "data/sauce.db")
+        return f"sqlite:///{db_path}", False
+
+
+def _default_db_url() -> str:
+    """Resolve the DB URL from settings."""
+    url, _ = _get_db_config()
+    return url
 
 
 # ── ORM Base ──────────────────────────────────────────────────────────────────
@@ -62,51 +86,76 @@ class AuditEventRow(Base):
 
 # ── Engine Factory ────────────────────────────────────────────────────────────
 
-# Cache engines keyed by db_path so tests can use isolated DBs without the
+# Cache engines keyed by db_url so tests can use isolated DBs without the
 # singleton silently returning the first-call engine (Finding 7.4).
 _engines: dict[str, Engine] = {}
 
 
-def get_engine(db_path: str | None = None) -> Engine:
+def get_engine(db_url: str | None = None) -> Engine:
     """
-    Return the cached SQLAlchemy engine for db_path, creating it on first call.
+    Return the cached SQLAlchemy engine for db_url, creating it on first call.
 
-    Each distinct db_path gets its own engine so that test DBs are fully isolated
+    Supports both SQLite and PostgreSQL:
+    - SQLite: sqlite:///path/to/db.db
+    - PostgreSQL: postgresql://user:pass@host:port/dbname
+
+    Each distinct db_url gets its own engine so that test DBs are fully isolated
     from the production DB even within the same process (Finding 7.4).
     """
-    if db_path is None:
-        db_path = _default_db_path()
+    if db_url is None:
+        db_url = _default_db_url()
+
     global _engines
-    if db_path not in _engines:
-        # Ensure parent directory exists
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        url = f"sqlite:///{db_path}"
-        engine = create_engine(
-            url,
-            connect_args={"check_same_thread": False, "timeout": 30},
-            echo=False,
-        )
-        # Enable WAL mode for concurrent read safety (consistent with memory/db.py).
-        with engine.connect() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL"))
-            conn.commit()
-        Base.metadata.create_all(engine)
-        _engines[db_path] = engine
-    return _engines[db_path]
+    if db_url not in _engines:
+        is_postgres = db_url.startswith("postgresql")
+
+        if is_postgres:
+            # PostgreSQL via Supabase
+            engine = create_engine(
+                db_url,
+                pool_pre_ping=True,  # Check connection health before use
+                pool_size=5,
+                max_overflow=10,
+                pool_recycle=300,  # Recycle connections after 5 minutes
+                echo=False,
+            )
+            logger.info("Connected to PostgreSQL (Supabase)")
+            # Tables should be created via migrations for PostgreSQL
+        else:
+            # SQLite fallback
+            # Extract path from sqlite:/// URL
+            db_path = db_url.replace("sqlite:///", "")
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+            engine = create_engine(
+                db_url,
+                connect_args={"check_same_thread": False, "timeout": 30},
+                echo=False,
+            )
+            # Enable WAL mode for concurrent read safety (consistent with memory/db.py).
+            with engine.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL"))
+                conn.commit()
+            # Auto-create tables for SQLite (dev/test environments)
+            Base.metadata.create_all(engine)
+            logger.info("Connected to SQLite at %s", db_path)
+
+        _engines[db_url] = engine
+    return _engines[db_url]
 
 
-# Cache session factories keyed by db_path (consistent with memory/db.py).
+# Cache session factories keyed by db_url (consistent with memory/db.py).
 _session_factories: dict[str, sessionmaker[Session]] = {}
 
 
-def get_session(db_path: str | None = None) -> Session:
+def get_session(db_url: str | None = None) -> Session:
     """Return a new SQLAlchemy session. Caller is responsible for closing it."""
-    if db_path is None:
-        db_path = _default_db_path()
-    if db_path not in _session_factories:
-        engine = get_engine(db_path)
-        _session_factories[db_path] = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-    return _session_factories[db_path]()
+    if db_url is None:
+        db_url = _default_db_url()
+    if db_url not in _session_factories:
+        engine = get_engine(db_url)
+        _session_factories[db_url] = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    return _session_factories[db_url]()
 
 
 def cleanup_engines() -> None:
@@ -120,14 +169,14 @@ def cleanup_engines() -> None:
 # ── Public Write Helpers ──────────────────────────────────────────────────────
 
 
-def log_event(event: AuditEvent, db_path: str | None = None) -> None:
+def log_event(event: AuditEvent, db_url: str | None = None) -> None:
     """
     Append an AuditEvent to the audit_events table.
 
     This is the primary write path for every agent, adapter, and safety check.
     Never raises — on DB error, prints to stderr to avoid masking the original error.
     """
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = AuditEventRow(
             loop_id=event.loop_id,

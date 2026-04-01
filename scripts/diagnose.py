@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-scripts/diagnose.py — Query sauce.db for current system health state.
+scripts/diagnose.py — Query database for current system health state.
 
-Run locally:    python scripts/diagnose.py
-Run on VPS:     docker exec sauce /app/.venv/bin/python scripts/diagnose.py
+Usage: python scripts/diagnose.py
 """
 
 import sys
@@ -20,12 +19,12 @@ from sauce.core.config import get_settings
 
 def run() -> None:
     settings = get_settings()
-    db_path = str(settings.db_path)
-    session = get_session(db_path)
+    session = get_session()
 
+    db_type = "Supabase (PostgreSQL)" if settings.use_supabase else f"SQLite ({settings.db_path})"
     print("=" * 70)
     print("SAUCE SYSTEM DIAGNOSTIC")
-    print(f"DB: {db_path}")
+    print(f"DB: {db_type}")
     print("=" * 70)
 
     # ── 1. Pause state ────────────────────────────────────────────────────────
@@ -38,12 +37,12 @@ def run() -> None:
 
     row = session.execute(
         text(
-            "SELECT json_extract(payload, '$.reason'), "
-            "       json_extract(payload, '$.action'), "
+            "SELECT payload->>'reason', "
+            "       payload->>'action', "
             "       timestamp "
             "FROM audit_events "
             "WHERE event_type = 'safety_check' "
-            "AND json_extract(payload, '$.action') = 'halt' "
+            "AND payload->>'action' = 'halt' "
             "ORDER BY timestamp DESC LIMIT 1"
         )
     ).fetchone()
@@ -95,8 +94,8 @@ def run() -> None:
     rows = session.execute(
         text(
             "SELECT timestamp, "
-            "       json_extract(payload, '$.action'), "
-            "       json_extract(payload, '$.reason') "
+            "       payload->>'action', "
+            "       payload->>'reason' "
             "FROM audit_events "
             "WHERE event_type = 'supervisor_decision' "
             "ORDER BY timestamp DESC LIMIT 10"
@@ -112,8 +111,8 @@ def run() -> None:
     rows = session.execute(
         text(
             "SELECT timestamp, symbol, "
-            "       json_extract(payload, '$.stage'), "
-            "       json_extract(payload, '$.error') "
+            "       payload->>'stage', "
+            "       payload->>'error' "
             "FROM audit_events "
             "WHERE event_type = 'error' "
             "ORDER BY timestamp DESC LIMIT 10"
@@ -145,7 +144,7 @@ def run() -> None:
     print("\n[LAST 5 LOOP RUNS]")
     rows = session.execute(
         text(
-            "SELECT s.loop_id, s.timestamp, e.timestamp, json_extract(e.payload, '$.status') "
+            "SELECT s.loop_id, s.timestamp, e.timestamp, e.payload->>'status' "
             "FROM audit_events s "
             "LEFT JOIN audit_events e "
             "  ON e.loop_id = s.loop_id AND e.event_type = 'loop_end' "

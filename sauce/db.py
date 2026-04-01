@@ -189,9 +189,9 @@ class OptionsTradeRow(Base):
 # ── Signal Persistence ────────────────────────────────────────────────────────
 
 
-def log_signal(signal: SignalResult, db_path: str | None = None) -> None:
+def log_signal(signal: SignalResult, db_url: str | None = None) -> None:
     """Append a signal scoring result. Never raises."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = SignalLogRow(
             symbol=signal.symbol,
@@ -219,9 +219,9 @@ def log_signal(signal: SignalResult, db_path: str | None = None) -> None:
 # ── Position Persistence ──────────────────────────────────────────────────────
 
 
-def save_position(position: Position, db_path: str | None = None) -> None:
+def save_position(position: Position, db_url: str | None = None) -> None:
     """Insert a new open position."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = PositionRow(
             position_id=position.id,
@@ -248,9 +248,9 @@ def save_position(position: Position, db_path: str | None = None) -> None:
         session.close()
 
 
-def update_position(position: Position, db_path: str | None = None) -> None:
+def update_position(position: Position, db_url: str | None = None) -> None:
     """Update mutable state for an open position."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(PositionRow).filter_by(position_id=position.id, status="open").first()
         if row is None:
@@ -272,9 +272,9 @@ def update_position(position: Position, db_path: str | None = None) -> None:
         session.close()
 
 
-def close_position(position_id: str, db_path: str | None = None) -> None:
+def close_position(position_id: str, db_url: str | None = None) -> None:
     """Mark a position as closed."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(PositionRow).filter_by(position_id=position_id, status="open").first()
         if row is None:
@@ -288,9 +288,9 @@ def close_position(position_id: str, db_path: str | None = None) -> None:
         session.close()
 
 
-def load_open_positions(db_path: str | None = None) -> list[Position]:
+def load_open_positions(db_url: str | None = None) -> list[Position]:
     """Load all open positions from DB into Position dataclasses."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         rows = session.query(PositionRow).filter_by(status="open").all()
         return [
@@ -315,9 +315,9 @@ def load_open_positions(db_path: str | None = None) -> list[Position]:
         session.close()
 
 
-def save_option_position(position: OptionsPosition, db_path: str | None = None) -> None:
+def save_option_position(position: OptionsPosition, db_url: str | None = None) -> None:
     """Insert a new open options position."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = OptionsPositionRow(
             position_id=position.position_id,
@@ -345,9 +345,9 @@ def save_option_position(position: OptionsPosition, db_path: str | None = None) 
         session.close()
 
 
-def update_option_position(position: OptionsPosition, db_path: str | None = None) -> None:
+def update_option_position(position: OptionsPosition, db_url: str | None = None) -> None:
     """Update the tracked high-water mark or exits for an open options position."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(OptionsPositionRow).filter_by(position_id=position.position_id, status="open").first()
         if row is None:
@@ -365,9 +365,9 @@ def update_option_position(position: OptionsPosition, db_path: str | None = None
         session.close()
 
 
-def close_option_position(position_id: str, db_path: str | None = None) -> None:
+def close_option_position(position_id: str, db_url: str | None = None) -> None:
     """Mark an options position as closed."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(OptionsPositionRow).filter_by(position_id=position_id, status="open").first()
         if row is None:
@@ -381,9 +381,9 @@ def close_option_position(position_id: str, db_path: str | None = None) -> None:
         session.close()
 
 
-def load_open_option_positions(db_path: str | None = None) -> list[OptionsPosition]:
+def load_open_option_positions(db_url: str | None = None) -> list[OptionsPosition]:
     """Load all open options positions from DB."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         rows = session.query(OptionsPositionRow).filter_by(status="open").all()
         return [
@@ -414,7 +414,7 @@ def log_option_trade(
     exit_price: float,
     exit_trigger: str,
     exit_time: datetime | None = None,
-    db_path: str | None = None,
+    db_url: str | None = None,
 ) -> None:
     """Record a completed options trade."""
     if exit_time is None:
@@ -423,7 +423,7 @@ def log_option_trade(
     hold_hours = (exit_time - position.entry_time).total_seconds() / 3600
     realized_pnl = (exit_price - position.entry_price) * position.qty * 100
 
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = OptionsTradeRow(
             trade_id=position.position_id,
@@ -458,7 +458,7 @@ def log_trade(
     exit_price: float,
     exit_trigger: str,
     exit_time: datetime | None = None,
-    db_path: str | None = None,
+    db_url: str | None = None,
 ) -> None:
     """Record a completed trade. Append-only."""
     if exit_time is None:
@@ -467,7 +467,7 @@ def log_trade(
     hold_hours = (exit_time - position.entry_time).total_seconds() / 3600
     realized_pnl = (exit_price - position.entry_price) * position.qty
 
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = TradeRow(
             trade_id=position.id,
@@ -498,11 +498,11 @@ def log_trade(
 
 def upsert_daily_stats(
     date: str,
-    db_path: str | None = None,
+    db_url: str | None = None,
     **fields: object,
 ) -> None:
     """Insert or update daily stats. Additive counters accumulate."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         existing = session.query(DailySummaryRow).filter_by(date=date).first()
         if existing is None:
@@ -538,9 +538,9 @@ def upsert_daily_stats(
         session.close()
 
 
-def get_daily_pnl(date: str, db_path: str | None = None) -> float:
+def get_daily_pnl(date: str, db_url: str | None = None) -> float:
     """Return today's realized P&L in USD."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(DailySummaryRow).filter_by(date=date).first()
         if row is None:
@@ -550,12 +550,12 @@ def get_daily_pnl(date: str, db_path: str | None = None) -> float:
         session.close()
 
 
-def get_daily_regime(date: str, db_path: str | None = None) -> str | None:
+def get_daily_regime(date: str, db_url: str | None = None) -> str | None:
     """Return the regime cached in daily_summary for the given date, or None.
 
     Returns None only when no cycle has run today yet (no row or loop_runs == 0).
     """
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(DailySummaryRow).filter_by(date=date).first()
         if row is None or (row.loop_runs or 0) == 0:
@@ -575,10 +575,10 @@ def upsert_instrument_meta(
     last_signal_score: int | None = None,
     last_signal_time: datetime | None = None,
     extra: dict[str, Any] | None = None,
-    db_path: str | None = None,
+    db_url: str | None = None,
 ) -> None:
     """Insert or update instrument metadata."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(InstrumentMetaRow).filter_by(symbol=symbol).first()
         if row is None:
@@ -600,9 +600,9 @@ def upsert_instrument_meta(
         session.close()
 
 
-def load_instrument_meta_extra(symbol: str, db_path: str | None = None) -> dict[str, Any]:
+def load_instrument_meta_extra(symbol: str, db_url: str | None = None) -> dict[str, Any]:
     """Load the JSON extra payload for an instrument, if present."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(InstrumentMetaRow).filter_by(symbol=symbol).first()
         if row is None or not row.extra:
@@ -621,10 +621,10 @@ def merge_instrument_meta_extra(
     symbol: str,
     asset_class: str,
     extra_updates: dict[str, Any],
-    db_path: str | None = None,
+    db_url: str | None = None,
 ) -> None:
     """Merge JSON metadata into instrument_meta.extra without losing existing keys."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = session.query(InstrumentMetaRow).filter_by(symbol=symbol).first()
         if row is None:
@@ -656,9 +656,9 @@ def merge_instrument_meta_extra(
 # ── Trade Memory ──────────────────────────────────────────────────────────────
 
 
-def save_memory(entry: MemoryEntry, db_path: str | None = None) -> None:
+def save_memory(entry: MemoryEntry, db_url: str | None = None) -> None:
     """Append a trade reflection to the memories table. Never raises."""
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         row = TradeMemoryRow(
             situation=entry.situation,
@@ -675,11 +675,11 @@ def save_memory(entry: MemoryEntry, db_path: str | None = None) -> None:
         session.close()
 
 
-def load_all_memories(db_path: str | None = None) -> list[MemoryEntry]:
+def load_all_memories(db_url: str | None = None) -> list[MemoryEntry]:
     """Load all trade memories from the DB for BM25 index construction."""
     from sauce.memory import MemoryEntry
 
-    session = get_session(db_path)
+    session = get_session(db_url)
     try:
         rows = session.query(TradeMemoryRow).order_by(TradeMemoryRow.id).all()
         return [

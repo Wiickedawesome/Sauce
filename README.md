@@ -9,8 +9,7 @@
 ![Python](https://img.shields.io/badge/Python-3.13-3776ab?style=flat-square&logo=python&logoColor=white)
 ![Broker](https://img.shields.io/badge/Broker-Alpaca-ffde57?style=flat-square&logoColor=black)
 ![LLM](https://img.shields.io/badge/LLM-Claude-cc785c?style=flat-square)
-![DB](https://img.shields.io/badge/Database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)
-![Docker](https://img.shields.io/badge/Deploy-Docker-2496ed?style=flat-square&logo=docker&logoColor=white)
+![DB](https://img.shields.io/badge/Database-Supabase-3ecf8e?style=flat-square&logo=supabase&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPLv3-22c55e?style=flat-square)
 ![Tests](https://img.shields.io/badge/Tests-168%20passed-22c55e?style=flat-square)
 ![Paper](https://img.shields.io/badge/Mode-Paper%20First-f59e0b?style=flat-square)
@@ -21,7 +20,7 @@
 
 ---
 
-Sauce is an autonomous trading system that runs on a VPS on a cron cadence. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities and crypto, and SQLite for trade logging and audit. No machine learning. No training.
+Sauce is an autonomous trading system. It uses Claude (via the Anthropic API) as the reasoning engine, Alpaca as the broker for US equities and crypto, and Supabase PostgreSQL for trade logging and audit. No machine learning. No training.
 
 ---
 
@@ -81,8 +80,7 @@ sauce/
     core.py            RSI, MACD, BB, ATR, VWAP, SMA, Stochastic, vol ratio
 
 tests/                 168 tests, zero real API calls
-scripts/               Cron entry, health checks, diagnostics
-docker/                Dockerfile + docker-compose.yml
+scripts/               Health checks, diagnostics
 docs/                  Deployment guide, indicator reference
 ```
 
@@ -90,7 +88,7 @@ docs/                  Deployment guide, indicator reference
 
 ## Setup
 
-**Requirements:** Python 3.13, Docker
+**Requirements:** Python 3.13, Supabase CLI
 
 ```bash
 # Clone
@@ -105,6 +103,7 @@ pip install -e ".[dev]"
 # Secrets
 cp .env.example .env
 # Fill in ALPACA_API_KEY, ALPACA_SECRET_KEY, ANTHROPIC_API_KEY
+# Set DATABASE_URL to your Supabase connection string
 ```
 
 ---
@@ -152,18 +151,15 @@ mypy sauce/
 
 ## Deployment
 
+Sauce uses Supabase PostgreSQL for production. See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
+
 ```bash
-# On the VPS
-cd docker
-docker compose up -d --build
-docker compose logs -f
+# Run one loop cycle
+python -m sauce.loop
 
 # Emergency pause (no restart needed)
 # Edit .env: TRADING_PAUSE=true
-docker compose restart
 ```
-
-See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 
 ---
 
@@ -172,7 +168,7 @@ See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 | Doc | Description |
 |---|---|
 | [Indicators](docs/indicators.md) | Technical indicator library reference |
-| [Deployment](docs/deployment.md) | Docker setup, environment variables, operations |
+| [Deployment](docs/deployment.md) | Supabase setup, environment variables, operations |
 
 ---
 
@@ -180,7 +176,7 @@ See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 
 [GNU General Public License v3.0](LICENSE)
 
-The container runs cron as PID 1. `run_loop.sh` fires every 15 minutes, activates the venv, and executes `python -m sauce.core.loop`. All output is written to `data/logs/cron.log`, which is on the host-mounted volume and survives container restarts.
+
 
 ---
 
@@ -198,10 +194,10 @@ Every loop run passes through a layered set of guards before any order can reach
 7. Price deviation check       -- execution aborts if the live quote drifted since signal
 8. Supervisor preflight        -- final veto before broker.place_order()
 ```
-No order reaches `broker.place_order()` without passing all eight layers. Loop boundaries, safety checks, broker actions, and supervisor decisions are written to append-only SQLite audit events.
+No order reaches `broker.place_order()` without passing all eight layers. Loop boundaries, safety checks, broker actions, and supervisor decisions are written to append-only PostgreSQL audit events.
 
 Options trading is integrated into `sauce.loop`, including contract selection, order submission, local position persistence, and exit scanning. It still defaults to `false` so options remain an explicit opt-in.
-No order reaches `broker.place_order()` without passing all eight layers. Every layer writes an `AuditEvent` to SQLite before and after. The audit table is append-only — no `UPDATE` or `DELETE` is ever issued.
+No order reaches `broker.place_order()` without passing all eight layers. Every layer writes an `AuditEvent` to PostgreSQL before and after. The audit table is append-only — no `UPDATE` or `DELETE` is ever issued.
 
 ---
 

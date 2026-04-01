@@ -309,7 +309,32 @@ class Settings(BaseSettings):
     )
 
     # ── Database ──────────────────────────────────────────────────────────────
+    # SQLite fallback (local development)
     db_path: str = Field(default="data/sauce.db")
+
+    # Supabase PostgreSQL (production)
+    supabase_url: str = Field(
+        default="",
+        description="Supabase project URL (e.g., https://xxx.supabase.co). "
+        "If empty, falls back to SQLite at db_path.",
+    )
+    supabase_service_role_key: str = Field(
+        default="",
+        repr=False,
+        description="Supabase service role key (bypasses RLS). Required for DB writes.",
+    )
+    supabase_db_url: str = Field(
+        default="",
+        repr=False,
+        description="Direct PostgreSQL connection URL for SQLAlchemy. "
+        "Format: postgresql://user:pass@host:port/dbname. "
+        "Use pooler URL (port 6543) for serverless deployments.",
+    )
+
+    @property
+    def use_supabase(self) -> bool:
+        """True if Supabase is configured (all required fields present)."""
+        return bool(self.supabase_url and self.supabase_db_url)
 
     # ── Prompt Versioning ─────────────────────────────────────────────────────
     prompt_version: str = Field(default="v1")

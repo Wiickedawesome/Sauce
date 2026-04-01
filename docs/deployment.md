@@ -1,84 +1,87 @@
 # Deployment
 
-Sauce is deployed as a Docker container on a VPS (Contabo / DigitalOcean / any Linux host),
-running on a configurable cron schedule. Pushes to `main` auto-deploy via GitHub Actions.
+Sauce uses **Supabase** (PostgreSQL) for persistent storage. The trading loop runs locally
+or can be scheduled via cron/systemd on any machine with Python 3.13+.
 
 ---
 
 ## Prerequisites
 
-- Docker and Docker Compose
+- Python 3.13+
 - Alpaca account (paper or live)
 - Anthropic API key
-- A VPS or local machine with persistent storage
+- Supabase project (free tier works)
 
 ---
 
-## Quick Start (fresh server)
+## Quick Start
+
+### 1. Create Supabase Project
+
+1. Go to [supabase.com](https://supabase.com) → New Project
+2. Note your project reference ID (e.g., `gomtjyldzaelbhqboons`)
+3. Get credentials from **Settings → API**:
+   - `SUPABASE_URL` — Project URL
+   - `SUPABASE_SERVICE_ROLE_KEY` — Service role key (keep secret!)
+4. Get database URL from **Settings → Database → Connection string (URI)**
+
+### 2. Deploy Database Schema
 
 ```bash
-# 1. Bootstrap the VPS (run from your LOCAL machine)
-ssh root@YOUR_VPS_IP 'bash -s' < scripts/bootstrap_server.sh
+# Install Supabase CLI (if needed)
+brew install supabase/tap/supabase  # macOS
+# or: npm install -g supabase
 
-# 2. Copy your .env to the server
-scp .env root@YOUR_VPS_IP:/root/Sauce/.env
+# Link to your project
+supabase link --project-ref YOUR_PROJECT_REF
 
-# 3. Set GitHub repo secrets (Settings → Secrets → Actions):
-#    VPS_HOST     = your server IP
-#    VPS_USER     = root
-#    VPS_SSH_KEY  = the private key printed by bootstrap
-#    VPS_APP_PATH = /root/Sauce
-
-# 4. Push to main — GitHub Actions builds, deploys, and verifies.
-git push origin main
+# Push migrations
+supabase db push
 ```
 
-### Manual start (without CI/CD)
+### 3. Configure Environment
 
 ```bash
-ssh root@YOUR_VPS_IP
-cd /root/Sauce
-cp .env.example .env   # edit with your API keys
-docker compose -f docker/docker-compose.yml up -d --build
-docker compose -f docker/docker-compose.yml logs -f
+cp .env.example .env
+# Edit .env with your credentials:
+#   ALPACA_API_KEY, ALPACA_SECRET_KEY
+#   ANTHROPIC_API_KEY
+#   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_DB_URL
+```
+
+### 4. Install & Run
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Run once
+python -m sauce.loop
+
+# Or schedule via cron (every 15 min)
+# */15 * * * * cd /path/to/Sauce && .venv/bin/python -m sauce.loop >> data/logs/cron.log 2>&1
 ```
 
 ---
 
-## CI/CD Pipeline
+## Database Schema
 
-Every push to `main` triggers `.github/workflows/deploy.yml`:
+Tables are defined in `supabase/migrations/`:
 
-1. **Test** — runs `pytest` on GitHub-hosted runner
-2. **Deploy** — SSHes to VPS, `git pull`, `docker compose up --build -d`, prune old images
-3. **Verify** — SSHes in to confirm container is `running`
+| Table | Purpose |
+|-------|---------|
+| `trades` | Completed trades with P&L |
+| `positions` | Open positions |
+| `signal_log` | Every scoring result (auto-purged after 90 days) |
+| `daily_summary` | Daily aggregates |
+| `instrument_meta` | Per-instrument config/regime cache |
+| `trade_memories` | BM25 trade reflections |
+| `options_positions` | Open options positions |
+| `options_trades` | Completed options trades |
+| `audit_events` | System events (auto-purged after 90 days) |
 
-A separate **Monitor** workflow (`.github/workflows/monitor.yml`) runs every 2 hours
-and triggers a GitHub notification if the container is down or the loop is stale.
-
-### Required secrets
-
-| Secret | Example | Description |
-|---|---|---|
-| `VPS_HOST` | `123.45.67.89` | Server IP or hostname |
-| `VPS_USER` | `root` | SSH user |
-| `VPS_SSH_KEY` | (PEM content) | Deploy private key |
-| `VPS_APP_PATH` | `/root/Sauce` | Absolute path to repo on server |
-
----
-
-## Docker Architecture
-
-```
-docker/
-├── Dockerfile           Python 3.13-slim + cron, UTC timezone
-└── docker-compose.yml   Service definition, volume mounts
-```
-
-- `.env` is mounted **read-only** — secrets never bake into the image
-- `./data` is mounted **read-write** — SQLite DB and logs survive restarts
-- Cron fires every 15 minutes via `scripts/run_loop.sh`
-- Container restarts automatically (`restart: unless-stopped`)
+Helpful views: `v_today_signals`, `v_open_positions`, `v_recent_trades`, `v_strategy_performance`
 
 ---
 
@@ -91,59 +94,99 @@ docker/
 | `ALPACA_PAPER` | No | `true` | Set `false` for live trading |
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic API key |
 | `LLM_MODEL` | No | `claude-sonnet-4-6` | Anthropic model name |
-| `OPTIONS_ENABLED` | No | `false` | Enable the integrated options pipeline explicitly |
+| `SUPABASE_URL` | No | — | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | No | — | Supabase service role key |
+| `SUPABASE_DB_URL` | No | — | PostgreSQL connection string |
+| `OPTIONS_ENABLED` | No | `false` | Enable options trading |
 | `TRADING_PAUSE` | No | `false` | Emergency kill switch |
-| `DB_PATH` | No | `data/sauce.db` | SQLite database path |
 
-See `sauce/core/config.py` for the complete list of configuration options.
+**Note:** If `SUPABASE_*` variables are not set, Sauce falls back to local SQLite (`data/sauce.db`).
+
+See `sauce/core/config.py` for the complete list.
 
 ---
 
 ## Operations
 
 ```bash
-# Tail live logs (via SSH)
-ssh root@YOUR_VPS_IP "docker compose -f /root/Sauce/docker/docker-compose.yml logs -f"
+# Run diagnostics
+python scripts/diagnose.py
 
-# Emergency pause (no restart needed)
-# Edit .env on server: TRADING_PAUSE=true
-ssh root@YOUR_VPS_IP "docker compose -f /root/Sauce/docker/docker-compose.yml restart"
+# Query Supabase directly
+supabase db query "SELECT COUNT(*) FROM signal_log"
 
-# Health check
-ssh root@YOUR_VPS_IP "docker exec sauce /app/.venv/bin/python scripts/docker_healthcheck.py"
+# View recent signals
+supabase db query "SELECT * FROM v_today_signals LIMIT 10"
 
-# Diagnostics
-ssh root@YOUR_VPS_IP "docker exec sauce /app/.venv/bin/python scripts/diagnose.py"
+# Check open positions
+supabase db query "SELECT * FROM v_open_positions"
+
+# Emergency pause — edit .env
+TRADING_PAUSE=true
 ```
 
 ---
 
-## Migration between providers
+## Data Retention
 
-To move to a new VPS:
-1. Run `scripts/bootstrap_server.sh` on the new server
-2. Copy `.env` and `data/` directory (SQLite DBs + logs) to the new server
-3. Update GitHub secrets (`VPS_HOST`) to point to new IP
-4. Push to `main` — auto-deploys to the new server
+Signal logs and audit events are automatically purged after 90 days via the
+`purge_old_records()` PostgreSQL function. Run manually if needed:
+
+```sql
+SELECT purge_old_records();
+```
+
+---
+
+## Local Development
+
+For local development without Supabase, simply omit the `SUPABASE_*` variables.
+Sauce will use SQLite at `data/sauce.db`.
 
 ```bash
-# Copy data from old server to new
-scp -r root@OLD_IP:/root/Sauce/data root@NEW_IP:/root/Sauce/data
-scp root@OLD_IP:/root/Sauce/.env root@NEW_IP:/root/Sauce/.env
+# Run tests
+pytest
+
+# Type check
+mypy sauce/
+
+# Lint
+ruff check sauce/
 ```
 
 ---
 
-## Cron Environment
+## Backup & Recovery
 
-Cron doesn't inherit container environment variables. The Dockerfile handles this by:
-1. Dumping whitelisted env vars to `/etc/environment.sauce` at container start
-2. `run_loop.sh` sources this file before running Python
+### Export data from Supabase
 
-This ensures API keys and configuration reach the trading loop.
+```bash
+# Dump entire database
+pg_dump "$SUPABASE_DB_URL" > backup.sql
+
+# Export specific tables
+supabase db query "SELECT * FROM trades" --csv > trades.csv
+```
+
+### Restore to new project
+
+```bash
+# Create new Supabase project, then:
+supabase link --project-ref NEW_PROJECT_REF
+supabase db push
+psql "$NEW_SUPABASE_DB_URL" < backup.sql
+```
 
 ---
 
-## Data Persistence
+## Scheduling
 
-The SQLite database (`data/sauce.db`) and logs (`data/logs/`) are stored on a Docker volume mapped to the host. Database backups are timestamped in the `data/` directory.
+Sauce can run via systemd timer, cron, or any scheduler:
+
+```bash
+# cron example (every 15 min during market hours)
+# 30,45 9 * * 1-5 cd /path/to/Sauce && .venv/bin/python -m sauce.loop >> data/logs/cron.log 2>&1
+# */15 10-15 * * 1-5 cd /path/to/Sauce && .venv/bin/python -m sauce.loop >> data/logs/cron.log 2>&1
+```
+
+The loop handles market hours internally, so running outside hours is safe (it exits early).
