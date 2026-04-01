@@ -19,7 +19,16 @@ set -euo pipefail
 APP_PATH="${VPS_APP_PATH:-/root/Sauce}"
 CONTAINER_NAME="sauce"
 LOG_FILE="${APP_PATH}/data/logs/cron.log"
-LOG_STALE_MINUTES=70   # 2 × 30-min cron cycles + 10-min grace
+
+DEFAULT_LOOP_INTERVAL_MINUTES=5
+LOOP_INTERVAL="${LOOP_INTERVAL_MINUTES:-}"
+if [[ -z "${LOOP_INTERVAL}" && -f "${APP_PATH}/.env" ]]; then
+  LOOP_INTERVAL=$(awk -F= '/^LOOP_INTERVAL_MINUTES=/{print $2; exit}' "${APP_PATH}/.env" | tr -d '[:space:]')
+fi
+if [[ ! "${LOOP_INTERVAL}" =~ ^[0-9]+$ ]]; then
+  LOOP_INTERVAL="${DEFAULT_LOOP_INTERVAL_MINUTES}"
+fi
+LOG_STALE_MINUTES=$(( LOOP_INTERVAL * 2 + 10 ))  # 2 cycles + 10-min grace
 
 FAIL=0
 

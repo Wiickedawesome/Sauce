@@ -334,7 +334,11 @@ def _crypto_history(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
 # ── get_universe_snapshot ─────────────────────────────────────────────────────
 
 
-def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
+def get_universe_snapshot(
+    symbols: list[str],
+    *,
+    respect_suppression: bool = True,
+) -> dict[str, PriceReference]:
     """
     Fetch latest quotes for a batch of symbols in one API call (where possible).
 
@@ -346,7 +350,11 @@ def get_universe_snapshot(symbols: list[str]) -> dict[str, PriceReference]:
     """
     settings = get_settings()
     now = datetime.now(UTC)
-    active_symbols = [s for s in symbols if not _is_snapshot_suppressed(s, now)]
+    active_symbols = (
+        [s for s in symbols if not _is_snapshot_suppressed(s, now)]
+        if respect_suppression
+        else list(symbols)
+    )
 
     if not active_symbols:
         logger.info("All %d requested symbols are temporarily suppressed from snapshot retries", len(symbols))

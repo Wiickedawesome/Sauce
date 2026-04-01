@@ -40,6 +40,19 @@ class AnalystVerdict:
     bull_case: str
     bear_case: str
     reasoning: str
+    size_fraction: float = 0.0  # 0.0–1.0 fraction of the planned tranche to deploy
+
+    def __post_init__(self) -> None:
+        try:
+            normalized_size = float(self.size_fraction)
+        except (TypeError, ValueError):
+            normalized_size = 0.0
+        normalized_size = max(0.0, min(1.0, normalized_size))
+        if not self.approve:
+            normalized_size = 0.0
+        elif normalized_size <= 0.0:
+            normalized_size = 1.0
+        object.__setattr__(self, "size_fraction", normalized_size)
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -79,7 +92,8 @@ You are a portfolio manager making the final decision on a proposed trade.
 You have received analysis from two analysts (bull and bear cases) and
 may have lessons from similar past trades.
 
-Your job: weigh the evidence and decide whether to APPROVE or REJECT this trade.
+Your job: weigh the evidence and decide whether to APPROVE or REJECT this trade,
+and if approved, how large the position should be.
 
 Consider:
 1. Strength of bull vs bear arguments
@@ -87,12 +101,25 @@ Consider:
 3. Lessons from past similar trades (if provided)
 4. Whether the signal score justifies the entry
 
+Sizing rules:
+- Prefer reducing size over rejecting when the setup is mixed but still plausible.
+- Similar-trade lessons are context, not hard laws. If the sample is small, do not invent rigid thresholds.
+- Use smaller starter sizes for neutral or mixed setups and reserve full size for the strongest alignment only.
+
 Respond with ONLY a JSON object:
 {
   "approve": true or false,
+    "size_fraction": 0.0 to 1.0,
   "confidence": 0-100,
   "reasoning": "1-2 sentences explaining your decision"
 }
+
+Interpret size_fraction as:
+- 0.0 = reject / no capital
+- 0.25 = tiny experimental starter
+- 0.50 = normal starter
+- 0.75 = strong starter or add-on
+- 1.0 = highest-conviction size only
 
 No other text. No markdown fences."""
 
@@ -106,6 +133,24 @@ Bear case: {bear_case}
 
 MEMORY_HEADER = "Lessons from similar past trades:"
 NO_MEMORIES = "No similar past trades found — this is a fresh setup."
+
+
+def _coerce_size_fraction(raw_value: object) -> float:
+    try:
+        size_fraction = float(str(raw_value))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, size_fraction))
+
+
+def _default_size_fraction_from_confidence(confidence: int) -> float:
+    if confidence >= 85:
+        return 1.0
+    if confidence >= 70:
+        return 0.75
+    if confidence >= 55:
+        return 0.50
+    return 0.25
 
 
 # ── Public Interface ──────────────────────────────────────────────────────────
@@ -172,6 +217,7 @@ async def analyst_committee(
             bull_case="Analysis unavailable",
             bear_case="Analysis unavailable",
             reasoning=f"Committee skipped due to LLM error: {exc}",
+            size_fraction=0.0,
         )
 
     # ── Call 2: PM Verdict ──
@@ -207,6 +253,15 @@ async def analyst_committee(
         confidence = int(verdict.get("confidence", 0))
         confidence = max(0, min(100, confidence))
         reasoning = str(verdict.get("reasoning", "No reasoning provided"))
+        size_fraction = _coerce_size_fraction(verdict.get("size_fraction", 0.0))
+
+        if approve and size_fraction <= 0.0:
+            size_fraction = _default_size_fraction_from_confidence(confidence)
+
+        if approve:
+            size_fraction = min(size_fraction, _default_size_fraction_from_confidence(confidence))
+        else:
+            size_fraction = 0.0
 
         # Reject low-confidence approvals (PM uncertain = skip)
         min_confidence_pct = int(settings.min_confidence * 100)
@@ -218,13 +273,15 @@ async def analyst_committee(
                 min_confidence_pct,
             )
             approve = False
+            size_fraction = 0.0
             reasoning = f"Low confidence ({confidence}) — {reasoning}"
 
         logger.info(
-            "ANALYST %s: approve=%s confidence=%d — %s",
+            "ANALYST %s: approve=%s confidence=%d size=%.2f — %s",
             symbol,
             approve,
             confidence,
+            size_fraction,
             reasoning,
         )
 
@@ -234,6 +291,7 @@ async def analyst_committee(
             bull_case=bull_case,
             bear_case=bear_case,
             reasoning=reasoning,
+            size_fraction=size_fraction,
         )
 
     except (LLMError, json.JSONDecodeError, KeyError) as exc:
@@ -244,4 +302,5 @@ async def analyst_committee(
             bull_case=bull_case,
             bear_case=bear_case,
             reasoning=f"PM verdict skipped due to LLM error: {exc}",
+            size_fraction=0.0,
         )

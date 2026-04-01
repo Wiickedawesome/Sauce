@@ -30,6 +30,7 @@ class TestAnalystVerdict:
         )
         assert v.approve is True
         assert v.confidence == 80
+        assert v.size_fraction == pytest.approx(1.0)
 
     def test_reject_verdict(self):
         v = AnalystVerdict(
@@ -40,6 +41,7 @@ class TestAnalystVerdict:
             reasoning="risk too high",
         )
         assert v.approve is False
+        assert v.size_fraction == pytest.approx(0.0)
 
 
 class TestAnalystCommittee:
@@ -75,6 +77,7 @@ class TestAnalystCommittee:
 
         assert result.approve is True
         assert result.confidence == 75
+        assert result.size_fraction == pytest.approx(0.75)
         assert "momentum" in result.bull_case.lower()
         assert mock_claude.call_count == 2
 
@@ -108,6 +111,7 @@ class TestAnalystCommittee:
 
         assert result.approve is False
         assert result.confidence == 25
+        assert result.size_fraction == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_analysis_llm_failure_defaults_reject(self):
@@ -237,6 +241,7 @@ class TestAnalystCommittee:
             )
 
         assert result.confidence == 100  # clamped
+        assert result.size_fraction == pytest.approx(1.0)
 
     @pytest.mark.asyncio
     async def test_none_indicators(self):
@@ -267,3 +272,4 @@ class TestAnalystCommittee:
             )
 
         assert result.approve is True
+        assert result.size_fraction == pytest.approx(0.50)

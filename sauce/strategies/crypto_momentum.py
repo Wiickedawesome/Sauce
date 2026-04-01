@@ -163,7 +163,7 @@ class CryptoMomentumReversion:
         ask = float(account.get("_ask", "0"))
 
         # Size: min(tier target, available buying power × 95% safety buffer)
-        target_value = equity * tier.max_position_pct
+        target_value = float(account.get("_target_order_value", equity * tier.max_position_pct))
         position_value = min(target_value, buying_power * 0.95)
         qty = position_value / ask if ask > 0 else 0.0
 

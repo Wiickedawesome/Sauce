@@ -3,10 +3,9 @@
 scripts/diagnose.py — Query sauce.db for current system health state.
 
 Run locally:    python scripts/diagnose.py
-Run on VPS:     docker exec sauce python scripts/diagnose.py
+Run on VPS:     docker exec sauce /app/.venv/bin/python scripts/diagnose.py
 """
 
-import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,32 +29,31 @@ def run() -> None:
     print("=" * 70)
 
     # ── 1. Pause state ────────────────────────────────────────────────────────
+    print("\n[PAUSE STATE]")
+    current_pause = settings.trading_pause
+    status = "*** PAUSED ***" if current_pause else "NOT PAUSED"
+    print(f"  status   : {status}")
+    print(f"  source   : env/config")
+    print(f"  TRADING_PAUSE env/config: {current_pause}")
+
     row = session.execute(
         text(
-            "SELECT json_extract(payload, '$.paused'), "
-            "       json_extract(payload, '$.reason'), "
+            "SELECT json_extract(payload, '$.reason'), "
             "       json_extract(payload, '$.action'), "
             "       timestamp "
             "FROM audit_events "
             "WHERE event_type = 'safety_check' "
-            "AND json_extract(payload, '$.paused') IS NOT NULL "
+            "AND json_extract(payload, '$.action') = 'halt' "
             "ORDER BY timestamp DESC LIMIT 1"
         )
     ).fetchone()
-    print("\n[PAUSE STATE]")
     if row:
-        paused_val, reason, action, ts = row
-        is_paused = bool(paused_val)
-        status = "*** PAUSED ***" if is_paused else "NOT PAUSED"
-        print(f"  status   : {status}")
-        print(f"  action   : {action}")
-        print(f"  reason   : {reason!r}")
-        print(f"  timestamp: {ts}")
+        reason, action, ts = row
+        print(f"  last_halt_action: {action}")
+        print(f"  last_halt_reason: {reason!r}")
+        print(f"  last_halt_at    : {ts}")
     else:
-        print("  No pause record found — assume not paused")
-
-    # Also check config-level pause
-    print(f"  TRADING_PAUSE env/config: {settings.trading_pause}")
+        print("  last_halt_action: none recorded")
 
     # ── 2. Recent ops summaries ───────────────────────────────────────────────
     print("\n[TODAY SUMMARY]")
