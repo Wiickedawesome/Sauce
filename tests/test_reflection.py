@@ -24,7 +24,7 @@ class TestReflectOnTrade:
             "lesson": "BTC bullish setups with low RSI tend to follow through well",
         })
 
-        with patch("sauce.reflection.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.reflection.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.return_value = response
             lesson = await reflect_on_trade(
                 symbol="BTC/USD",
@@ -50,7 +50,7 @@ class TestReflectOnTrade:
             ),
         ]
 
-        with patch("sauce.reflection.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.reflection.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.return_value = response
             lesson = await reflect_on_trade(
                 symbol="BTC/USD",
@@ -70,7 +70,7 @@ class TestReflectOnTrade:
         """If the LLM call fails, return None (non-critical)."""
         from sauce.adapters.llm import LLMError
 
-        with patch("sauce.reflection.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.reflection.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = LLMError("API down")
             lesson = await reflect_on_trade(
                 symbol="BTC/USD",
@@ -83,7 +83,7 @@ class TestReflectOnTrade:
     @pytest.mark.asyncio
     async def test_invalid_json_returns_none(self):
         """If the LLM returns non-JSON, return None."""
-        with patch("sauce.reflection.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.reflection.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.return_value = "This is not JSON at all"
             lesson = await reflect_on_trade(
                 symbol="BTC/USD",
@@ -98,7 +98,7 @@ class TestReflectOnTrade:
         """If the LLM returns an empty lesson, return None."""
         response = json.dumps({"lesson": ""})
 
-        with patch("sauce.reflection.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.reflection.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.return_value = response
             lesson = await reflect_on_trade(
                 symbol="BTC/USD",
@@ -115,7 +115,7 @@ class TestReflectOnTrade:
             "lesson": "First trade — be cautious",
         })
 
-        with patch("sauce.reflection.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.reflection.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.return_value = response
             lesson = await reflect_on_trade(
                 symbol="ETH/USD",

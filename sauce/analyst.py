@@ -24,7 +24,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from sauce.adapters.llm import LLMError, call_claude
+from sauce.adapters.llm import LLMError, call_llm
 from sauce.core.config import get_settings
 from sauce.memory import MemoryEntry
 
@@ -223,10 +223,11 @@ async def analyst_committee(
             regime=regime,
         )
 
-        raw_analysis = await call_claude(
+        raw_analysis = await call_llm(
             system=DUAL_ANALYSIS_SYSTEM,
             user=analysis_user,
             loop_id=loop_id,
+            provider=settings.dual_analysis_provider,
             temperature=settings.research_temperature,
         )
         analysis = json.loads(raw_analysis)
@@ -272,10 +273,11 @@ async def analyst_committee(
             memory_section=memory_section,
         )
 
-        raw_verdict = await call_claude(
+        raw_verdict = await call_llm(
             system=PM_VERDICT_SYSTEM,
             user=verdict_user,
             loop_id=loop_id,
+            provider=settings.pm_verdict_provider,
             temperature=settings.supervisor_temperature,
         )
         verdict = json.loads(raw_verdict)

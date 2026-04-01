@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 
-from sauce.adapters.llm import LLMError, call_claude
+from sauce.adapters.llm import LLMError, call_llm
 from sauce.core.config import get_settings
 from sauce.memory import MemoryEntry
 
@@ -91,10 +91,11 @@ async def reflect_on_trade(
     )
 
     try:
-        raw = await call_claude(
+        raw = await call_llm(
             system=REFLECTION_SYSTEM,
             user=user_prompt,
             loop_id=loop_id,
+            provider=settings.reflection_provider,
             temperature=settings.reflection_temperature,
         )
         parsed = json.loads(raw)

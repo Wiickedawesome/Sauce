@@ -172,6 +172,58 @@ async def _call_anthropic(
     raise LLMError(f"Anthropic call failed after {MAX_RETRIES} retries: {error_msg}")
 
 
+# ── Ollama (local) backend ────────────────────────────────────────────────────
+
+
+async def _call_ollama(
+    system: str,
+    user: str,
+    loop_id: str,
+    temperature: float = 0.3,
+) -> str:
+    """
+    Call local Ollama server via OpenAI-compatible API.
+    Returns raw text response (caller handles JSON parsing).
+    """
+    settings = get_settings()
+    url = f"{settings.ollama_base_url}/v1/chat/completions"
+    payload = {
+        "model": settings.ollama_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temperature,
+    }
+
+    for attempt in range(1, 4):  # 3 attempts
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                raw = data["choices"][0]["message"]["content"]
+                return _strip_fences(raw)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "Ollama HTTP error (attempt %d/3): %s", attempt, exc
+            )
+            if attempt == 3:
+                raise LLMError(f"Ollama failed after 3 attempts: {exc}") from exc
+            await asyncio.sleep(2 ** attempt)
+        except httpx.RequestError as exc:
+            logger.warning(
+                "Ollama connection error (attempt %d/3): %s", attempt, exc
+            )
+            if attempt == 3:
+                raise LLMError(f"Ollama connection failed: {exc}") from exc
+            await asyncio.sleep(2 ** attempt)
+        except (KeyError, IndexError) as exc:
+            raise LLMError(f"Ollama response parse error: {exc}") from exc
+
+    raise LLMError("Ollama call failed unexpectedly")
+
+
 # ── Public interface ──────────────────────────────────────────────────────────
 
 
@@ -213,3 +265,40 @@ async def call_claude(
         loop_id=loop_id,
         temperature=temperature,
     )
+
+
+async def call_llm(
+    system: str,
+    user: str,
+    loop_id: str = "unset",
+    *,
+    provider: str = "anthropic",
+    temperature: float = 0.3,
+) -> str:
+    """
+    Unified LLM dispatcher — routes to Anthropic or Ollama based on provider.
+
+    Args:
+        system: System prompt
+        user: User prompt
+        loop_id: Loop ID for audit logging
+        provider: 'anthropic' or 'ollama'
+        temperature: Sampling temperature
+
+    Returns:
+        Raw text response (JSON fence-stripped)
+    """
+    if provider == "ollama":
+        return await _call_ollama(
+            system=system,
+            user=user,
+            loop_id=loop_id,
+            temperature=temperature,
+        )
+    else:
+        return await call_claude(
+            system=system,
+            user=user,
+            loop_id=loop_id,
+            temperature=temperature,
+        )

@@ -37,6 +37,23 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(..., repr=False, description="Anthropic API key")
     llm_model: str = Field(default="claude-sonnet-4-6", description="Anthropic model name")
 
+    # ── LLM Provider Routing (hybrid local/API) ───────────────────────────────
+    dual_analysis_provider: str = Field(
+        default="ollama", description="Provider for dual analysis calls: 'anthropic' or 'ollama'"
+    )
+    pm_verdict_provider: str = Field(
+        default="anthropic", description="Provider for PM verdict calls: 'anthropic' or 'ollama'"
+    )
+    reflection_provider: str = Field(
+        default="ollama", description="Provider for reflection calls: 'anthropic' or 'ollama'"
+    )
+    ollama_model: str = Field(
+        default="qwen2.5:7b-instruct-q4_K_M", description="Ollama model name"
+    )
+    ollama_base_url: str = Field(
+        default="http://localhost:11434", description="Ollama server base URL"
+    )
+
     # ── Trading Universe ──────────────────────────────────────────────────────
     trading_universe_equities: str = Field(
         default=(

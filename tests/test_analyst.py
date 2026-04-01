@@ -60,7 +60,7 @@ class TestAnalystCommittee:
             "reasoning": "Bull case outweighs bearish concerns",
         })
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = [analysis_response, verdict_response]
             result = await analyst_committee(
                 symbol="BTC/USD",
@@ -94,7 +94,7 @@ class TestAnalystCommittee:
             "reasoning": "Bear case is stronger — too risky",
         })
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = [analysis_response, verdict_response]
             result = await analyst_committee(
                 symbol="ETH/USD",
@@ -118,7 +118,7 @@ class TestAnalystCommittee:
         """If the first LLM call fails, default to reject."""
         from sauce.adapters.llm import LLMError
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = LLMError("API down")
             result = await analyst_committee(
                 symbol="SOL/USD",
@@ -148,7 +148,7 @@ class TestAnalystCommittee:
             "bear_case": "Some risk",
         })
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = [analysis_response, LLMError("Timeout")]
             result = await analyst_committee(
                 symbol="BTC/USD",
@@ -189,7 +189,7 @@ class TestAnalystCommittee:
             ),
         ]
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = [analysis_response, verdict_response]
             result = await analyst_committee(
                 symbol="BTC/USD",
@@ -225,7 +225,7 @@ class TestAnalystCommittee:
             "reasoning": "ok",
         })
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = [analysis_response, verdict_response]
             result = await analyst_committee(
                 symbol="BTC/USD",
@@ -256,7 +256,7 @@ class TestAnalystCommittee:
             "reasoning": "ok",
         })
 
-        with patch("sauce.analyst.call_claude", new_callable=AsyncMock) as mock_claude:
+        with patch("sauce.analyst.call_llm", new_callable=AsyncMock) as mock_claude:
             mock_claude.side_effect = [analysis_response, verdict_response]
             result = await analyst_committee(
                 symbol="BTC/USD",
