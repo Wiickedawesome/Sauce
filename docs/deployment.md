@@ -110,10 +110,10 @@ ssh root@YOUR_VPS_IP "docker compose -f /root/Sauce/docker/docker-compose.yml lo
 ssh root@YOUR_VPS_IP "docker compose -f /root/Sauce/docker/docker-compose.yml restart"
 
 # Health check
-ssh root@YOUR_VPS_IP "docker exec sauce python scripts/docker_healthcheck.py"
+ssh root@YOUR_VPS_IP "docker exec sauce /app/.venv/bin/python scripts/docker_healthcheck.py"
 
 # Diagnostics
-python scripts/diagnose.py
+ssh root@YOUR_VPS_IP "docker exec sauce /app/.venv/bin/python scripts/diagnose.py"
 ```
 
 ---

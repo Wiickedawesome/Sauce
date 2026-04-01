@@ -420,6 +420,39 @@ def test_get_universe_snapshot_suppresses_chronic_missing_symbols(
     clear_cache()
 
 
+def test_get_universe_snapshot_can_bypass_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import market_data
+
+    now = datetime(2024, 1, 2, 15, 30, 0, tzinfo=UTC)
+    recovered = PriceReference(symbol="ETH/USD", bid=2000.0, ask=2001.0, mid=2000.5, as_of=now)
+    mock_crypto_client = MagicMock()
+    mock_crypto_client.get_crypto_latest_quote.return_value = {}
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(market_data, "datetime", FrozenDateTime)
+
+    with (
+        patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
+        patch("sauce.adapters.market_data.get_quote", side_effect=[market_data.MarketDataError("no quote"), market_data.MarketDataError("no quote"), market_data.MarketDataError("no quote"), recovered]) as mock_get_quote,
+    ):
+        for _ in range(3):
+            with pytest.raises(market_data.MarketDataError, match="returned no quotes"):
+                market_data.get_universe_snapshot(["ETH/USD"])
+
+        result = market_data.get_universe_snapshot(["ETH/USD"], respect_suppression=False)
+
+    assert result["ETH/USD"] == recovered
+    assert mock_get_quote.call_count == 4
+    clear_cache()
+
+
 def test_get_universe_snapshot_empty_list_returns_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

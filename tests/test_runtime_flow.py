@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from sauce.analyst import AnalystVerdict
+from sauce.adapters.market_data import MarketDataError
 from sauce.core.config import get_settings
 from sauce.core.options_schemas import OptionContract, OptionsOrder, OptionsPosition, OptionsSignalResult
 from sauce.core.schemas import AuditEvent, Order, PriceReference
@@ -33,11 +34,13 @@ async def test_run_cycle_paused_before_external_calls(monkeypatch: pytest.Monkey
     events: list[AuditEvent] = []
     mock_get_regime = AsyncMock()
     mock_get_account = MagicMock(return_value={"equity": "1000.0", "last_equity": "1000.0"})
+    mock_cancel_stale_orders = MagicMock(return_value=0)
     mock_scan_entries = AsyncMock()
 
     monkeypatch.setattr("sauce.loop.log_event", _capture_events(events))
     monkeypatch.setattr("sauce.loop.get_regime", mock_get_regime)
     monkeypatch.setattr("sauce.loop.get_account", mock_get_account)
+    monkeypatch.setattr("sauce.loop.cancel_stale_orders", mock_cancel_stale_orders)
     # Return cached regime so LLM call is skipped regardless of time-of-day.
     monkeypatch.setattr("sauce.loop.get_daily_regime", MagicMock(return_value="neutral"))
     monkeypatch.setattr("sauce.loop.upsert_daily_stats", MagicMock())
@@ -54,6 +57,7 @@ async def test_run_cycle_paused_before_external_calls(monkeypatch: pytest.Monkey
     assert mock_get_regime.await_count == 0
     # Account IS fetched: exits must run before the pause check.
     assert mock_get_account.call_count == 1
+    assert mock_cancel_stale_orders.call_count == 1
     # No new entries allowed when paused.
     assert mock_scan_entries.await_count == 0
 
@@ -164,12 +168,13 @@ async def test_scan_exits_keeps_position_open_on_partial_fill(monkeypatch: pytes
         )
     )
     exit_signal = ExitSignal(
-        trigger="profit_target",
+        trigger="profit_target_partial",
         symbol="BTC/USD",
         position_id="pos-exit",
         side="sell",
         current_price=110.0,
         reason="target hit",
+        exit_fraction=0.4,
     )
 
     log_trade = MagicMock()
@@ -183,7 +188,7 @@ async def test_scan_exits_keeps_position_open_on_partial_fill(monkeypatch: pytes
     monkeypatch.setattr("sauce.loop.evaluate_exit", lambda *args, **kwargs: (exit_signal, position))
     monkeypatch.setattr(
         "sauce.loop.place_order",
-        MagicMock(return_value={"status": "partially_filled", "filled_qty": "0.4", "filled_avg_price": "108.0"}),
+        MagicMock(return_value={"status": "filled", "filled_qty": "0.4", "filled_avg_price": "108.0"}),
     )
     monkeypatch.setattr("sauce.loop.log_trade", log_trade)
     monkeypatch.setattr("sauce.loop.close_position", close_position)
@@ -199,6 +204,139 @@ async def test_scan_exits_keeps_position_open_on_partial_fill(monkeypatch: pytes
     assert update_position.call_count == 1
     persisted = update_position.call_args.args[0]
     assert persisted.qty == pytest.approx(0.6)
+    assert persisted.trailing_active is True
+    assert persisted.profit_target_price == pytest.approx(-1.0)
+
+
+@pytest.mark.asyncio
+async def test_scan_exits_closes_position_using_broker_qty_when_db_qty_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    position = Position(
+        id="pos-stale-qty",
+        symbol="BTC/USD",
+        qty=1.0,
+        entry_price=100.0,
+        high_water_price=100.0,
+        strategy_name="fake",
+    )
+    quote = PriceReference(symbol="BTC/USD", bid=95.0, ask=95.0, mid=95.0, as_of=position.entry_time)
+    fake_strategy = SimpleNamespace(
+        build_exit_plan=lambda _position, _tier: ExitPlan(
+            stop_loss_pct=0.03,
+            trail_activation_pct=0.03,
+            trail_pct=0.02,
+            profit_target_pct=0.06,
+            rsi_exhaustion_threshold=72,
+            max_hold_hours=48,
+            time_stop_min_gain=0.01,
+        )
+    )
+    exit_signal = ExitSignal(
+        trigger="hard_stop",
+        symbol="BTC/USD",
+        position_id="pos-stale-qty",
+        side="sell",
+        current_price=95.0,
+        reason="stop hit",
+    )
+
+    close_position = MagicMock()
+    update_position = MagicMock()
+
+    monkeypatch.setattr("sauce.loop.get_positions", MagicMock(return_value=[{"symbol": "BTC/USD", "qty": "0.9"}]))
+    monkeypatch.setattr("sauce.loop.get_universe_snapshot", MagicMock(return_value={"BTC/USD": quote}))
+    monkeypatch.setattr("sauce.loop._fetch_indicators", MagicMock(return_value=None))
+    monkeypatch.setattr("sauce.loop._find_strategy", lambda _name: fake_strategy)
+    monkeypatch.setattr("sauce.loop.evaluate_exit", lambda *args, **kwargs: (exit_signal, position))
+    monkeypatch.setattr(
+        "sauce.loop.place_order",
+        MagicMock(return_value={"status": "filled", "filled_qty": "0.9", "filled_avg_price": "95.0"}),
+    )
+    monkeypatch.setattr("sauce.loop.log_trade", MagicMock())
+    monkeypatch.setattr("sauce.loop.close_position", close_position)
+    monkeypatch.setattr("sauce.loop.update_position", update_position)
+    monkeypatch.setattr("sauce.loop.upsert_daily_stats", MagicMock())
+
+    await _scan_exits([position], equity=1_000.0, regime="neutral", trade_memory=TradeMemory())
+
+    assert close_position.call_count == 1
+    assert update_position.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_exits_skips_stale_snapshot_quote(monkeypatch: pytest.MonkeyPatch) -> None:
+    position = Position(
+        id="pos-stale",
+        symbol="BTC/USD",
+        qty=1.0,
+        entry_price=100.0,
+        high_water_price=100.0,
+        strategy_name="fake",
+    )
+    stale_quote = PriceReference(
+        symbol="BTC/USD",
+        bid=110.0,
+        ask=110.0,
+        mid=110.0,
+        as_of=datetime.now(UTC) - timedelta(hours=5),
+    )
+    fake_strategy = SimpleNamespace(
+        build_exit_plan=lambda _position, _tier: ExitPlan(
+            stop_loss_pct=0.03,
+            trail_activation_pct=0.03,
+            trail_pct=0.02,
+            profit_target_pct=0.06,
+            rsi_exhaustion_threshold=72,
+            max_hold_hours=48,
+            time_stop_min_gain=0.01,
+        )
+    )
+    exit_signal = ExitSignal(
+        trigger="profit_target",
+        symbol="BTC/USD",
+        position_id="pos-stale",
+        side="sell",
+        current_price=110.0,
+        reason="target hit",
+    )
+
+    place_order = MagicMock()
+
+    monkeypatch.setattr("sauce.loop.get_positions", MagicMock(return_value=[{"symbol": "BTC/USD", "qty": "1.0"}]))
+    monkeypatch.setattr("sauce.loop.get_universe_snapshot", MagicMock(return_value={"BTC/USD": stale_quote}))
+    monkeypatch.setattr("sauce.loop._fetch_indicators", MagicMock(return_value=None))
+    monkeypatch.setattr("sauce.loop._find_strategy", lambda _name: fake_strategy)
+    monkeypatch.setattr("sauce.loop.evaluate_exit", lambda *args, **kwargs: (exit_signal, position))
+    monkeypatch.setattr("sauce.loop.place_order", place_order)
+
+    await _scan_exits([position], equity=1_000.0, regime="neutral", trade_memory=TradeMemory())
+
+    assert place_order.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_exits_batch_quote_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    position = Position(
+        id="pos-batch-fail",
+        symbol="BTC/USD",
+        qty=1.0,
+        entry_price=100.0,
+        high_water_price=100.0,
+        strategy_name="fake",
+    )
+    place_order = MagicMock()
+
+    monkeypatch.setattr("sauce.loop.get_positions", MagicMock(return_value=[{"symbol": "BTC/USD", "qty": "1.0"}]))
+    monkeypatch.setattr(
+        "sauce.loop.get_universe_snapshot",
+        MagicMock(side_effect=MarketDataError("snapshot down")),
+    )
+    monkeypatch.setattr("sauce.loop.place_order", place_order)
+
+    await _scan_exits([position], equity=1_000.0, regime="neutral", trade_memory=TradeMemory())
+
+    assert place_order.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -252,6 +390,7 @@ async def test_scan_entries_uses_broker_avg_entry_price_when_fill_price_missing(
                 bull_case="bull",
                 bear_case="bear",
                 reasoning="good",
+                size_fraction=1.0,
             )
         ),
     )
@@ -279,7 +418,38 @@ async def test_scan_entries_uses_broker_avg_entry_price_when_fill_price_missing(
 
 
 @pytest.mark.asyncio
-async def test_scan_entries_overrides_analyst_rejection_in_paper_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_scan_entries_batch_quote_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStrategy:
+        name = "fake_strategy"
+        instruments = ["BTC/USD"]
+
+        def eligible(self, instrument: str, regime: str) -> bool:
+            return True
+
+    monkeypatch.setattr("sauce.loop.STRATEGIES", [FakeStrategy()])
+    monkeypatch.setattr("sauce.loop.get_snapshot_candidates", lambda symbols: symbols)
+    monkeypatch.setattr(
+        "sauce.loop.get_universe_snapshot",
+        MagicMock(side_effect=MarketDataError("snapshot down")),
+    )
+    log_signal = MagicMock()
+
+    monkeypatch.setattr("sauce.loop.log_signal", log_signal)
+
+    await _scan_entries(
+        regime="neutral",
+        account={"equity": "1000", "buying_power": "1000", "last_equity": "1000"},
+        open_positions=[],
+        broker_positions=[],
+        recent_orders=[],
+        trade_memory=TradeMemory(),
+    )
+
+    assert log_signal.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_entries_respects_analyst_rejection_in_paper_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_PAPER", "true")
     get_settings.cache_clear()
 
@@ -355,7 +525,7 @@ async def test_scan_entries_overrides_analyst_rejection_in_paper_mode(monkeypatc
         trade_memory=TradeMemory(),
     )
 
-    assert save_position.call_count == 1
+    assert save_position.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -421,6 +591,7 @@ async def test_scan_option_entries_rejects_oversized_actual_premium(monkeypatch:
                 bull_case="bull",
                 bear_case="bear",
                 reasoning="good",
+                size_fraction=1.0,
             )
         ),
     )

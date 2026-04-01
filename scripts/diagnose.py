@@ -3,7 +3,7 @@
 scripts/diagnose.py — Query sauce.db for current system health state.
 
 Run locally:    python scripts/diagnose.py
-Run on VPS:     docker exec sauce python scripts/diagnose.py
+Run on VPS:     docker exec sauce /app/.venv/bin/python scripts/diagnose.py
 """
 
 import sys

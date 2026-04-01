@@ -483,12 +483,25 @@ class TestExitMonitor:
         assert pos_out.trailing_stop_price == pytest.approx(108.0 * 0.98)
 
     def test_profit_target(self):
-        """Price hits +6% → profit target exit."""
+        """Price hits +6% → partial profit target exit."""
         pos = _make_position(entry_price=100.0)
         plan = _make_plan(profit_target_pct=0.06)
         sig, _ = evaluate_exit(pos, plan, 106.5, rsi_14=50.0)
         assert sig is not None
-        assert sig.trigger == "profit_target"
+        assert sig.trigger == "profit_target_partial"
+        assert sig.exit_fraction == pytest.approx(0.40)
+
+    def test_negative_profit_target_disables_runner_trim(self):
+        pos = _make_position(
+            entry_price=100.0,
+            trailing_active=True,
+            high_water_price=106.5,
+            trailing_stop_price=104.37,
+            profit_target_price=-1.0,
+        )
+        plan = _make_plan(profit_target_pct=0.06)
+        sig, _ = evaluate_exit(pos, plan, 106.5, rsi_14=50.0)
+        assert sig is None
 
     def test_rsi_exhaustion(self):
         """RSI 75 ≥ threshold 72 → exhaustion exit."""

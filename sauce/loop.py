@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from sauce.adapters.broker import (
     cancel_stale_orders,
     get_account,
     get_option_positions,
+    get_order_by_id,
     get_positions,
     get_recent_orders,
     place_option_order,
@@ -92,9 +94,12 @@ _PENDING_ORDER_STATUSES = {
     "pending_replace",
 }
 _FILLED_ORDER_STATUSES = {"filled", "partially_filled"}
+_TERMINAL_ORDER_STATUSES = {"filled", "canceled", "expired", "rejected", "suspended"}
 _ENTRY_STAGE_TARGETS = (0.35, 0.65, 1.0)
 _SCALE_IN_CONFIRM_GAINS = (0.0, 0.0075, 0.015)
 _CRYPTO_MIN_NOTIONAL = 10.0
+_EXIT_POLL_ATTEMPTS = 4
+_EXIT_POLL_INTERVAL = 1.0  # seconds between polls
 
 
 # ── Strategies ────────────────────────────────────────────────────────────────
@@ -207,6 +212,37 @@ def _extract_fill_details(result: dict[str, object] | object) -> tuple[str, floa
     status = str(_broker_result_field(result, "status") or "").lower()
     filled_qty = _parse_positive_float(_broker_result_field(result, "filled_qty")) or 0.0
     filled_price = _parse_positive_float(_broker_result_field(result, "filled_avg_price"))
+    return status, filled_qty, filled_price
+
+
+def _poll_order_fill(
+    order_id: str,
+    symbol: str,
+    loop_id: str,
+) -> tuple[str, float, float | None]:
+    """Poll broker for order fill status when initial response is PENDING_NEW.
+
+    Makes up to _EXIT_POLL_ATTEMPTS checks with _EXIT_POLL_INTERVAL second
+    delays. Returns the final (status, filled_qty, filled_price) tuple.
+    """
+    for attempt in range(1, _EXIT_POLL_ATTEMPTS + 1):
+        time.sleep(_EXIT_POLL_INTERVAL)
+        try:
+            refreshed = get_order_by_id(order_id, loop_id)
+            status, filled_qty, filled_price = _extract_fill_details(refreshed)
+            logger.info(
+                "Poll %d/%d for %s order %s: status=%s filled=%.4f",
+                attempt,
+                _EXIT_POLL_ATTEMPTS,
+                symbol,
+                order_id,
+                status,
+                filled_qty,
+            )
+            if status in _TERMINAL_ORDER_STATUSES:
+                return status, filled_qty, filled_price
+        except BrokerError as exc:
+            logger.warning("Poll %d/%d for %s failed: %s", attempt, _EXIT_POLL_ATTEMPTS, symbol, exc)
     return status, filled_qty, filled_price
 
 
@@ -379,12 +415,17 @@ def _safe_get_universe_snapshot(
     stage: str,
     respect_suppression: bool = True,
 ) -> dict[str, PriceReference]:
-    """Fetch a batch quote snapshot without letting a transient outage fail the whole cycle."""
+    """Fetch a batch quote snapshot without letting a transient outage fail the whole cycle.
+
+    Falls back to individual get_quote() calls for any symbols missing from
+    the batch response (e.g. LINK/USD, UNI/USD occasionally absent from
+    Alpaca's snapshot endpoint).
+    """
     if not symbols:
         return {}
 
     try:
-        return get_universe_snapshot(symbols, respect_suppression=respect_suppression)
+        result = get_universe_snapshot(symbols, respect_suppression=respect_suppression)
     except MarketDataError as exc:
         logger.error("Batch quote fetch failed during %s: %s", stage, exc)
         _audit_event(
@@ -396,7 +437,17 @@ def _safe_get_universe_snapshot(
                 "requested_symbols": symbols,
             },
         )
-        return {}
+        result = {}
+
+    # Fall back to individual quotes for missing symbols.
+    missing = set(symbols) - set(result)
+    for sym in missing:
+        try:
+            result[sym] = get_quote(sym)
+        except MarketDataError:
+            logger.debug("Individual quote fallback also failed for %s", sym)
+
+    return result
 
 
 def _safe_get_option_quotes(
@@ -1351,6 +1402,16 @@ async def _scan_exits(
             )
             broker_result = place_order(sell_order, loop_id)
             status, executed_qty, executed_price = _extract_fill_details(broker_result)
+
+            # Poll broker if the order is still pending (market orders usually
+            # fill within seconds but the initial response can be PENDING_NEW).
+            if not _should_persist_position(status, executed_qty):
+                order_id = str(_broker_result_field(broker_result, "id") or "")
+                if order_id and status in _PENDING_ORDER_STATUSES:
+                    status, executed_qty, executed_price = _poll_order_fill(
+                        order_id, position.symbol, loop_id,
+                    )
+
             if not _should_persist_position(status, executed_qty):
                 logger.info(
                     "Exit order for %s status=%s filled_qty=%.4f — keeping position open",
@@ -1390,11 +1451,13 @@ async def _scan_exits(
                 profit_target_price=managed_position.profit_target_price,
             )
             log_trade(exited_position, exit_price, exit_signal.trigger)
+            realized_pnl = (exit_price - managed_position.entry_price) * executed_qty
 
             remaining_qty = max(position_qty_before_exit - executed_qty, 0.0)
             if remaining_qty > 0:
                 managed_position.qty = remaining_qty
                 update_position(managed_position)
+                upsert_daily_stats(today, realized_pnl_usd=realized_pnl)
                 logger.info(
                     "PARTIAL EXIT %s: filled=%.4f remaining=%.4f price=%.4f reason=%s",
                     position.symbol,
@@ -1406,7 +1469,7 @@ async def _scan_exits(
                 continue
 
             close_position(position.id)
-            upsert_daily_stats(today, trades_closed=1)
+            upsert_daily_stats(today, trades_closed=1, realized_pnl_usd=realized_pnl)
             logger.info(
                 "EXIT %s: trigger=%s price=%.4f reason=%s",
                 position.symbol,
@@ -1572,6 +1635,9 @@ def _reconcile_broker_positions(
     Handles positions opened outside the current DB (manual orders, prior code
     versions, DB migrations). Saves a minimal record with tier-based stops so
     the exit monitor can manage them on the very next cycle.
+
+    Respects max_concurrent: will not import positions that would push the
+    total count above the tier limit.
     """
     settings = get_settings()
     for bp in broker_positions:
@@ -1585,6 +1651,16 @@ def _reconcile_broker_positions(
             for p in open_positions
         )
         if already_tracked:
+            continue
+
+        # Enforce max_concurrent — don't import if already at limit.
+        if len(open_positions) >= tier.max_concurrent:
+            logger.warning(
+                "RECONCILE SKIP %s: open positions (%d) already at max_concurrent (%d)",
+                broker_symbol,
+                len(open_positions),
+                tier.max_concurrent,
+            )
             continue
 
         qty = _parse_positive_float(bp.get("qty") or bp.get("qty_available"))
@@ -1659,11 +1735,14 @@ def _reconcile_stale_positions(
             stale.append(position)
 
     for position in stale:
+        # Log the trade with entry_price as exit price (best approximation
+        # when broker already sold the position outside our control).
+        log_trade(position, position.entry_price, "broker_reconciliation")
         close_position(position.id)
         open_positions.remove(position)
         logger.warning(
             "RECONCILED stale DB position %s (id=%s): broker does not hold this symbol — "
-            "marking closed (qty=%.8f entry=%.6f)",
+            "logging trade and closing (qty=%.8f entry=%.6f)",
             position.symbol,
             position.id,
             position.qty,
