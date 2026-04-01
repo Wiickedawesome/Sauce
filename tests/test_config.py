@@ -101,19 +101,6 @@ def test_llm_model_defaults_to_claude_sonnet(monkeypatch: pytest.MonkeyPatch) ->
 # ── Risk limit bounds ─────────────────────────────────────────────────────────
 
 
-def test_max_position_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    set_required(monkeypatch)
-    s = Settings(_env_file=None)
-    assert s.max_position_pct == 0.08
-
-
-def test_max_position_pct_out_of_range_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    set_required(monkeypatch)
-    monkeypatch.setenv("MAX_POSITION_PCT", "1.5")
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None)
-
-
 def test_max_daily_loss_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     s = Settings(_env_file=None)

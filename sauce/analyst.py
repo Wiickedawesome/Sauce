@@ -103,7 +103,13 @@ Consider:
 
 Sizing rules:
 - Prefer reducing size over rejecting when the setup is mixed but still plausible.
-- Similar-trade lessons are context, not hard laws. If the sample is small, do not invent rigid thresholds.
+- Similar-trade lessons are context, not hard laws.
+- CRITICAL: If only 1-5 past trades are available, the sample is too small for \
+statistical conclusions. Weight the current technical setup and bull/bear analysis \
+MORE heavily than a handful of past outcomes. A few losses do not prove a pattern \
+— they are normal variance.
+- Do NOT extrapolate rigid entry criteria (e.g. "only enter if RSI > X") from a \
+small sample. Every trade has unique context.
 - Use smaller starter sizes for neutral or mixed setups and reserve full size for the strongest alignment only.
 
 Respond with ONLY a JSON object:
@@ -131,8 +137,8 @@ Bear case: {bear_case}
 
 {memory_section}"""
 
-MEMORY_HEADER = "Lessons from similar past trades:"
-NO_MEMORIES = "No similar past trades found — this is a fresh setup."
+MEMORY_HEADER = "Lessons from similar past trades (treat as anecdotal context, NOT rules):"
+NO_MEMORIES = "No similar past trades found — this is a fresh setup. Judge on current data alone."
 
 
 def _coerce_size_fraction(raw_value: object) -> float:
@@ -224,7 +230,14 @@ async def analyst_committee(
     try:
         # Build memory section
         if memories:
-            memory_lines = [MEMORY_HEADER]
+            n = len(memories)
+            sample_note = (
+                f"(⚠ Only {n} past trade{'s' if n != 1 else ''} — "
+                f"too few for statistical weight. Prioritize current setup.)"
+                if n <= 5
+                else f"({n} past trades recalled.)"
+            )
+            memory_lines = [f"{MEMORY_HEADER} {sample_note}"]
             for i, mem in enumerate(memories, 1):
                 memory_lines.append(f"  {i}. {mem.outcome} — Lesson: {mem.lesson}")
             memory_section = "\n".join(memory_lines)

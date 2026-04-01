@@ -577,6 +577,35 @@ def get_latest_quote(symbol: str, loop_id: str = "unset") -> PriceReference:
         raise BrokerError(f"get_latest_quote failed for {symbol}: {exc}") from exc
 
 
+# ── Single order lookup ──────────────────────────────────────────────────────
+
+
+def get_order_by_id(order_id: str, loop_id: str = "unset") -> dict[str, Any]:
+    """
+    Fetch a single order by its broker-assigned ID.
+
+    Returns a dict with Alpaca's order fields (id, status, filled_qty,
+    filled_avg_price, etc.). Raises BrokerError on failure.
+    """
+    from sauce.adapters.db import log_event
+
+    try:
+        client = _get_trading_client()
+        order = call_with_retry(lambda: client.get_order_by_id(order_id))
+        result: dict[str, Any] = order.__dict__
+
+        if "id" not in result or result["id"] is None:
+            raw_id = getattr(order, "id", None)
+            if raw_id is not None:
+                result["id"] = raw_id
+
+        return result
+
+    except Exception as exc:
+        _log_broker_error(loop_id, f"get_order_by_id({order_id})", exc)
+        raise BrokerError(f"get_order_by_id failed for {order_id}: {exc}") from exc
+
+
 # ── Recent orders query ──────────────────────────────────────────────────────
 
 

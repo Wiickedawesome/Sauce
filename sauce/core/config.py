@@ -66,26 +66,10 @@ class Settings(BaseSettings):
     )
 
     # ── Risk Limits ───────────────────────────────────────────────────────────
-    max_position_pct: float = Field(default=0.08, ge=0.0, le=1.0)
     max_portfolio_exposure: float = Field(default=1.0, ge=0.0, le=2.0)
     max_daily_loss_pct: float = Field(default=0.03, ge=0.0, le=1.0)
 
     # ── Asset-Class Allocation Caps ───────────────────────────────────────────
-    # Independent caps — they do not need to sum to 1.0 (remainder is cash).
-    max_crypto_allocation_pct: float = Field(
-        default=0.40,
-        ge=0.0,
-        le=1.0,
-        description="Maximum fraction of equity that may be allocated to crypto "
-        "positions combined (e.g. 0.40 = 40%).",
-    )
-    max_equity_allocation_pct: float = Field(
-        default=0.70,
-        ge=0.0,
-        le=1.0,
-        description="Maximum fraction of equity that may be allocated to equity "
-        "positions combined (e.g. 0.70 = 70%).",
-    )
     max_options_allocation_pct: float = Field(
         default=0.20,
         ge=0.0,
@@ -178,13 +162,6 @@ class Settings(BaseSettings):
         ge=0.0,
         description="Profit-target distance = ATR × this multiple.",
     )
-    over_concentration_multiplier: float = Field(
-        default=2.0,
-        ge=1.0,
-        description="A single position exceeding equity × max_position_pct × this "
-        "value is flagged as over-concentrated.",
-    )
-
     # ── Order Execution parameters (Finding 1.9) ─────────────────────────────
     max_limit_price_premium: float = Field(
         default=0.001,

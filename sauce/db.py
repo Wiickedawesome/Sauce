@@ -517,6 +517,7 @@ def upsert_daily_stats(
             "signals_skipped",
             "orders_placed",
             "trades_closed",
+            "realized_pnl_usd",
         }
         for key, value in fields.items():
             if not hasattr(row, key):
