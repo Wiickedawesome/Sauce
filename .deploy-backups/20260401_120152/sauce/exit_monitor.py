@@ -35,7 +35,6 @@ class ExitSignal:
     side: str  # always "sell" for long exits
     current_price: float
     reason: str
-    exit_fraction: float = 1.0
 
 
 def evaluate_exit(
@@ -138,23 +137,17 @@ def evaluate_exit(
         position.trailing_stop_price = current_price * (1 - plan.trail_pct)
 
     # ── 5. Profit target ─────────────────────────────────────────────────
-    if position.profit_target_price < 0:
-        target_price = 0.0
-    elif position.profit_target_price > 0:
-        target_price = position.profit_target_price
-    else:
-        target_price = entry * (1 + plan.profit_target_pct)
-    if target_price > 0 and current_price >= target_price:
+    target_price = entry * (1 + plan.profit_target_pct)
+    if current_price >= target_price:
         return (
             ExitSignal(
-                trigger="profit_target_partial",
+                trigger="profit_target",
                 symbol=symbol,
                 position_id=pid,
                 side="sell",
                 current_price=current_price,
                 reason=f"Price {current_price:.4f} hit target {target_price:.4f} "
                 f"({plan.profit_target_pct:.1%} above entry {entry:.4f})",
-                exit_fraction=plan.profit_take_fraction,
             ),
             position,
         )
@@ -162,17 +155,16 @@ def evaluate_exit(
     # ── 5b. ATR profit target (volatility-scaled) ────────────────────────
     if atr_14 is not None and atr_14 > 0:
         atr_target_price = entry + (atr_14 * atr_target_multiple)
-        if current_price >= atr_target_price and target_price > 0:
+        if current_price >= atr_target_price:
             return (
                 ExitSignal(
-                    trigger="atr_target_partial",
+                    trigger="atr_target",
                     symbol=symbol,
                     position_id=pid,
                     side="sell",
                     current_price=current_price,
                     reason=f"Price {current_price:.4f} hit ATR target {atr_target_price:.4f} "
                     f"({atr_target_multiple}× ATR {atr_14:.4f} above entry {entry:.4f})",
-                    exit_fraction=plan.profit_take_fraction,
                 ),
                 position,
             )

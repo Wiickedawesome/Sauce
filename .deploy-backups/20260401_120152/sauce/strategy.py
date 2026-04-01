@@ -71,7 +71,6 @@ class ExitPlan:
     rsi_exhaustion_threshold: float  # e.g. 72
     max_hold_hours: float
     time_stop_min_gain: float
-    profit_take_fraction: float = 0.40
     # Options extras (None for non-options)
     dte_exit_threshold: int | None = None
     regime_stop: bool = False  # close on bearish regime?

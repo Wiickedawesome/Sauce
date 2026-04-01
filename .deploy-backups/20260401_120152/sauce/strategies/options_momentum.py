@@ -266,10 +266,9 @@ class OptionsMomentum:
         """Build an options order sized by tier and premium limits."""
         settings = self._settings
         equity = float(account.get("equity", "0"))
-        size_fraction = float(account.get("_position_size_fraction", 1.0))
 
         # Max premium per position
-        max_premium = equity * settings.options_max_premium_pct * max(0.0, min(1.0, size_fraction))
+        max_premium = equity * settings.options_max_premium_pct
         # Premium per contract (use ask for buying)
         premium_per_contract = (contract.ask or 0) * 100  # 100 shares per contract
 
@@ -277,8 +276,7 @@ class OptionsMomentum:
 
         # Cap by max contracts setting
         qty = min(qty, settings.options_max_contracts_per_position)
-        if qty < 1:
-            raise ValueError("analyst-sized premium budget is too small for one contract")
+        qty = max(qty, 1)  # At least 1 contract
 
         # Limit price: midpoint of bid-ask
         limit_price = ((contract.bid or 0) + (contract.ask or 0)) / 2

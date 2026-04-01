@@ -92,9 +92,6 @@ _PENDING_ORDER_STATUSES = {
     "pending_replace",
 }
 _FILLED_ORDER_STATUSES = {"filled", "partially_filled"}
-_ENTRY_STAGE_TARGETS = (0.35, 0.65, 1.0)
-_SCALE_IN_CONFIRM_GAINS = (0.0, 0.0075, 0.015)
-_CRYPTO_MIN_NOTIONAL = 10.0
 
 
 # ── Strategies ────────────────────────────────────────────────────────────────
@@ -107,15 +104,6 @@ OPTIONS_STRATEGY = OptionsMomentum()
 class SupervisorDecision:
     action: str
     reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class EntrySizingPlan:
-    order_value_usd: float
-    current_position_value_usd: float
-    target_stage: int
-    current_gain_pct: float
-    is_scale_in: bool
 
 
 def _is_crypto(symbol: str) -> bool:
@@ -179,14 +167,6 @@ def _symbol_aliases(symbol: str) -> tuple[str, ...]:
     return (upper_symbol, normalized_symbol)
 
 
-def _price_precision(symbol: str) -> int:
-    return 8 if _is_crypto(symbol) else 2
-
-
-def _round_position_price(value: float, symbol: str) -> float:
-    return round(value, _price_precision(symbol))
-
-
 def _broker_result_field(result: dict[str, object] | object, field_name: str) -> object | None:
     if isinstance(result, dict):
         return result.get(field_name)
@@ -219,113 +199,6 @@ def _find_broker_position(symbol: str, broker_positions: list[dict[str, object]]
     return None
 
 
-def _current_position_cost_basis_value(
-    symbol: str,
-    position: Position | None,
-    broker_positions: list[dict[str, object]],
-    fallback_price: float,
-) -> float:
-    if position is None:
-        return 0.0
-
-    broker_position = _find_broker_position(symbol, broker_positions)
-    if broker_position is not None:
-        broker_qty = _parse_positive_float(
-            broker_position.get("qty") or broker_position.get("qty_available")
-        )
-        broker_entry_price = _parse_positive_float(broker_position.get("avg_entry_price"))
-        if broker_qty is not None:
-            anchor_price = broker_entry_price or position.entry_price or fallback_price
-            return broker_qty * anchor_price
-
-    anchor_price = position.entry_price or fallback_price
-    return position.qty * anchor_price
-
-
-def _plan_entry_sizing(
-    symbol: str,
-    position: Position | None,
-    broker_positions: list[dict[str, object]],
-    current_price: float,
-    equity: float,
-    tier: TierParams,
-    analyst_size_fraction: float,
-) -> EntrySizingPlan | None:
-    analyst_fraction = max(0.0, min(1.0, analyst_size_fraction))
-    max_position_value = equity * tier.max_position_pct
-    if analyst_fraction <= 0.0 or max_position_value <= 0.0:
-        return None
-
-    current_position_value = _current_position_cost_basis_value(
-        symbol,
-        position,
-        broker_positions,
-        current_price,
-    )
-    current_ratio = current_position_value / max_position_value if max_position_value > 0 else 0.0
-    next_stage_idx = next(
-        (idx for idx, target in enumerate(_ENTRY_STAGE_TARGETS) if current_ratio + 1e-6 < target),
-        None,
-    )
-    if next_stage_idx is None:
-        return None
-
-    current_gain_pct = 0.0
-    if position is not None:
-        if position.trailing_active or position.profit_target_price <= 0:
-            return None
-        if position.entry_price <= 0:
-            return None
-        current_gain_pct = (current_price - position.entry_price) / position.entry_price
-        required_gain = _SCALE_IN_CONFIRM_GAINS[next_stage_idx]
-        if current_gain_pct < required_gain:
-            return None
-
-    previous_target = _ENTRY_STAGE_TARGETS[next_stage_idx - 1] if next_stage_idx > 0 else 0.0
-    stage_target_value = max_position_value * _ENTRY_STAGE_TARGETS[next_stage_idx]
-    stage_band_value = max_position_value * (_ENTRY_STAGE_TARGETS[next_stage_idx] - previous_target)
-    remaining_to_stage = max(stage_target_value - current_position_value, 0.0)
-    desired_order_value = min(remaining_to_stage, stage_band_value * analyst_fraction)
-    if desired_order_value <= 0.0:
-        return None
-
-    return EntrySizingPlan(
-        order_value_usd=desired_order_value,
-        current_position_value_usd=current_position_value,
-        target_stage=next_stage_idx + 1,
-        current_gain_pct=current_gain_pct,
-        is_scale_in=position is not None,
-    )
-
-
-def _planned_exit_qty(
-    position: Position,
-    total_qty: float,
-    current_price: float,
-    exit_fraction: float,
-) -> float:
-    planned_fraction = max(0.0, min(1.0, exit_fraction))
-    if planned_fraction >= 1.0:
-        return total_qty
-
-    planned_qty = total_qty * planned_fraction
-    if position.asset_class == "equity":
-        planned_qty = float(int(planned_qty))
-    else:
-        planned_qty = round(planned_qty, 8)
-
-    if planned_qty <= 0:
-        return total_qty
-
-    if position.asset_class == "crypto":
-        sell_notional = planned_qty * current_price
-        remaining_notional = max(total_qty - planned_qty, 0.0) * current_price
-        if sell_notional < _CRYPTO_MIN_NOTIONAL or remaining_notional < _CRYPTO_MIN_NOTIONAL:
-            return total_qty
-
-    return min(planned_qty, total_qty)
-
-
 def _reconcile_entry_fill(
     symbol: str,
     loop_id: str,
@@ -346,6 +219,11 @@ def _reconcile_entry_fill(
     )
     broker_price = _parse_positive_float(broker_position.get("avg_entry_price"))
     return broker_qty or initial_qty, broker_price or initial_price
+
+
+def _paper_mode_overrides_analyst(verdict: AnalystVerdict, score: int, threshold: int) -> bool:
+    settings = get_settings()
+    return settings.alpaca_paper and (not verdict.approve) and score >= threshold
 
 
 def _audit_missing_quotes(loop_id: str, stage: str, requested_symbols: list[str], quotes_map: dict[str, PriceReference]) -> None:
@@ -658,7 +536,7 @@ async def _scan_entries(
     starting = float(account.get("last_equity", equity))
     daily_pnl = (equity - starting) / starting if starting > 0 else 0.0
 
-    open_positions_by_symbol = {p.symbol: p for p in open_positions}
+    open_symbols = {p.symbol for p in open_positions}
     pending_symbols = _pending_order_symbols(recent_orders)
     actual_open_position_count = len(broker_positions)
     total_existing_exposure = _broker_position_exposure(broker_positions)
@@ -667,8 +545,8 @@ async def _scan_entries(
     eligible_instruments: list[tuple[Strategy, str]] = []
     for strategy in STRATEGIES:
         for instrument in strategy.instruments:
-            if instrument in pending_symbols:
-                continue
+            if instrument in open_symbols or instrument in pending_symbols:
+                continue  # already have a position
             if not strategy.eligible(instrument, regime):
                 continue
             eligible_instruments.append((strategy, instrument))
@@ -689,7 +567,6 @@ async def _scan_entries(
     logger.info("Batch quotes fetched for %d symbols (%d returned)", len(snapshot_symbols), len(quotes_map))
 
     for strategy, instrument in eligible_instruments:
-        existing_position = open_positions_by_symbol.get(instrument)
         quote = quotes_map.get(instrument)
         if quote is None:
             continue
@@ -757,22 +634,42 @@ async def _scan_entries(
                 memories=recalled,
                 loop_id=loop_id,
             )
-            if not verdict.approve or verdict.size_fraction <= 0.0:
-                logger.info(
-                    "ANALYST REJECTED %s: confidence=%d size=%.2f — %s",
-                    instrument,
-                    verdict.confidence,
-                    verdict.size_fraction,
-                    verdict.reasoning,
-                )
-                upsert_daily_stats(today, signals_skipped=1)
-                continue
+            if not verdict.approve:
+                if _paper_mode_overrides_analyst(verdict, signal.score, signal.threshold):
+                    logger.warning(
+                        "PAPER ANALYST OVERRIDE %s: score=%d threshold=%d confidence=%d — %s",
+                        instrument,
+                        signal.score,
+                        signal.threshold,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                    _audit_event(
+                        loop_id,
+                        "supervisor_decision",
+                        {
+                            "action": "paper_override",
+                            "reason": verdict.reasoning,
+                            "confidence": verdict.confidence,
+                            "score": signal.score,
+                            "threshold": signal.threshold,
+                        },
+                        symbol=instrument,
+                    )
+                else:
+                    logger.info(
+                        "ANALYST REJECTED %s: confidence=%d — %s",
+                        instrument,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                    upsert_daily_stats(today, signals_skipped=1)
+                    continue
 
             logger.info(
-                "ANALYST APPROVED %s: confidence=%d size=%.2f — %s",
+                "ANALYST APPROVED %s: confidence=%d — %s",
                 instrument,
                 verdict.confidence,
-                verdict.size_fraction,
                 verdict.reasoning,
             )
 
@@ -791,33 +688,7 @@ async def _scan_entries(
                 logger.info("Supervisor aborted %s: fresh quote is stale", instrument)
                 continue
 
-            entry_sizing = _plan_entry_sizing(
-                instrument,
-                existing_position,
-                broker_positions,
-                fresh_quote.mid,
-                equity,
-                tier,
-                verdict.size_fraction,
-            )
-            if entry_sizing is None:
-                continue
-
-            if not _is_crypto(instrument) and entry_sizing.order_value_usd < fresh_quote.ask:
-                logger.info(
-                    "Skipping %s: staged order budget $%.2f cannot afford one share at $%.2f",
-                    instrument,
-                    entry_sizing.order_value_usd,
-                    fresh_quote.ask,
-                )
-                continue
-
-            account_with_ask = {
-                **account,
-                "_ask": str(fresh_quote.ask or fresh_quote.mid),
-                "_target_order_value": entry_sizing.order_value_usd,
-                "_position_size_fraction": verdict.size_fraction,
-            }
+            account_with_ask = {**account, "_ask": str(fresh_quote.ask or fresh_quote.mid)}
             order = strategy.build_order(signal, account_with_ask, tier)
             order_value = order.qty * (order.limit_price or order.stop_price or fresh_quote.ask or fresh_quote.mid)
 
@@ -825,9 +696,7 @@ async def _scan_entries(
             risk_verdict = check_risk(
                 daily_pnl=daily_pnl,
                 equity=equity,
-                open_position_count=(
-                    actual_open_position_count if existing_position is None else max(actual_open_position_count - 1, 0)
-                ),
+                open_position_count=actual_open_position_count,
                 buying_power=buying_power,
                 order_value=order_value,
                 daily_loss_limit=tier.daily_loss_limit,
@@ -929,56 +798,32 @@ async def _scan_entries(
 
             # Track position locally
             is_crypto = _is_crypto(instrument)
-            if existing_position is None:
-                position = Position(
-                    symbol=instrument,
-                    asset_class="crypto" if is_crypto else "equity",
-                    qty=filled_qty,
-                    entry_price=filled_price,
-                    high_water_price=filled_price,
-                    entry_time=datetime.now(UTC),
-                    broker_order_id=str(broker_order_id) if broker_order_id else None,
-                    strategy_name=strategy.name,
-                    stop_loss_price=order.stop_loss_price or 0.0,
-                    profit_target_price=order.take_profit_price or 0.0,
-                )
-                save_position(position)
-                open_positions.append(position)
-                open_positions_by_symbol[instrument] = position
-                actual_open_position_count += 1
-            else:
-                existing_position.qty = filled_qty
-                existing_position.entry_price = filled_price
-                existing_position.high_water_price = max(existing_position.high_water_price, fresh_quote.mid)
-                existing_position.trailing_active = False
-                existing_position.trailing_stop_price = None
-                existing_position.broker_order_id = (
-                    str(broker_order_id) if broker_order_id else existing_position.broker_order_id
-                )
-                existing_position.stop_loss_price = _round_position_price(
-                    filled_price * (1 - tier.stop_loss_pct),
-                    instrument,
-                )
-                existing_position.profit_target_price = _round_position_price(
-                    filled_price * (1 + tier.profit_target_pct),
-                    instrument,
-                )
-                update_position(existing_position)
-                position = existing_position
-
+            position = Position(
+                symbol=instrument,
+                asset_class="crypto" if is_crypto else "equity",
+                qty=filled_qty,
+                entry_price=filled_price,
+                high_water_price=filled_price,
+                entry_time=datetime.now(UTC),
+                broker_order_id=str(broker_order_id) if broker_order_id else None,
+                strategy_name=strategy.name,
+                stop_loss_price=order.stop_loss_price or 0.0,
+                profit_target_price=order.take_profit_price or 0.0,
+            )
+            save_position(position)
+            open_positions.append(position)
             upsert_daily_stats(today, orders_placed=1)
 
             # Deduct order cost so subsequent iterations see reduced buying power
-            order_cost = order_value
+            order_cost = filled_qty * filled_price
             buying_power = max(buying_power - order_cost, 0.0)
             account["buying_power"] = str(buying_power)
             total_existing_exposure += order_cost
+            actual_open_position_count += 1
 
             logger.info(
-                "ENTRY %s: stage=%d scale_in=%s score=%d threshold=%d qty=%.4f (filled=%.4f) price=%.2f",
+                "ENTRY %s: score=%d threshold=%d qty=%.4f (filled=%.4f) price=%.2f",
                 instrument,
-                entry_sizing.target_stage,
-                entry_sizing.is_scale_in,
                 signal.score,
                 signal.threshold,
                 order.qty,
@@ -1084,20 +929,25 @@ async def _scan_option_entries(
                 memories=recalled,
                 loop_id=loop_id,
             )
-            if not verdict.approve or verdict.size_fraction <= 0.0:
-                continue
+            if not verdict.approve:
+                if _paper_mode_overrides_analyst(verdict, signal.score, signal.threshold):
+                    logger.warning(
+                        "PAPER ANALYST OVERRIDE %s: score=%d threshold=%d confidence=%d — %s",
+                        underlying,
+                        signal.score,
+                        signal.threshold,
+                        verdict.confidence,
+                        verdict.reasoning,
+                    )
+                else:
+                    continue
 
             contracts = get_option_chain(underlying, quote.mid, signal.option_type)
             contract = OPTIONS_STRATEGY.select_contract(signal, contracts, quote.mid)
             if contract is None:
                 continue
 
-            order = OPTIONS_STRATEGY.build_order(
-                signal,
-                contract,
-                {**account, "_position_size_fraction": verdict.size_fraction},
-                tier,
-            )
+            order = OPTIONS_STRATEGY.build_order(signal, contract, account, tier)
             premium_total = order.qty * (contract.ask or order.limit_price or contract.mid or 0.0) * 100
             is_valid, reason = validate_options_order(
                 premium_total=premium_total,
@@ -1285,11 +1135,10 @@ async def _scan_exits(
                 continue
             plan = strategy.build_exit_plan(position, tier)
 
-            previous_managed_state = (
+            previous_trailing_state = (
                 position.trailing_active,
                 position.high_water_price,
                 position.trailing_stop_price,
-                position.profit_target_price,
             )
             exit_signal, updated_pos = evaluate_exit(
                 position,
@@ -1299,44 +1148,34 @@ async def _scan_exits(
                 atr_14=atr_14,
                 regime=regime,
             )
-            managed_position = updated_pos
 
             # Always persist trailing state updates
             if (
-                managed_position.trailing_active,
-                managed_position.high_water_price,
-                managed_position.trailing_stop_price,
-                managed_position.profit_target_price,
-            ) != previous_managed_state and exit_signal is None:
-                update_position(managed_position)
+                updated_pos.trailing_active,
+                updated_pos.high_water_price,
+                updated_pos.trailing_stop_price,
+            ) != previous_trailing_state:
+                update_position(updated_pos)
 
             if exit_signal is None:
                 continue
 
             # Use broker's actual qty (accounts for fees/rounding),
             # fall back to DB qty if broker lookup unavailable.
-            position_qty_before_exit = broker_qty if broker_qty is not None else managed_position.qty
-            sell_qty = position_qty_before_exit
+            sell_qty = broker_qty if broker_qty is not None else position.qty
             if sell_qty <= 0:
                 logger.warning(
                     "Broker reports 0 qty for %s, skipping sell", position.symbol
                 )
                 continue
-            if sell_qty != managed_position.qty:
+            if sell_qty != position.qty:
                 logger.info(
                     "Qty reconcile %s: DB=%.10f broker=%.10f (diff=%.10f)",
                     position.symbol,
-                    managed_position.qty,
+                    position.qty,
                     sell_qty,
-                    managed_position.qty - sell_qty,
+                    position.qty - sell_qty,
                 )
-
-            sell_qty = _planned_exit_qty(
-                managed_position,
-                sell_qty,
-                current_price,
-                exit_signal.exit_fraction,
-            )
 
             # Place sell order
             sell_order = Order(
@@ -1360,41 +1199,33 @@ async def _scan_exits(
                 )
                 continue
 
-            executed_qty = min(executed_qty, sell_qty)
+            executed_qty = min(executed_qty, position.qty)
             if executed_qty <= 0:
                 logger.warning("Exit order for %s reported no executable quantity", position.symbol)
                 continue
 
             exit_price = executed_price or current_price
-            if exit_signal.trigger in {"profit_target_partial", "atr_target_partial"}:
-                managed_position.trailing_active = True
-                managed_position.high_water_price = max(managed_position.high_water_price, exit_price)
-                managed_position.trailing_stop_price = max(
-                    exit_price * (1 - plan.trail_pct),
-                    managed_position.entry_price,
-                )
-                managed_position.profit_target_price = -1.0
             exited_position = Position(
-                id=managed_position.id,
-                symbol=managed_position.symbol,
-                asset_class=managed_position.asset_class,
+                id=position.id,
+                symbol=position.symbol,
+                asset_class=position.asset_class,
                 qty=executed_qty,
-                entry_price=managed_position.entry_price,
-                high_water_price=managed_position.high_water_price,
-                trailing_stop_price=managed_position.trailing_stop_price,
-                trailing_active=managed_position.trailing_active,
-                entry_time=managed_position.entry_time,
-                broker_order_id=managed_position.broker_order_id,
-                strategy_name=managed_position.strategy_name,
-                stop_loss_price=managed_position.stop_loss_price,
-                profit_target_price=managed_position.profit_target_price,
+                entry_price=position.entry_price,
+                high_water_price=position.high_water_price,
+                trailing_stop_price=position.trailing_stop_price,
+                trailing_active=position.trailing_active,
+                entry_time=position.entry_time,
+                broker_order_id=position.broker_order_id,
+                strategy_name=position.strategy_name,
+                stop_loss_price=position.stop_loss_price,
+                profit_target_price=position.profit_target_price,
             )
             log_trade(exited_position, exit_price, exit_signal.trigger)
 
-            remaining_qty = max(position_qty_before_exit - executed_qty, 0.0)
+            remaining_qty = max(position.qty - executed_qty, 0.0)
             if remaining_qty > 0:
-                managed_position.qty = remaining_qty
-                update_position(managed_position)
+                position.qty = remaining_qty
+                update_position(position)
                 logger.info(
                     "PARTIAL EXIT %s: filled=%.4f remaining=%.4f price=%.4f reason=%s",
                     position.symbol,

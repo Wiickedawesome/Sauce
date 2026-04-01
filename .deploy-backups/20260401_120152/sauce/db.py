@@ -257,13 +257,9 @@ def update_position(position: Position, db_path: str | None = None) -> None:
             logger.warning("Position %s not found for update", position.id)
             return
         row.qty = position.qty
-        row.entry_price = position.entry_price
         row.high_water_price = position.high_water_price
         row.trailing_stop_price = position.trailing_stop_price
         row.trailing_active = position.trailing_active
-        row.broker_order_id = position.broker_order_id
-        row.stop_loss_price = position.stop_loss_price
-        row.profit_target_price = position.profit_target_price
         session.commit()
     except Exception as exc:
         session.rollback()
