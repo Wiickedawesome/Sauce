@@ -15,7 +15,9 @@ ALTER TABLE daily_summary
     ADD COLUMN IF NOT EXISTS fees_paid_usd DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS slippage_paid_usd DECIMAL(18, 2) NOT NULL DEFAULT 0.0;
 
-CREATE OR REPLACE VIEW v_strategy_performance AS
+DROP VIEW IF EXISTS v_strategy_performance;
+
+CREATE VIEW v_strategy_performance AS
 SELECT
     strategy_name,
     COUNT(*) AS total_trades,
