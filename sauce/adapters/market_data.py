@@ -25,6 +25,7 @@ from sauce.core.config import get_settings
 from sauce.core.options_schemas import OptionContract
 from sauce.core.schemas import PriceReference
 from sauce.db import load_instrument_meta_extra, merge_instrument_meta_extra
+from sauce.market_calendar import calendar_days_for_equity_bars
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ _SNAPSHOT_FAILURE_THRESHOLD = 3
 _SNAPSHOT_SUPPRESS_FOR = timedelta(hours=6)
 _SNAPSHOT_FAILURES_KEY = "snapshot_failures"
 _SNAPSHOT_SUPPRESS_UNTIL_KEY = "snapshot_suppress_until"
+_snapshot_state_cache: dict[str, tuple[int, datetime | None]] = {}
 
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
@@ -67,11 +69,15 @@ def _get_option_client() -> Any:
     return OptionHistoricalDataClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key)
 
 
-def _get_option_contract_client() -> Any:
+def _get_option_contract_trading_client() -> Any:
     from alpaca.trading.client import TradingClient
 
     s = get_settings()
     return TradingClient(api_key=s.alpaca_api_key, secret_key=s.alpaca_secret_key, paper=s.alpaca_paper)
+
+
+def _get_option_contract_client() -> Any:
+    return _get_option_contract_trading_client()
 
 
 def is_crypto(symbol: str) -> bool:
@@ -89,7 +95,20 @@ def _quote_is_fresh(quote: PriceReference, ttl_seconds: int, now: datetime | Non
     return (ref_now - quote_time).total_seconds() <= ttl_seconds
 
 
+def _quote_ttl_seconds(symbol: str) -> int:
+    settings = get_settings()
+    return settings.crypto_data_ttl_seconds if _is_crypto(symbol) else settings.equity_data_ttl_seconds
+
+
+def clear_snapshot_state_cache() -> None:
+    _snapshot_state_cache.clear()
+
+
 def _load_snapshot_state(symbol: str) -> tuple[int, datetime | None]:
+    cached = _snapshot_state_cache.get(symbol)
+    if cached is not None:
+        return cached
+
     extra = load_instrument_meta_extra(symbol)
     failures_raw = extra.get(_SNAPSHOT_FAILURES_KEY, 0)
     suppress_raw = extra.get(_SNAPSHOT_SUPPRESS_UNTIL_KEY)
@@ -108,15 +127,19 @@ def _load_snapshot_state(symbol: str) -> tuple[int, datetime | None]:
         except ValueError:
             suppressed_until = None
 
-    return failures, suppressed_until
+    state = (failures, suppressed_until)
+    _snapshot_state_cache[symbol] = state
+    return state
 
 
 def _save_snapshot_state(symbol: str, failures: int, suppressed_until: datetime | None) -> None:
+    state = (max(failures, 0), suppressed_until)
+    _snapshot_state_cache[symbol] = state
     merge_instrument_meta_extra(
         symbol=symbol,
         asset_class="crypto" if _is_crypto(symbol) else "equity",
         extra_updates={
-            _SNAPSHOT_FAILURES_KEY: max(failures, 0),
+            _SNAPSHOT_FAILURES_KEY: state[0],
             _SNAPSHOT_SUPPRESS_UNTIL_KEY: suppressed_until.isoformat() if suppressed_until else None,
         },
     )
@@ -162,7 +185,6 @@ def get_snapshot_candidates(symbols: list[str], now: datetime | None = None) -> 
 def _recover_batch_quotes(
     symbols: list[str],
     result: dict[str, PriceReference],
-    ttl_seconds: int,
     now: datetime,
 ) -> None:
     if not symbols:
@@ -171,7 +193,7 @@ def _recover_batch_quotes(
     missing_symbols = [symbol for symbol in symbols if symbol not in result]
     stale_symbols = [
         symbol for symbol, quote in result.items()
-        if symbol in symbols and not _quote_is_fresh(quote, ttl_seconds, now)
+        if symbol in symbols and not _quote_is_fresh(quote, _quote_ttl_seconds(symbol), now)
     ]
     recovery_symbols = sorted(set(missing_symbols + stale_symbols))
 
@@ -183,7 +205,7 @@ def _recover_batch_quotes(
             continue
 
         result[symbol] = recovered_quote
-        if _quote_is_fresh(recovered_quote, ttl_seconds, now):
+        if _quote_is_fresh(recovered_quote, _quote_ttl_seconds(symbol), now):
             _mark_snapshot_available(symbol)
         else:
             _record_snapshot_failure(symbol, now)
@@ -348,7 +370,6 @@ def get_universe_snapshot(
     Symbols that fail to fetch are logged and omitted from the result.
     This means a partial result is possible — consumers must check presence.
     """
-    settings = get_settings()
     now = datetime.now(UTC)
     active_symbols = (
         [s for s in symbols if not _is_snapshot_suppressed(s, now)]
@@ -379,7 +400,7 @@ def get_universe_snapshot(
         except Exception as exc:
             logger.error("Crypto snapshot failed for %s: %s", crypto_symbols, exc)
 
-    _recover_batch_quotes(active_symbols, result, settings.data_ttl_seconds, now)
+    _recover_batch_quotes(active_symbols, result, now)
 
     if active_symbols and not result:
         raise MarketDataError(
@@ -701,8 +722,11 @@ def _days_back_for_bars(timeframe: str, bars: int, *, is_crypto: bool = False) -
         # Crypto: 24h/day, 7 days/week — exact calculation + small buffer
         days_needed = max(2, int(bars * mins / 1440) + 2)
     else:
-        # Equity: ~390 trading min/day, 2x buffer for weekends/holidays
-        days_needed = max(5, int((bars * mins / 390) * 2) + 5)
+        days_needed = calendar_days_for_equity_bars(
+            datetime.now(UTC).date(),
+            bars,
+            mins if timeframe != "1Day" else 390,
+        )
     return days_needed
 
 

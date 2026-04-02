@@ -17,11 +17,6 @@ from sauce.indicators.core import (
     compute_volume_ratio,
     compute_vwap,
 )
-from sauce.indicators.timeframes import (
-    MultiTimeframeScore,
-    get_mtf_confirmation,
-    score_multi_timeframe,
-)
 
 __all__ = [
     "compute_all",
@@ -33,8 +28,4 @@ __all__ = [
     "compute_stochastic",
     "compute_volume_ratio",
     "compute_vwap",
-    # Multi-timeframe
-    "MultiTimeframeScore",
-    "get_mtf_confirmation",
-    "score_multi_timeframe",
 ]

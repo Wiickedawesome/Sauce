@@ -153,6 +153,7 @@ class AuditEvent(StrictModel):
         "llm_response",
         "loop_start",
         "loop_end",
+        "regime_refresh",
         "safety_check",
         "supervisor_decision",
         "options_order_submitted",

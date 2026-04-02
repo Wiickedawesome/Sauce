@@ -150,6 +150,21 @@ class Settings(BaseSettings):
 
     min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
     data_ttl_seconds: int = Field(default=120, ge=1)
+    equity_data_ttl_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="Maximum quote staleness allowed for equities.",
+    )
+    crypto_data_ttl_seconds: int = Field(
+        default=120,
+        ge=1,
+        description="Maximum quote staleness allowed for crypto pairs.",
+    )
+    option_data_ttl_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="Maximum quote staleness allowed for option contract quotes.",
+    )
     max_price_deviation: float = Field(default=0.01, ge=0.0, le=1.0)
 
     # ── Volatility / ATR parameters (Finding 1.8 / 2.4) ─────────────────────
@@ -228,6 +243,64 @@ class Settings(BaseSettings):
         ge=1,
         le=60,
         description="Loop cadence in minutes. Default is 5.",
+    )
+    stale_order_cancel_equity_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=240,
+        description="Cancel open equity or options orders older than this many minutes.",
+    )
+    stale_order_cancel_crypto_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=240,
+        description="Cancel open crypto orders older than this many minutes.",
+    )
+    max_consecutive_losses: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Pause new entries after this many consecutive losses.",
+    )
+    consecutive_loss_cooldown_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description="Cooldown period after the consecutive-loss circuit breaker trips.",
+    )
+    intraday_regime_refresh_hours: int = Field(
+        default=4,
+        ge=1,
+        le=24,
+        description="Refresh the regime using a lightweight heuristic every N hours.",
+    )
+    allow_delayed_equity_entries: bool = Field(
+        default=False,
+        description="If False, block new equity and options entries while using delayed IEX data.",
+    )
+
+    # ── Net Performance Accounting ───────────────────────────────────────────
+    equity_fee_bps: float = Field(default=0.0, ge=0.0, le=500.0)
+    crypto_fee_bps: float = Field(default=15.0, ge=0.0, le=500.0)
+    option_fee_bps: float = Field(default=50.0, ge=0.0, le=500.0)
+    equity_slippage_bps: float = Field(default=5.0, ge=0.0, le=500.0)
+    crypto_slippage_bps: float = Field(default=15.0, ge=0.0, le=500.0)
+    option_slippage_bps: float = Field(default=50.0, ge=0.0, le=500.0)
+    performance_risk_free_rate: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Annualized risk-free rate used for Sharpe/Sortino reporting.",
+    )
+
+    # ── Research / Calibration ───────────────────────────────────────────────
+    strategy_profile_path: str = Field(
+        default="data/research/strategy_profiles.json",
+        description="JSON file with empirically calibrated strategy profiles.",
+    )
+    research_equity_universe_path: str = Field(
+        default="data/research/equity_universe_history.json",
+        description="Point-in-time equity universe file for research and backtests.",
     )
 
     # ── Signal Scoring ────────────────────────────────────────────────────────

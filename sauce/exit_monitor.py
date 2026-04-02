@@ -73,38 +73,37 @@ def evaluate_exit(
     symbol = position.symbol
     pid = position.id
 
-    # ── 1a. Hard stop (percentage-based) ─────────────────────────────────
+    # ── 1a/1b. Effective stop (percentage floor + optional ATR tightening) ──
     hard_stop_price = entry * (1 - plan.stop_loss_pct)
-    if current_price <= hard_stop_price:
+    active_stop_price = hard_stop_price
+    active_stop_trigger = "hard_stop"
+    active_stop_reason = (
+        f"Price {current_price:.4f} hit hard stop {hard_stop_price:.4f} "
+        f"({plan.stop_loss_pct:.1%} below entry {entry:.4f})"
+    )
+
+    if atr_14 is not None and atr_14 > 0:
+        atr_stop_price = entry - (atr_14 * atr_stop_multiple)
+        if atr_stop_price > active_stop_price:
+            active_stop_price = atr_stop_price
+            active_stop_trigger = "atr_stop"
+            active_stop_reason = (
+                f"Price {current_price:.4f} hit ATR stop {atr_stop_price:.4f} "
+                f"({atr_stop_multiple}× ATR {atr_14:.4f} below entry {entry:.4f})"
+            )
+
+    if current_price <= active_stop_price:
         return (
             ExitSignal(
-                trigger="hard_stop",
+                trigger=active_stop_trigger,
                 symbol=symbol,
                 position_id=pid,
                 side="sell",
                 current_price=current_price,
-                reason=f"Price {current_price:.4f} hit hard stop {hard_stop_price:.4f} "
-                f"({plan.stop_loss_pct:.1%} below entry {entry:.4f})",
+                reason=active_stop_reason,
             ),
             position,
         )
-
-    # ── 1b. ATR stop (volatility-scaled) ─────────────────────────────────
-    if atr_14 is not None and atr_14 > 0:
-        atr_stop_price = entry - (atr_14 * atr_stop_multiple)
-        if current_price <= atr_stop_price:
-            return (
-                ExitSignal(
-                    trigger="atr_stop",
-                    symbol=symbol,
-                    position_id=pid,
-                    side="sell",
-                    current_price=current_price,
-                    reason=f"Price {current_price:.4f} hit ATR stop {atr_stop_price:.4f} "
-                    f"({atr_stop_multiple}× ATR {atr_14:.4f} below entry {entry:.4f})",
-                ),
-                position,
-            )
 
     # ── 2. Trailing stop (if armed) ──────────────────────────────────────
     if (

@@ -43,6 +43,50 @@ VIX level: {vix:.1f}
 BTC RSI(14): {btc_rsi:.1f}"""
 
 
+def infer_intraday_regime(
+    btc_change: float,
+    eth_change: float,
+    spy_change: float,
+    vix: float,
+    btc_rsi: float,
+) -> tuple[str, str]:
+    """Heuristic regime refresh used between the daily LLM classifications."""
+    score = 0
+    if btc_change >= 0.02:
+        score += 1
+    elif btc_change <= -0.02:
+        score -= 1
+
+    if eth_change >= 0.02:
+        score += 1
+    elif eth_change <= -0.02:
+        score -= 1
+
+    if spy_change >= 0.01:
+        score += 1
+    elif spy_change <= -0.01:
+        score -= 1
+
+    if vix <= 16:
+        score += 1
+    elif vix >= 25:
+        score -= 1
+
+    if btc_rsi >= 60:
+        score += 1
+    elif btc_rsi <= 40:
+        score -= 1
+
+    if score >= 2:
+        regime = "bullish"
+    elif score <= -2:
+        regime = "bearish"
+    else:
+        regime = "neutral"
+
+    return regime, f"heuristic_score={score} btc={btc_change:.2%} eth={eth_change:.2%} spy={spy_change:.2%} vix={vix:.1f} btc_rsi={btc_rsi:.1f}"
+
+
 async def get_regime(
     btc_change: float,
     eth_change: float,
@@ -83,5 +127,17 @@ async def get_regime(
         return regime
 
     except (LLMError, json.JSONDecodeError, KeyError) as exc:
-        logger.warning("Morning brief failed (%s), defaulting to neutral", exc)
-        return "neutral"
+        fallback_regime, fallback_reason = infer_intraday_regime(
+            btc_change,
+            eth_change,
+            spy_change,
+            vix,
+            btc_rsi,
+        )
+        logger.warning(
+            "Morning brief failed (%s), falling back to %s (%s)",
+            exc,
+            fallback_regime,
+            fallback_reason,
+        )
+        return fallback_regime

@@ -102,6 +102,43 @@ async def test_run_cycle_reraises_after_logging_failure(monkeypatch: pytest.Monk
     assert loop_end_events[-1].payload["error"] == "boom"
 
 
+@pytest.mark.asyncio
+async def test_scan_entries_blocks_equities_on_delayed_iex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_FEED", "iex")
+    monkeypatch.setenv("ALLOW_DELAYED_EQUITY_ENTRIES", "false")
+    get_settings.cache_clear()
+
+    events: list[tuple[str, dict[str, object], str | None]] = []
+
+    class FakeEquityStrategy:
+        name = "equity_momentum"
+        instruments = ["AAPL"]
+
+        def eligible(self, instrument: str, regime: str) -> bool:
+            return True
+
+    snapshot_fetch = MagicMock(return_value={})
+    monkeypatch.setattr("sauce.loop.STRATEGIES", [FakeEquityStrategy()])
+    monkeypatch.setattr("sauce.loop._safe_get_universe_snapshot", snapshot_fetch)
+    monkeypatch.setattr(
+        "sauce.loop._audit_event",
+        lambda loop_id, event_type, payload, symbol=None: events.append((event_type, payload, symbol)),
+    )
+
+    await _scan_entries(
+        "neutral",
+        {"equity": "10000", "buying_power": "10000", "last_equity": "10000"},
+        [],
+        [],
+        [],
+        TradeMemory(),
+        loop_id="entry-test",
+    )
+
+    assert snapshot_fetch.call_count == 0
+    assert any(payload.get("reason") == "equity entries disabled on delayed IEX feed" for _, payload, _ in events)
+
+
 def test_main_propagates_cycle_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _boom() -> None:
         raise RuntimeError("cycle-failed")

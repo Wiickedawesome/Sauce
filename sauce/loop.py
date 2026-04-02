@@ -26,7 +26,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sauce.adapters.broker import (
     BrokerError,
@@ -58,11 +58,14 @@ from sauce.db import (
     close_position,
     get_daily_regime,
     load_all_memories,
+    load_instrument_meta_extra,
     load_open_option_positions,
     load_open_positions,
+    load_recent_closed_trade_pnls,
     log_option_trade,
     log_signal,
     log_trade,
+    merge_instrument_meta_extra,
     save_memory,
     save_option_position,
     save_position,
@@ -78,10 +81,14 @@ from sauce.memory import (
     build_outcome_description,
     build_situation_description,
 )
-from sauce.morning_brief import get_regime
-from sauce.options_safety import check_options_position, validate_options_order
+from sauce.morning_brief import get_regime, infer_intraday_regime
+from sauce.options_safety import (
+    check_options_allocation,
+    check_options_position,
+    validate_options_order,
+)
 from sauce.reflection import reflect_on_trade
-from sauce.risk import check_risk
+from sauce.risk import check_consecutive_loss_circuit, check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion
 from sauce.strategies.equity_momentum import EquityMomentum
 from sauce.strategies.options_momentum import OptionsMomentum
@@ -105,6 +112,11 @@ _SCALE_IN_CONFIRM_GAINS = (0.0, 0.0075, 0.015)
 _CRYPTO_MIN_NOTIONAL = 10.0
 _EXIT_POLL_ATTEMPTS = 4
 _EXIT_POLL_INTERVAL = 1.0  # seconds between polls
+_SYSTEM_META_SYMBOL = "__SYSTEM__"
+_LOSS_COOLDOWN_KEY = "consecutive_loss_cooldown_until"
+_REGIME_REFRESHED_AT_KEY = "regime_refreshed_at"
+_REGIME_STATE_KEY = "regime_state"
+_REGIME_SOURCE_KEY = "regime_source"
 
 
 # ── Strategies ────────────────────────────────────────────────────────────────
@@ -133,11 +145,80 @@ def _is_crypto(symbol: str) -> bool:
     return "/" in symbol
 
 
+def _quote_ttl_seconds(symbol: str, *, is_option: bool = False) -> int:
+    settings = get_settings()
+    if is_option:
+        return settings.option_data_ttl_seconds
+    return settings.crypto_data_ttl_seconds if _is_crypto(symbol) else settings.equity_data_ttl_seconds
+
+
+def _delayed_equity_entries_blocked() -> bool:
+    settings = get_settings()
+    return settings.data_feed == "iex" and not settings.allow_delayed_equity_entries
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _today() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def _loss_cooldown_until() -> datetime | None:
+    extra = load_instrument_meta_extra(_SYSTEM_META_SYMBOL)
+    raw_value = extra.get(_LOSS_COOLDOWN_KEY)
+    if not isinstance(raw_value, str) or not raw_value:
+        return None
+    try:
+        cooldown_until = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+    if cooldown_until.tzinfo is None:
+        return cooldown_until.replace(tzinfo=UTC)
+    return cooldown_until.astimezone(UTC)
+
+
+def _parse_optional_datetime(raw_value: object) -> datetime | None:
+    if not isinstance(raw_value, str) or not raw_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _set_loss_cooldown(cooldown_until: datetime | None) -> None:
+    merge_instrument_meta_extra(
+        symbol=_SYSTEM_META_SYMBOL,
+        asset_class="system",
+        extra_updates={_LOSS_COOLDOWN_KEY: cooldown_until.isoformat() if cooldown_until else None},
+    )
+
+
+def _load_regime_state() -> tuple[str | None, datetime | None, str | None]:
+    extra = load_instrument_meta_extra(_SYSTEM_META_SYMBOL)
+    regime = extra.get(_REGIME_STATE_KEY)
+    source = extra.get(_REGIME_SOURCE_KEY)
+    if not isinstance(regime, str) or regime not in {"bullish", "neutral", "bearish"}:
+        regime = None
+    if not isinstance(source, str):
+        source = None
+    return regime, _parse_optional_datetime(extra.get(_REGIME_REFRESHED_AT_KEY)), source
+
+
+def _set_regime_state(regime: str, refreshed_at: datetime, source: str) -> None:
+    merge_instrument_meta_extra(
+        symbol=_SYSTEM_META_SYMBOL,
+        asset_class="system",
+        extra_updates={
+            _REGIME_STATE_KEY: regime,
+            _REGIME_REFRESHED_AT_KEY: refreshed_at.isoformat(),
+            _REGIME_SOURCE_KEY: source,
+        },
+    )
 
 
 def _hour_et() -> int:
@@ -499,6 +580,12 @@ def _pending_option_underlyings(recent_orders: list[dict[str, object]], underlyi
 def _broker_position_exposure(broker_positions: list[dict[str, object]]) -> float:
     total = 0.0
     for position in broker_positions:
+        qty = _parse_positive_float(position.get("qty") or position.get("qty_available"))
+        avg_entry_price = _parse_positive_float(position.get("avg_entry_price"))
+        if qty is not None and avg_entry_price is not None:
+            total += qty * avg_entry_price
+            continue
+
         market_value = position.get("market_value") or 0
         try:
             total += abs(float(str(market_value)))
@@ -516,10 +603,11 @@ def _supervisor_review(
     loop_id: str,
 ) -> SupervisorDecision:
     settings = get_settings()
+    ttl_seconds = _quote_ttl_seconds(symbol)
 
     if settings.trading_pause:
         decision = SupervisorDecision(action="abort", reason="TRADING_PAUSE enabled")
-    elif not _is_quote_fresh(fresh_quote, settings.data_ttl_seconds):
+    elif not _is_quote_fresh(fresh_quote, ttl_seconds):
         decision = SupervisorDecision(action="abort", reason="fresh quote is stale")
     elif order.qty <= 0:
         decision = SupervisorDecision(action="abort", reason="order quantity is zero")
@@ -576,13 +664,14 @@ def _supervisor_review_option(
     loop_id: str,
 ) -> SupervisorDecision:
     settings = get_settings()
+    ttl_seconds = _quote_ttl_seconds(contract_symbol, is_option=True)
     baseline = snapshot_quote.mid if snapshot_quote.mid > 0 else fresh_quote.mid
     deviation = abs(fresh_quote.mid - baseline) / baseline if baseline > 0 else 1.0
     order_value = order.qty * order.limit_price * 100
 
     if settings.trading_pause:
         decision = SupervisorDecision(action="abort", reason="TRADING_PAUSE enabled")
-    elif not _is_quote_fresh(fresh_quote, settings.data_ttl_seconds):
+    elif not _is_quote_fresh(fresh_quote, ttl_seconds):
         decision = SupervisorDecision(action="abort", reason="fresh option quote is stale")
     elif order.qty <= 0:
         decision = SupervisorDecision(action="abort", reason="options order quantity is zero")
@@ -718,10 +807,24 @@ async def _scan_entries(
     pending_symbols = _pending_order_symbols(recent_orders)
     actual_open_position_count = len(broker_positions)
     total_existing_exposure = _broker_position_exposure(broker_positions)
+    delayed_equity_entries_blocked = _delayed_equity_entries_blocked()
+
+    if delayed_equity_entries_blocked:
+        _audit_event(
+            loop_id,
+            "safety_check",
+            {
+                "action": "skip_strategy",
+                "reason": "equity entries disabled on delayed IEX feed",
+                "data_feed": settings.data_feed,
+            },
+        )
 
     # ── Pre-filter eligible instruments ──
     eligible_instruments: list[tuple[Strategy, str]] = []
     for strategy in STRATEGIES:
+        if delayed_equity_entries_blocked and strategy.name == "equity_momentum":
+            continue
         for instrument in strategy.instruments:
             if instrument in pending_symbols:
                 continue
@@ -749,7 +852,8 @@ async def _scan_entries(
         quote = quotes_map.get(instrument)
         if quote is None:
             continue
-        if not _is_quote_fresh(quote, settings.data_ttl_seconds):
+        ttl_seconds = _quote_ttl_seconds(instrument)
+        if not _is_quote_fresh(quote, ttl_seconds):
             _audit_event(
                 loop_id,
                 "safety_check",
@@ -758,7 +862,7 @@ async def _scan_entries(
                     "action": "skip_symbol",
                     "reason": "stale quote",
                     "quote_as_of": quote.as_of.isoformat(),
-                    "ttl_seconds": settings.data_ttl_seconds,
+                    "ttl_seconds": ttl_seconds,
                 },
                 symbol=instrument,
             )
@@ -833,7 +937,7 @@ async def _scan_entries(
             )
 
             fresh_quote = get_quote(instrument)
-            if not _is_quote_fresh(fresh_quote, settings.data_ttl_seconds):
+            if not _is_quote_fresh(fresh_quote, ttl_seconds):
                 _audit_event(
                     loop_id,
                     "supervisor_decision",
@@ -1068,6 +1172,17 @@ async def _scan_option_entries(
     settings = get_settings()
     if not settings.options_enabled:
         return
+    if _delayed_equity_entries_blocked():
+        _audit_event(
+            loop_id,
+            "safety_check",
+            {
+                "action": "skip_strategy",
+                "reason": "options entries disabled on delayed IEX feed",
+                "data_feed": settings.data_feed,
+            },
+        )
+        return
 
     equity = float(account.get("equity", "0"))
     buying_power = float(account.get("buying_power", "0"))
@@ -1079,8 +1194,18 @@ async def _scan_option_entries(
     open_underlyings = {position.underlying for position in open_option_positions}
     pending_underlyings = _pending_option_underlyings(recent_orders, OPTIONS_STRATEGY.instruments)
     actual_open_position_count = len(broker_positions)
-    total_existing_exposure = _broker_position_exposure(broker_positions)
     existing_options_value = sum(position.entry_price * position.qty * 100 for position in open_option_positions)
+    total_existing_exposure = _broker_position_exposure(broker_positions) + existing_options_value
+
+    allocation_ok, allocation_reason = check_options_allocation(existing_options_value, equity)
+    if not allocation_ok:
+        _audit_event(
+            loop_id,
+            "supervisor_decision",
+            {"action": "abort", "reason": allocation_reason, "stage": "options_allocation_preflight"},
+        )
+        logger.info("Skipping options entry scan: %s", allocation_reason)
+        return
 
     eligible_underlyings = [
         underlying
@@ -1101,7 +1226,7 @@ async def _scan_option_entries(
     _audit_missing_quotes(loop_id, "options_entry_batch_quotes", snapshot_underlyings, quotes_map)
     for underlying in eligible_underlyings:
         quote = quotes_map.get(underlying)
-        if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
+        if quote is None or not _is_quote_fresh(quote, _quote_ttl_seconds(underlying)):
             continue
 
         try:
@@ -1260,7 +1385,6 @@ async def _scan_exits(
     loop_id: str = "exit",
 ) -> None:
     """Check exit conditions for each open position."""
-    settings = get_settings()
     today = _today()
     tier = get_tier_params(equity)
 
@@ -1306,7 +1430,8 @@ async def _scan_exits(
             quote = exit_quotes_map.get(position.symbol)
             if quote is None:
                 continue
-            if not _is_quote_fresh(quote, settings.data_ttl_seconds):
+            ttl_seconds = _quote_ttl_seconds(position.symbol)
+            if not _is_quote_fresh(quote, ttl_seconds):
                 _audit_event(
                     loop_id,
                     "safety_check",
@@ -1315,7 +1440,7 @@ async def _scan_exits(
                         "action": "skip_symbol",
                         "reason": "stale exit quote",
                         "quote_as_of": quote.as_of.isoformat(),
-                        "ttl_seconds": settings.data_ttl_seconds,
+                        "ttl_seconds": ttl_seconds,
                     },
                     symbol=position.symbol,
                 )
@@ -1455,14 +1580,20 @@ async def _scan_exits(
                 stop_loss_price=managed_position.stop_loss_price,
                 profit_target_price=managed_position.profit_target_price,
             )
-            log_trade(exited_position, exit_price, exit_signal.trigger)
-            realized_pnl = (exit_price - managed_position.entry_price) * executed_qty
+            accounting = log_trade(exited_position, exit_price, exit_signal.trigger)
+            realized_pnl = accounting.realized_pnl
 
             remaining_qty = max(position_qty_before_exit - executed_qty, 0.0)
             if remaining_qty > 0:
                 managed_position.qty = remaining_qty
                 update_position(managed_position)
-                upsert_daily_stats(today, realized_pnl_usd=realized_pnl)
+                upsert_daily_stats(
+                    today,
+                    realized_pnl_usd=accounting.realized_pnl,
+                    gross_realized_pnl_usd=accounting.gross_pnl,
+                    fees_paid_usd=accounting.fees_paid,
+                    slippage_paid_usd=accounting.slippage_paid,
+                )
                 logger.info(
                     "PARTIAL EXIT %s: filled=%.4f remaining=%.4f price=%.4f reason=%s",
                     position.symbol,
@@ -1474,7 +1605,14 @@ async def _scan_exits(
                 continue
 
             close_position(position.id)
-            upsert_daily_stats(today, trades_closed=1, realized_pnl_usd=realized_pnl)
+            upsert_daily_stats(
+                today,
+                trades_closed=1,
+                realized_pnl_usd=accounting.realized_pnl,
+                gross_realized_pnl_usd=accounting.gross_pnl,
+                fees_paid_usd=accounting.fees_paid,
+                slippage_paid_usd=accounting.slippage_paid,
+            )
             logger.info(
                 "EXIT %s: trigger=%s price=%.4f reason=%s",
                 position.symbol,
@@ -1486,7 +1624,7 @@ async def _scan_exits(
             # ── Post-trade reflection (1 LLM call) ──
             try:
                 hold_hrs = (datetime.now(UTC) - position.entry_time).total_seconds() / 3600
-                realized_pnl = (exit_price - position.entry_price) * executed_qty
+                realized_pnl = accounting.realized_pnl
                 sit = build_situation_description(
                     symbol=position.symbol,
                     regime=regime,
@@ -1536,7 +1674,6 @@ async def _scan_option_exits(
     if not open_option_positions:
         return
 
-    settings = get_settings()
     today = _today()
     broker_option_qty_map: dict[str, int] = {}
     try:
@@ -1562,7 +1699,10 @@ async def _scan_option_exits(
     for position in open_option_positions:
         try:
             quote = quotes_map.get(position.contract_symbol)
-            if quote is None or not _is_quote_fresh(quote, settings.data_ttl_seconds):
+            if quote is None or not _is_quote_fresh(
+                quote,
+                _quote_ttl_seconds(position.contract_symbol, is_option=True),
+            ):
                 continue
 
             current_bid = quote.bid if quote.bid > 0 else quote.mid
@@ -1592,11 +1732,18 @@ async def _scan_option_exits(
 
             exit_price = filled_price or exit_order.limit_price
             settled_position = position.model_copy(update={"qty": executed_qty})
-            log_option_trade(settled_position, exit_price, exit_signal.reason)
+            accounting = log_option_trade(settled_position, exit_price, exit_signal.reason)
 
             remaining_qty = position.qty - executed_qty
             if remaining_qty > 0:
                 update_option_position(position.model_copy(update={"qty": remaining_qty}))
+                upsert_daily_stats(
+                    today,
+                    realized_pnl_usd=accounting.realized_pnl,
+                    gross_realized_pnl_usd=accounting.gross_pnl,
+                    fees_paid_usd=accounting.fees_paid,
+                    slippage_paid_usd=accounting.slippage_paid,
+                )
                 logger.info(
                     "PARTIAL OPTION EXIT %s: filled=%d remaining=%d price=%.4f reason=%s",
                     position.contract_symbol,
@@ -1608,7 +1755,14 @@ async def _scan_option_exits(
                 continue
 
             close_option_position(position.position_id)
-            upsert_daily_stats(today, trades_closed=1)
+            upsert_daily_stats(
+                today,
+                trades_closed=1,
+                realized_pnl_usd=accounting.realized_pnl,
+                gross_realized_pnl_usd=accounting.gross_pnl,
+                fees_paid_usd=accounting.fees_paid,
+                slippage_paid_usd=accounting.slippage_paid,
+            )
             logger.info(
                 "OPTION EXIT %s: trigger=%s price=%.4f reason=%s",
                 position.contract_symbol,
@@ -1740,29 +1894,41 @@ def _reconcile_stale_positions(
             stale.append(position)
 
     for position in stale:
-        # Log the trade with entry_price as exit price (best approximation
-        # when broker already sold the position outside our control).
-        log_trade(position, position.entry_price, "broker_reconciliation")
+        exit_price = position.entry_price
+        try:
+            quote = get_quote(position.symbol)
+            if quote.mid > 0:
+                exit_price = quote.mid
+        except MarketDataError as exc:
+            logger.warning(
+                "Could not fetch reconciliation quote for %s, falling back to entry price: %s",
+                position.symbol,
+                exc,
+            )
+
+        log_trade(position, exit_price, "broker_reconciliation")
         close_position(position.id)
         open_positions.remove(position)
         logger.warning(
             "RECONCILED stale DB position %s (id=%s): broker does not hold this symbol — "
-            "logging trade and closing (qty=%.8f entry=%.6f)",
+            "logging trade and closing (qty=%.8f entry=%.6f exit=%.6f)",
             position.symbol,
             position.id,
             position.qty,
             position.entry_price,
+            exit_price,
         )
         _audit_event(
             loop_id,
             "supervisor_decision",
             {
-                "action": "broker_reconciliation",
+                "action": "close_stale_position",
                 "reason": "DB position not found at broker — closing stale record",
                 "symbol": position.symbol,
+                "entry_price": position.entry_price,
                 "position_id": position.id,
                 "qty": position.qty,
-                "entry_price": position.entry_price,
+                "exit_price": exit_price,
             },
             symbol=position.symbol,
         )
@@ -1779,7 +1945,6 @@ async def run_cycle() -> None:
     regime = "neutral"
     loop_status = "ok"
     loop_error: str | None = None
-    fatal_exc: Exception | None = None
 
     _audit_event(
         cycle_id,
@@ -1793,12 +1958,16 @@ async def run_cycle() -> None:
     )
 
     try:
-        # Morning brief: check DB cache first (avoids duplicate LLM calls
-        # if cron fires multiple times before the first cycle finishes).
+        if settings.data_feed == "iex" and settings.equity_universe:
+            logger.warning(
+                "Equity trading is using the delayed IEX feed; new equity/options entries are blocked unless ALLOW_DELAYED_EQUITY_ENTRIES=true"
+            )
+
+        # Morning brief: use the daily LLM classification, then refresh with a
+        # deterministic heuristic every few hours so regime can adapt intraday.
         cached_regime = get_daily_regime(today)
-        if cached_regime:
-            regime = cached_regime
-        elif _hour_et() >= 7:
+        stored_regime, stored_refreshed_at, _stored_source = _load_regime_state()
+        if cached_regime is None and _hour_et() >= 7:
             brief_data = _gather_brief_data()
             regime = await get_regime(
                 btc_change=brief_data["btc_change"],
@@ -1808,8 +1977,39 @@ async def run_cycle() -> None:
                 btc_rsi=brief_data["btc_rsi"],
                 loop_id=cycle_id,
             )
+            _set_regime_state(regime, datetime.now(UTC), "daily_llm")
             upsert_daily_stats(today, regime=regime)
             logger.info("Morning brief: regime=%s", regime)
+        else:
+            regime = stored_regime or cached_regime or regime
+            now_utc = datetime.now(UTC)
+            refresh_due = stored_refreshed_at is None or (
+                (now_utc - stored_refreshed_at).total_seconds()
+                >= settings.intraday_regime_refresh_hours * 3600
+            )
+            if cached_regime is not None and refresh_due:
+                brief = _gather_brief_data()
+                regime, reasoning = infer_intraday_regime(
+                    brief["btc_change"],
+                    brief["eth_change"],
+                    brief["spy_change"],
+                    brief["vix"],
+                    brief["btc_rsi"],
+                )
+                _set_regime_state(regime, now_utc, "intraday_heuristic")
+                upsert_daily_stats(today, regime=regime)
+                _audit_event(
+                    cycle_id,
+                    "regime_refresh",
+                    {
+                        "regime": regime,
+                        "source": "intraday_heuristic",
+                        "reasoning": reasoning,
+                    },
+                )
+                logger.info("Intraday regime refresh: regime=%s — %s", regime, reasoning)
+            else:
+                logger.info("Morning brief cache hit: regime=%s", regime)
 
         # Account state (needed for both exit and entry sizing)
         account = get_account(cycle_id)
@@ -1825,6 +2025,45 @@ async def run_cycle() -> None:
         daily_pnl = (equity - starting) / starting if starting > 0 else 0.0
         tier = get_tier_params(equity)
         daily_loss_limit = min(settings.max_daily_loss_pct, tier.daily_loss_limit)
+
+        cooldown_until = _loss_cooldown_until()
+        now_utc = datetime.now(UTC)
+        if cooldown_until is not None:
+            if cooldown_until > now_utc:
+                _audit_event(
+                    cycle_id,
+                    "risk_gate",
+                    {
+                        "action": "halt_cycle",
+                        "reason": "consecutive loss cooldown active",
+                        "cooldown_until": cooldown_until.isoformat(),
+                    },
+                )
+                logger.warning("Consecutive-loss cooldown active until %s", cooldown_until.isoformat())
+                loop_status = "halted"
+                return
+            _set_loss_cooldown(None)
+
+        loss_verdict = check_consecutive_loss_circuit(
+            load_recent_closed_trade_pnls(settings.max_consecutive_losses),
+            settings.max_consecutive_losses,
+        )
+        if not loss_verdict.passed:
+            cooldown_until = now_utc + timedelta(hours=settings.consecutive_loss_cooldown_hours)
+            _set_loss_cooldown(cooldown_until)
+            _audit_event(
+                cycle_id,
+                "risk_gate",
+                {
+                    "action": "halt_cycle",
+                    "rule": loss_verdict.rule,
+                    "reason": loss_verdict.reason,
+                    "cooldown_until": cooldown_until.isoformat(),
+                },
+            )
+            logger.warning("Consecutive-loss circuit tripped: %s", loss_verdict.reason)
+            loop_status = "halted"
+            return
 
         broker_positions = get_positions(cycle_id)
         stale_orders_cancelled = cancel_stale_orders(loop_id=cycle_id)
@@ -1922,8 +2161,8 @@ async def run_cycle() -> None:
     except Exception as exc:
         loop_status = "failed"
         loop_error = str(exc)
-        fatal_exc = exc
         logger.error("Cycle %s failed: %s", cycle_id, exc, exc_info=True)
+        raise
     finally:
         _audit_event(
             cycle_id,
@@ -1934,9 +2173,6 @@ async def run_cycle() -> None:
                 "error": loop_error,
             },
         )
-
-    if fatal_exc is not None:
-        raise fatal_exc
 
 
 def main() -> None:

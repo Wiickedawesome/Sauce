@@ -30,6 +30,8 @@ from sauce.core.options_schemas import (
     OptionsSignalResult,
 )
 from sauce.core.schemas import Indicators
+from sauce.market_calendar import is_us_equity_trading_day
+from sauce.research.profiles import DEFAULT_STRATEGY_PROFILES, get_strategy_profile
 from sauce.strategy import TierParams
 
 logger = logging.getLogger(__name__)
@@ -41,27 +43,17 @@ class OptionsMomentum:
     """Aggressive momentum strategy for options on liquid underlyings."""
 
     name: str = "options_momentum"
+    DEFAULT_PROFILE = DEFAULT_STRATEGY_PROFILES["options_momentum"]
 
-    # Scoring weights (underlying analysis)
-    RSI_OVERSOLD_THRESHOLD = 35  # Buy calls
-    RSI_OVERBOUGHT_THRESHOLD = 65  # Buy puts
-    RSI_POINTS = 25
-
-    TREND_ABOVE_SMA20_POINTS = 15
-    MACD_MOMENTUM_POINTS = 20
-    VOLUME_RATIO_MIN = 1.2
-    VOLUME_POINTS = 15
-
-    BASE_THRESHOLD = 40  # Aggressive
-    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": -5}  # Easier entry in volatility
-
-    # Contract selection
-    MIN_OPEN_INTEREST = 100
-    MAX_SPREAD_PCT = 0.10  # Max 10% bid-ask spread
+    def __init__(self, profile_override: dict[str, Any] | None = None) -> None:
+        self._profile_override = profile_override
 
     @property
     def _settings(self):
         return get_settings()
+
+    def _profile(self) -> dict[str, Any]:
+        return get_strategy_profile(self.name, self.DEFAULT_PROFILE, self._profile_override)
 
     @property
     def instruments(self) -> list[str]:
@@ -78,6 +70,8 @@ class OptionsMomentum:
         # Options only during RTH
         now_et = datetime.now(ET)
         if now_et.weekday() >= 5:
+            return False
+        if not is_us_equity_trading_day(now_et.date()):
             return False
         hour, minute = now_et.hour, now_et.minute
         if hour < 9 or (hour == 9 and minute < 30):
@@ -104,15 +98,16 @@ class OptionsMomentum:
         vol_ratio = indicators.volume_ratio
         sma_20 = indicators.sma_20
         atr_14 = indicators.atr_14
+        profile = self._profile()
 
         # === DIRECTION DETERMINATION ===
         # RSI oversold → buy calls (bullish reversal)
-        if rsi_14 is not None and rsi_14 < self.RSI_OVERSOLD_THRESHOLD:
-            points += self.RSI_POINTS
+        if rsi_14 is not None and rsi_14 < float(profile["rsi_oversold_threshold"]):
+            points += int(profile["rsi_points"])
             option_type = "call"
         # RSI overbought → buy puts (bearish reversal)
-        elif rsi_14 is not None and rsi_14 > self.RSI_OVERBOUGHT_THRESHOLD:
-            points += self.RSI_POINTS
+        elif rsi_14 is not None and rsi_14 > float(profile["rsi_overbought_threshold"]):
+            points += int(profile["rsi_points"])
             option_type = "put"
 
         # === TREND CONFIRMATION ===
@@ -120,22 +115,22 @@ class OptionsMomentum:
             (option_type == "call" and current_price > sma_20)
             or (option_type == "put" and current_price < sma_20)
         ):
-            points += self.TREND_ABOVE_SMA20_POINTS
+            points += int(profile["trend_above_sma20_points"])
 
         # === MACD MOMENTUM ===
         if macd_hist is not None and (
             (option_type == "call" and macd_hist > 0)
             or (option_type == "put" and macd_hist < 0)
         ):
-            points += self.MACD_MOMENTUM_POINTS
+            points += int(profile["macd_momentum_points"])
 
         # === VOLUME CONFIRMATION ===
-        if vol_ratio is not None and vol_ratio >= self.VOLUME_RATIO_MIN:
-            points += self.VOLUME_POINTS
+        if vol_ratio is not None and vol_ratio >= float(profile["volume_ratio_min"]):
+            points += int(profile["volume_points"])
 
         # Apply regime shift
-        shift = self.REGIME_SHIFT.get(regime, 0)
-        threshold = self.BASE_THRESHOLD + shift
+        shift = int(profile["regime_shift"].get(regime, 0))
+        threshold = int(profile["base_threshold"]) + shift
 
         fired = points >= threshold
 
@@ -189,6 +184,7 @@ class OptionsMomentum:
         - Tight bid-ask spread
         """
         settings = self._settings
+        profile = self._profile()
 
         # Filter by type
         candidates = [c for c in available_contracts if c.option_type == signal.option_type]
@@ -211,7 +207,7 @@ class OptionsMomentum:
         candidates = [
             c
             for c in candidates
-            if c.open_interest is not None and c.open_interest >= self.MIN_OPEN_INTEREST
+            if c.open_interest is not None and c.open_interest >= int(profile["min_open_interest"])
         ]
 
         # Filter by spread
@@ -221,7 +217,7 @@ class OptionsMomentum:
             if c.bid is not None
             and c.ask is not None
             and c.bid > 0
-            and (c.ask - c.bid) / c.bid <= self.MAX_SPREAD_PCT
+            and (c.ask - c.bid) / c.bid <= float(profile["max_spread_pct"])
         ]
 
         if not candidates:

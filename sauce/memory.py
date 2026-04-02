@@ -17,7 +17,10 @@ from dataclasses import dataclass
 
 try:
     from rank_bm25 import BM25Plus
+    _BM25_AVAILABLE = True
 except ModuleNotFoundError:
+    _BM25_AVAILABLE = False
+
     class BM25Plus:  # type: ignore[no-redef]
         """Minimal BM25-style fallback when rank_bm25 is unavailable."""
 
@@ -75,7 +78,7 @@ class TradeMemory:
     def __init__(self, entries: list[MemoryEntry] | None = None) -> None:
         self._entries: list[MemoryEntry] = list(entries) if entries else []
         self._index: BM25Plus | None = None
-        if not hasattr(BM25Plus, "__module__") or BM25Plus.__module__ == __name__:
+        if not _BM25_AVAILABLE:
             logger.warning("rank_bm25 not installed; TradeMemory is using the built-in fallback scorer")
         if self._entries:
             self._rebuild_index()

@@ -28,6 +28,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_crypto_order_symbol(symbol: str) -> bool:
+    normalized = symbol.strip().upper()
+    if "/" in normalized:
+        return True
+
+    settings = get_settings()
+    crypto_aliases = {
+        alias
+        for pair in settings.crypto_universe
+        for alias in (pair.upper(), pair.replace("/", "").upper())
+    }
+    return normalized in crypto_aliases
+
+
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
 
@@ -643,7 +657,7 @@ def get_recent_orders(loop_id: str = "unset") -> list[dict[str, Any]]:
 # ── Stale order cancellation ─────────────────────────────────────────────────
 
 
-def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> int:
+def cancel_stale_orders(max_age_minutes: int | None = None, loop_id: str = "unset") -> int:
     """
     Cancel any open (unfilled) orders older than max_age_minutes.
 
@@ -664,8 +678,8 @@ def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> in
             return 0
 
         now = datetime.now(UTC)
-        cutoff = now - timedelta(minutes=max_age_minutes)
         cancelled = 0
+        settings = get_settings()
 
         for order in open_orders:
             created_at = getattr(order, "created_at", None)
@@ -674,6 +688,15 @@ def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> in
             # Normalise naive timestamps to UTC
             if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=UTC)
+            symbol = str(getattr(order, "symbol", "?"))
+            order_max_age_minutes = max_age_minutes
+            if order_max_age_minutes is None:
+                order_max_age_minutes = (
+                    settings.stale_order_cancel_crypto_minutes
+                    if _is_crypto_order_symbol(symbol)
+                    else settings.stale_order_cancel_equity_minutes
+                )
+            cutoff = now - timedelta(minutes=order_max_age_minutes)
             if created_at < cutoff:
                 try:
                     order_id = str(getattr(order, "id", ""))
@@ -682,7 +705,7 @@ def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> in
                     logger.info(
                         "Cancelled stale order %s for %s (age: %d min) [loop_id=%s]",
                         order_id,
-                        getattr(order, "symbol", "?"),
+                        symbol,
                         int((now - created_at).total_seconds() / 60),
                         loop_id,
                     )
@@ -693,8 +716,9 @@ def cancel_stale_orders(max_age_minutes: int = 30, loop_id: str = "unset") -> in
                             payload={
                                 "action": "cancel_stale_order",
                                 "order_id": order_id,
-                                "symbol": str(getattr(order, "symbol", "?")),
+                                "symbol": symbol,
                                 "age_minutes": int((now - created_at).total_seconds() / 60),
+                                "max_age_minutes": order_max_age_minutes,
                             },
                             timestamp=now,
                         )

@@ -109,3 +109,32 @@ def check_risk(
             )
 
     return RiskVerdict(passed=True, rule="all", reason="")
+
+
+def check_consecutive_loss_circuit(
+    recent_realized_pnls: list[float],
+    max_consecutive_losses: int,
+) -> RiskVerdict:
+    """Trip when the most recent closed trades are all losses.
+
+    `recent_realized_pnls` should be ordered newest-first.
+    """
+    if max_consecutive_losses <= 0:
+        return RiskVerdict(passed=True, rule="all", reason="")
+
+    if len(recent_realized_pnls) < max_consecutive_losses:
+        return RiskVerdict(passed=True, rule="all", reason="")
+
+    recent_window = recent_realized_pnls[:max_consecutive_losses]
+    if all(pnl < 0 for pnl in recent_window):
+        loss_total = sum(recent_window)
+        return RiskVerdict(
+            passed=False,
+            rule="consecutive_losses",
+            reason=(
+                f"Last {max_consecutive_losses} closed trades were losses "
+                f"(${loss_total:,.2f} total)"
+            ),
+        )
+
+    return RiskVerdict(passed=True, rule="all", reason="")

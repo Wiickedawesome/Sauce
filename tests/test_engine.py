@@ -19,12 +19,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from sauce.core.config import get_settings
 from sauce.core.options_schemas import OptionContract, OptionsPosition
 from sauce.core.schemas import Indicators
 from sauce.exit_monitor import evaluate_exit
 from sauce.options_safety import check_options_position, validate_options_order
-from sauce.risk import check_risk
+from sauce.risk import check_consecutive_loss_circuit, check_risk
 from sauce.strategies.crypto_momentum import CryptoMomentumReversion, _compute_bb_pct
+from sauce.strategies.equity_momentum import EquityMomentum
 from sauce.strategies.options_momentum import OptionsMomentum
 from sauce.strategy import (
     SEED_PARAMS,
@@ -385,6 +387,15 @@ class TestRiskGate:
         assert not v.passed
         assert v.rule == "max_exposure"
 
+    def test_consecutive_loss_circuit_trips(self):
+        v = check_consecutive_loss_circuit([-100.0, -25.0, -5.0], 3)
+        assert not v.passed
+        assert v.rule == "consecutive_losses"
+
+    def test_consecutive_loss_circuit_ignores_interrupted_streak(self):
+        v = check_consecutive_loss_circuit([-100.0, 10.0, -5.0], 3)
+        assert v.passed
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Exit Monitor
@@ -548,6 +559,13 @@ class TestExitMonitor:
         assert sig is not None
         assert sig.trigger == "hard_stop"
 
+    def test_atr_stop_tightens_when_more_conservative(self):
+        pos = _make_position(entry_price=100.0)
+        plan = _make_plan(stop_loss_pct=0.03)
+        sig, _ = evaluate_exit(pos, plan, 98.5, rsi_14=50.0, atr_14=0.5, atr_stop_multiple=2.0)
+        assert sig is not None
+        assert sig.trigger == "atr_stop"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Morning Brief
@@ -564,6 +582,36 @@ class TestMorningBrief:
         ):
             result = asyncio.run(get_regime(0.05, 0.03, 0.01, 15.0, 55.0))
         assert result == "bullish"
+
+
+class TestEquityAndOptionsEligibility:
+    def test_equity_strategy_blocks_holiday(self, monkeypatch: pytest.MonkeyPatch):
+        strategy = EquityMomentum()
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                current = datetime(2026, 1, 19, 10, 0, tzinfo=tz)
+                return current if tz is None else current.astimezone(tz)
+
+        monkeypatch.setattr("sauce.strategies.equity_momentum.datetime", FrozenDateTime)
+
+        assert not strategy.eligible(strategy.instruments[0], "neutral")
+
+    def test_options_strategy_blocks_holiday(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OPTIONS_ENABLED", "true")
+        get_settings.cache_clear()
+        strategy = OptionsMomentum()
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                current = datetime(2026, 1, 19, 10, 0, tzinfo=tz)
+                return current if tz is None else current.astimezone(tz)
+
+        monkeypatch.setattr("sauce.strategies.options_momentum.datetime", FrozenDateTime)
+
+        assert not strategy.eligible(strategy.instruments[0], "neutral")
 
     def test_bearish_regime(self):
         from sauce.morning_brief import get_regime
@@ -734,7 +782,10 @@ class TestDatabase:
         try:
             rows = session.query(TradeRow).all()
             assert len(rows) == 1
-            assert rows[0].realized_pnl == pytest.approx(1000.0)  # (52000-50000)*0.5
+            assert rows[0].gross_realized_pnl == pytest.approx(1000.0)
+            assert rows[0].fees_paid == pytest.approx(76.5)
+            assert rows[0].slippage_paid == pytest.approx(76.5)
+            assert rows[0].realized_pnl == pytest.approx(847.0)
             assert rows[0].exit_trigger == "profit_target"
         finally:
             session.close()

@@ -18,7 +18,9 @@ on:
     # Every 15 minutes during market hours (weekdays 9am-4pm ET = 14:00-21:00 UTC)
     # GitHub Actions cron is not guaranteed to be exact — may drift a few minutes
     - cron: "*/15 14-20 * * 1-5"  # Equities: weekday market hours
-    - cron: "*/15 * * * *"         # Crypto: 24/7 (comment out to save minutes)
+    - cron: "*/30 0-13 * * 1-5"    # Crypto: weekday overnight
+    - cron: "*/30 21-23 * * 1-5"   # Crypto: weekday post-close
+    - cron: "*/30 * * * 0,6"       # Crypto: weekends
   workflow_dispatch:  # Manual trigger button
 
 concurrency:
@@ -45,10 +47,14 @@ jobs:
         with:
           python-version: "3.13"
           cache: "pip"
+          cache-dependency-path: |
+            requirements.lock
+            pyproject.toml
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
+          pip install -r requirements.lock
           pip install -e .
 
       - name: Run trading cycle

@@ -159,24 +159,6 @@ def _default_size_fraction_from_confidence(confidence: int) -> float:
     return 0.25
 
 
-def _coerce_size_fraction(raw_value: object) -> float:
-    try:
-        size_fraction = float(str(raw_value))
-    except (TypeError, ValueError):
-        return 0.0
-    return max(0.0, min(1.0, size_fraction))
-
-
-def _default_size_fraction_from_confidence(confidence: int) -> float:
-    if confidence >= 85:
-        return 1.0
-    if confidence >= 70:
-        return 0.75
-    if confidence >= 55:
-        return 0.50
-    return 0.25
-
-
 # ── Public Interface ──────────────────────────────────────────────────────────
 
 

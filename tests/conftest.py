@@ -9,7 +9,9 @@ import os
 import pytest
 
 import sauce.adapters.db as db_module
+import sauce.adapters.market_data as market_data_module
 from sauce.core.config import get_settings
+from sauce.research.profiles import clear_strategy_profile_cache
 
 
 @pytest.fixture(autouse=True)
@@ -25,11 +27,18 @@ def _isolate_db(tmp_path, monkeypatch):
     """
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("DB_PATH", db_path)
+    monkeypatch.setenv("SUPABASE_URL", "")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.setenv("SUPABASE_DB_URL", "")
+    monkeypatch.setenv("STRATEGY_PROFILE_PATH", str(tmp_path / "strategy_profiles.test.json"))
+    monkeypatch.setenv("RESEARCH_EQUITY_UNIVERSE_PATH", str(tmp_path / "equity_universe_history.test.json"))
     monkeypatch.setenv("ALPACA_API_KEY", "test-key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
-    db_module._engines = {}
+    db_module.cleanup_engines()
+    market_data_module.clear_snapshot_state_cache()
+    clear_strategy_profile_cache()
     get_settings.cache_clear()
 
     yield
@@ -41,5 +50,7 @@ def _isolate_db(tmp_path, monkeypatch):
             f"Test leaked a connection to production DB: {engine_path}"
         )
 
-    db_module._engines = {}
+    db_module.cleanup_engines()
+    market_data_module.clear_snapshot_state_cache()
+    clear_strategy_profile_cache()
     get_settings.cache_clear()

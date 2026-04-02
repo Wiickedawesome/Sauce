@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_price     DECIMAL(18, 8) NOT NULL,
     exit_price      DECIMAL(18, 8) NOT NULL,
     realized_pnl    DECIMAL(18, 8) NOT NULL,
+    gross_realized_pnl DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
+    fees_paid       DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
+    slippage_paid   DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
     strategy_name   VARCHAR(64) NOT NULL,
     exit_trigger    VARCHAR(32) NOT NULL,
     entry_time      TIMESTAMPTZ NOT NULL,
@@ -125,6 +128,9 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     orders_placed   INTEGER NOT NULL DEFAULT 0,
     trades_closed   INTEGER NOT NULL DEFAULT 0,
     realized_pnl_usd DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
+    gross_realized_pnl_usd DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
+    fees_paid_usd   DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
+    slippage_paid_usd DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
     starting_equity DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
     ending_equity   DECIMAL(18, 2) NOT NULL DEFAULT 0.0,
     regime          VARCHAR(16) NOT NULL DEFAULT 'neutral',
@@ -204,6 +210,9 @@ CREATE TABLE IF NOT EXISTS options_trades (
     entry_price     DECIMAL(18, 8) NOT NULL,
     exit_price      DECIMAL(18, 8) NOT NULL,
     realized_pnl    DECIMAL(18, 8) NOT NULL,
+    gross_realized_pnl DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
+    fees_paid       DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
+    slippage_paid   DECIMAL(18, 8) NOT NULL DEFAULT 0.0,
     strategy_name   VARCHAR(64) NOT NULL,
     exit_trigger    VARCHAR(32) NOT NULL,
     entry_time      TIMESTAMPTZ NOT NULL,
@@ -257,23 +266,42 @@ ALTER TABLE options_trades ENABLE ROW LEVEL SECURITY;
 
 -- Service role policy (full access for the trading bot)
 CREATE POLICY "Service role has full access on audit_events" ON audit_events
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on trades" ON trades
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on positions" ON positions
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on signal_log" ON signal_log
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on daily_summary" ON daily_summary
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on instrument_meta" ON instrument_meta
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on trade_memories" ON trade_memories
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on options_positions" ON options_positions
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Service role has full access on options_trades" ON options_trades
-    FOR ALL USING (true) WITH CHECK (true);
+    FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "Authenticated users denied on audit_events" ON audit_events
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on trades" ON trades
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on positions" ON positions
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on signal_log" ON signal_log
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on daily_summary" ON daily_summary
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on instrument_meta" ON instrument_meta
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on trade_memories" ON trade_memories
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on options_positions" ON options_positions
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "Authenticated users denied on options_trades" ON options_trades
+    FOR ALL TO authenticated USING (false) WITH CHECK (false);
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- DATA RETENTION — Auto-purge old signal_log and audit_events (90 days)
@@ -372,12 +400,15 @@ SELECT
     SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
     SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END) AS losses,
     ROUND(100.0 * SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) / COUNT(*), 2) AS win_rate_pct,
-    SUM(realized_pnl) AS total_pnl,
-    AVG(realized_pnl) AS avg_pnl,
+    SUM(realized_pnl) AS total_net_pnl,
+    SUM(gross_realized_pnl) AS total_gross_pnl,
+    SUM(fees_paid) AS total_fees_paid,
+    SUM(slippage_paid) AS total_slippage_paid,
+    AVG(realized_pnl) AS avg_net_pnl,
     AVG(hold_hours) AS avg_hold_hours
 FROM trades
 GROUP BY strategy_name
-ORDER BY total_pnl DESC;
+ORDER BY total_net_pnl DESC;
 
 COMMENT ON TABLE audit_events IS 'Immutable audit log. Append-only. Never update or delete.';
 COMMENT ON TABLE trades IS 'Completed trades with P&L. Append-only.';

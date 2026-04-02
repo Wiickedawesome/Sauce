@@ -1,0 +1,13 @@
+{
+  "description": "Populate point-in-time research universes here before running equity backtests or calibration.",
+  "snapshots": [
+    {
+      "effective_date": "2026-01-01",
+      "symbols": [
+        "AAPL",
+        "MSFT",
+        "NVDA"
+      ]
+    }
+  ]
+}

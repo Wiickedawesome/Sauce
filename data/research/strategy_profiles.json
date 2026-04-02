@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "generated_at": "2026-04-02T22:36:51.026049+00:00",
+    "mean_test_objective": 0.0,
+    "strategy": "crypto_momentum",
+    "symbols": [
+      "BTC/USD",
+      "ETH/USD",
+      "SOL/USD"
+    ]
+  },
+  "profiles": {
+    "crypto_momentum": {
+      "base_threshold": 40,
+      "bb_points": 20,
+      "bb_proximity": 0.15,
+      "macd_dip_points": 15,
+      "macd_momentum_points": 20,
+      "momentum_points": 15,
+      "momentum_rsi_max": 70,
+      "momentum_rsi_min": 50,
+      "regime_shift": {
+        "bearish": 10,
+        "bullish": -5,
+        "neutral": 0
+      },
+      "rsi_oversold": 35,
+      "rsi_points": 25,
+      "stoch_confirm_points": 10,
+      "trend_above_sma20_points": 15,
+      "uptrend_structure_points": 10,
+      "volume_points": 10,
+      "volume_ratio_min": 0.5,
+      "vwap_confirm_points": 5
+    }
+  }
+}

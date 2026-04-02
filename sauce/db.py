@@ -20,8 +20,10 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
 
+from sauce.accounting import TradeAccounting, estimate_trade_accounting
 from sauce.adapters.db import Base, get_session
 from sauce.core.options_schemas import OptionsPosition
+from sauce.performance import TradePerformanceRecord
 from sauce.strategy import Position, SignalResult
 
 if TYPE_CHECKING:
@@ -46,6 +48,9 @@ class TradeRow(Base):
     entry_price: float = Column(Float, nullable=False)
     exit_price: float = Column(Float, nullable=False)
     realized_pnl: float = Column(Float, nullable=False)
+    gross_realized_pnl: float = Column(Float, nullable=False, default=0.0)
+    fees_paid: float = Column(Float, nullable=False, default=0.0)
+    slippage_paid: float = Column(Float, nullable=False, default=0.0)
     strategy_name: str = Column(String(64), nullable=False)
     exit_trigger: str = Column(String(32), nullable=False)  # e.g. "hard_stop", "profit_target"
     entry_time: datetime = Column(DateTime, nullable=False)
@@ -109,6 +114,9 @@ class DailySummaryRow(Base):
     orders_placed: int = Column(Integer, nullable=False, default=0)
     trades_closed: int = Column(Integer, nullable=False, default=0)
     realized_pnl_usd: float = Column(Float, nullable=False, default=0.0)
+    gross_realized_pnl_usd: float = Column(Float, nullable=False, default=0.0)
+    fees_paid_usd: float = Column(Float, nullable=False, default=0.0)
+    slippage_paid_usd: float = Column(Float, nullable=False, default=0.0)
     starting_equity: float = Column(Float, nullable=False, default=0.0)
     ending_equity: float = Column(Float, nullable=False, default=0.0)
     regime: str = Column(String(16), nullable=False, default="neutral")
@@ -178,6 +186,9 @@ class OptionsTradeRow(Base):
     entry_price: float = Column(Float, nullable=False)
     exit_price: float = Column(Float, nullable=False)
     realized_pnl: float = Column(Float, nullable=False)
+    gross_realized_pnl: float = Column(Float, nullable=False, default=0.0)
+    fees_paid: float = Column(Float, nullable=False, default=0.0)
+    slippage_paid: float = Column(Float, nullable=False, default=0.0)
     strategy_name: str = Column(String(64), nullable=False)
     exit_trigger: str = Column(String(32), nullable=False)
     entry_time: datetime = Column(DateTime, nullable=False)
@@ -415,13 +426,18 @@ def log_option_trade(
     exit_trigger: str,
     exit_time: datetime | None = None,
     db_url: str | None = None,
-) -> None:
+) -> TradeAccounting:
     """Record a completed options trade."""
     if exit_time is None:
         exit_time = datetime.now(UTC)
 
     hold_hours = (exit_time - position.entry_time).total_seconds() / 3600
-    realized_pnl = (exit_price - position.entry_price) * position.qty * 100
+    accounting = estimate_trade_accounting(
+        asset_class="option",
+        qty=position.qty,
+        entry_price=position.entry_price,
+        exit_price=exit_price,
+    )
 
     session = get_session(db_url)
     try:
@@ -433,7 +449,10 @@ def log_option_trade(
             qty=position.qty,
             entry_price=position.entry_price,
             exit_price=exit_price,
-            realized_pnl=realized_pnl,
+            realized_pnl=accounting.realized_pnl,
+            gross_realized_pnl=accounting.gross_pnl,
+            fees_paid=accounting.fees_paid,
+            slippage_paid=accounting.slippage_paid,
             strategy_name=position.strategy_name,
             exit_trigger=exit_trigger,
             entry_time=position.entry_time,
@@ -448,6 +467,7 @@ def log_option_trade(
         logger.error("Failed to log options trade for %s: %s", position.contract_symbol, exc)
     finally:
         session.close()
+    return accounting
 
 
 # ── Trade Persistence ─────────────────────────────────────────────────────────
@@ -459,13 +479,19 @@ def log_trade(
     exit_trigger: str,
     exit_time: datetime | None = None,
     db_url: str | None = None,
-) -> None:
+) -> TradeAccounting:
     """Record a completed trade. Append-only."""
     if exit_time is None:
         exit_time = datetime.now(UTC)
 
     hold_hours = (exit_time - position.entry_time).total_seconds() / 3600
-    realized_pnl = (exit_price - position.entry_price) * position.qty
+    asset_class = position.asset_class or ("crypto" if "/" in position.symbol else "equity")
+    accounting = estimate_trade_accounting(
+        asset_class=asset_class,
+        qty=position.qty,
+        entry_price=position.entry_price,
+        exit_price=exit_price,
+    )
 
     session = get_session(db_url)
     try:
@@ -476,7 +502,10 @@ def log_trade(
             qty=position.qty,
             entry_price=position.entry_price,
             exit_price=exit_price,
-            realized_pnl=realized_pnl,
+            realized_pnl=accounting.realized_pnl,
+            gross_realized_pnl=accounting.gross_pnl,
+            fees_paid=accounting.fees_paid,
+            slippage_paid=accounting.slippage_paid,
             strategy_name=position.strategy_name,
             exit_trigger=exit_trigger,
             entry_time=position.entry_time,
@@ -491,6 +520,7 @@ def log_trade(
         logger.error("Failed to log trade for %s: %s", position.symbol, exc)
     finally:
         session.close()
+    return accounting
 
 
 # ── Daily Stats ───────────────────────────────────────────────────────────────
@@ -518,6 +548,9 @@ def upsert_daily_stats(
             "orders_placed",
             "trades_closed",
             "realized_pnl_usd",
+            "gross_realized_pnl_usd",
+            "fees_paid_usd",
+            "slippage_paid_usd",
         }
         for key, value in fields.items():
             if not hasattr(row, key):
@@ -697,5 +730,95 @@ def load_all_memories(db_url: str | None = None) -> list[MemoryEntry]:
             )
             for row in rows
         ]
+    finally:
+        session.close()
+
+
+def load_recent_closed_trade_pnls(limit: int, db_url: str | None = None) -> list[float]:
+    """Load the newest realized P&L values across spot/equity and options trades."""
+    if limit <= 0:
+        return []
+
+    session = get_session(db_url)
+    try:
+        trade_rows = (
+            session.query(TradeRow.exit_time, TradeRow.realized_pnl)
+            .order_by(TradeRow.exit_time.desc())
+            .limit(limit)
+            .all()
+        )
+        option_rows = (
+            session.query(OptionsTradeRow.exit_time, OptionsTradeRow.realized_pnl)
+            .order_by(OptionsTradeRow.exit_time.desc())
+            .limit(limit)
+            .all()
+        )
+        combined = [
+            (exit_time, float(realized_pnl))
+            for exit_time, realized_pnl in [*trade_rows, *option_rows]
+            if exit_time is not None
+        ]
+        combined.sort(key=lambda item: item[0], reverse=True)
+        return [pnl for _, pnl in combined[:limit]]
+    finally:
+        session.close()
+
+
+def _ensure_utc_timestamp(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def load_completed_trades(limit: int | None = None, db_url: str | None = None) -> list[TradePerformanceRecord]:
+    """Load completed spot/equity and options trades into a normalized structure."""
+    session = get_session(db_url)
+    try:
+        trade_rows = session.query(TradeRow).order_by(TradeRow.exit_time.asc()).all()
+        option_rows = session.query(OptionsTradeRow).order_by(OptionsTradeRow.exit_time.asc()).all()
+
+        trades: list[TradePerformanceRecord] = []
+        for row in trade_rows:
+            asset_class = "crypto" if "/" in row.symbol else "equity"
+            trades.append(
+                TradePerformanceRecord(
+                    symbol=row.symbol,
+                    asset_class=asset_class,
+                    strategy_name=row.strategy_name,
+                    entry_time=_ensure_utc_timestamp(row.entry_time),
+                    exit_time=_ensure_utc_timestamp(row.exit_time),
+                    entry_price=row.entry_price,
+                    exit_price=row.exit_price,
+                    qty=row.qty,
+                    gross_pnl=row.gross_realized_pnl,
+                    realized_pnl=row.realized_pnl,
+                    fees_paid=row.fees_paid,
+                    slippage_paid=row.slippage_paid,
+                    hold_hours=row.hold_hours,
+                    exit_trigger=row.exit_trigger,
+                )
+            )
+        for row in option_rows:
+            trades.append(
+                TradePerformanceRecord(
+                    symbol=row.contract_symbol,
+                    asset_class="option",
+                    strategy_name=row.strategy_name,
+                    entry_time=_ensure_utc_timestamp(row.entry_time),
+                    exit_time=_ensure_utc_timestamp(row.exit_time),
+                    entry_price=row.entry_price,
+                    exit_price=row.exit_price,
+                    qty=float(row.qty),
+                    gross_pnl=row.gross_realized_pnl,
+                    realized_pnl=row.realized_pnl,
+                    fees_paid=row.fees_paid,
+                    slippage_paid=row.slippage_paid,
+                    hold_hours=row.hold_hours,
+                    exit_trigger=row.exit_trigger,
+                )
+            )
+
+        trades.sort(key=lambda trade: trade.exit_time)
+        if limit is not None:
+            return trades[-limit:]
+        return trades
     finally:
         session.close()

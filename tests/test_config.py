@@ -113,6 +113,37 @@ def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_confidence == 0.3
 
 
+def test_asset_specific_ttl_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_required(monkeypatch)
+    s = Settings(_env_file=None)
+    assert s.equity_data_ttl_seconds == 30
+    assert s.crypto_data_ttl_seconds == 120
+    assert s.option_data_ttl_seconds == 60
+
+
+def test_stale_order_cancel_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_required(monkeypatch)
+    s = Settings(_env_file=None)
+    assert s.stale_order_cancel_equity_minutes == 15
+    assert s.stale_order_cancel_crypto_minutes == 30
+
+
+def test_intraday_regime_and_delayed_equity_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_required(monkeypatch)
+    s = Settings(_env_file=None)
+    assert s.intraday_regime_refresh_hours == 4
+    assert s.allow_delayed_equity_entries is False
+
+
+def test_net_pnl_assumption_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_required(monkeypatch)
+    s = Settings(_env_file=None)
+    assert s.crypto_fee_bps == 15
+    assert s.crypto_slippage_bps == 15
+    assert s.option_fee_bps == 50
+    assert s.option_slippage_bps == 50
+
+
 def test_options_enabled_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     monkeypatch.delenv("OPTIONS_ENABLED", raising=False)

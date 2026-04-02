@@ -488,6 +488,24 @@ def test_get_universe_snapshot_equity_only(
     clear_cache()
 
 
+def test_days_back_for_bars_accounts_for_holiday_week(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_env(monkeypatch)
+    from sauce.adapters import market_data
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = datetime(2026, 1, 20, 12, 0, tzinfo=UTC)
+            return current if tz is None else current.astimezone(tz)
+
+    monkeypatch.setattr(market_data, "datetime", FrozenDateTime)
+
+    days_needed = market_data._days_back_for_bars("1Day", 5, is_crypto=False)
+
+    assert days_needed >= 8
+    clear_cache()
+
+
 def test_get_option_quotes_returns_price_references(monkeypatch: pytest.MonkeyPatch) -> None:
     set_env(monkeypatch)
     from sauce.adapters import market_data

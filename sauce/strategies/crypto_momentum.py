@@ -24,6 +24,7 @@ from typing import Any
 
 from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
+from sauce.research.profiles import DEFAULT_STRATEGY_PROFILES, get_strategy_profile
 from sauce.strategy import ExitPlan, Position, SignalResult, TierParams
 
 logger = logging.getLogger(__name__)
@@ -39,38 +40,17 @@ class CryptoMomentumReversion:
     """
 
     name: str = "crypto_momentum"
+    DEFAULT_PROFILE = DEFAULT_STRATEGY_PROFILES["crypto_momentum"]
+
+    def __init__(self, profile_override: dict[str, Any] | None = None) -> None:
+        self._profile_override = profile_override
 
     @property
     def instruments(self) -> list[str]:
         return get_settings().crypto_universe
 
-    # Trend confirmation conditions (shared with both paths)
-    TREND_ABOVE_SMA20_POINTS = 15  # price > SMA20 → uptrend
-    UPTREND_STRUCTURE_POINTS = 10  # SMA20 > SMA50 → sustained uptrend
-
-    # Scoring condition thresholds — DISCIPLINED
-    RSI_OVERSOLD = 40  # Oversold: RSI must be < 40 (was 35 — too strict for normal dips)
-    RSI_POINTS = 25
-
-    BB_PROXIMITY = 0.20  # Lower 20% of BB range (tight)
-    BB_POINTS = 20
-
-    MACD_DIP_POINTS = 15  # histogram negative (confirms oversold dip)
-    MACD_MOMENTUM_POINTS = 20  # histogram positive (reversal confirmed)
-
-    # Alpaca paper crypto has negligible order book volume;
-    # lowered from 1.5 to 0.5 so volume bonus is achievable.
-    VOLUME_RATIO_MIN = 0.5
-    VOLUME_POINTS = 10
-
-    # Momentum breakout conditions
-    MOMENTUM_RSI_MIN = 50  # RSI 50-70 = bullish momentum (was 55 — catches recovering setups)
-    MOMENTUM_RSI_MAX = 70
-    MOMENTUM_POINTS = 15
-
-    BASE_THRESHOLD = 45  # Require multi-indicator confluence (was 50 — threshold had no margin)
-    # CORRECT: Bearish = HARDER to enter (capital preservation)
-    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 10}
+    def _profile(self) -> dict[str, Any]:
+        return get_strategy_profile(self.name, self.DEFAULT_PROFILE, self._profile_override)
 
     def eligible(self, instrument: str, regime: str) -> bool:
         """Crypto trades 24/7 in all regimes."""
@@ -92,40 +72,49 @@ class CryptoMomentumReversion:
         bb_pct = _compute_bb_pct(indicators, current_price)
         sma_20 = indicators.sma_20
         sma_50 = indicators.sma_50
+        stoch_k = indicators.stoch_k
+        vwap = indicators.vwap
+        profile = self._profile()
 
         # === TREND CONFIRMATION ===
         trend_points = 0
         if sma_20 is not None and current_price > sma_20:
-            trend_points += self.TREND_ABOVE_SMA20_POINTS
+            trend_points += int(profile["trend_above_sma20_points"])
         if sma_20 is not None and sma_50 is not None and sma_20 > sma_50:
-            trend_points += self.UPTREND_STRUCTURE_POINTS
+            trend_points += int(profile["uptrend_structure_points"])
 
         # === MEAN REVERSION PATH ===
         mr_points = 0
-        if rsi_14 is not None and rsi_14 < self.RSI_OVERSOLD:
-            mr_points += self.RSI_POINTS
-        if bb_pct is not None and bb_pct <= self.BB_PROXIMITY:
-            mr_points += self.BB_POINTS
+        if rsi_14 is not None and rsi_14 < float(profile["rsi_oversold"]):
+            mr_points += int(profile["rsi_points"])
+        if bb_pct is not None and bb_pct <= float(profile["bb_proximity"]):
+            mr_points += int(profile["bb_points"])
         if macd_hist is not None and macd_hist < 0:
-            mr_points += self.MACD_DIP_POINTS
+            mr_points += int(profile["macd_dip_points"])
+        if stoch_k is not None and stoch_k < 20:
+            mr_points += int(profile["stoch_confirm_points"])
+        if vwap is not None and current_price <= vwap:
+            mr_points += int(profile["vwap_confirm_points"])
 
         # === MOMENTUM BREAKOUT PATH (includes trend) ===
         mo_points = trend_points
         if macd_hist is not None and macd_hist > 0:
-            mo_points += self.MACD_MOMENTUM_POINTS
-        if rsi_14 is not None and self.MOMENTUM_RSI_MIN <= rsi_14 <= self.MOMENTUM_RSI_MAX:
-            mo_points += self.MOMENTUM_POINTS
+            mo_points += int(profile["macd_momentum_points"])
+        if rsi_14 is not None and float(profile["momentum_rsi_min"]) <= rsi_14 <= float(profile["momentum_rsi_max"]):
+            mo_points += int(profile["momentum_points"])
+        if vwap is not None and current_price >= vwap:
+            mo_points += int(profile["vwap_confirm_points"])
 
         # Take the stronger path (mutually exclusive — no double-counting)
         points = max(mr_points, mo_points)
 
         # === VOLUME CONFIRMATION (adds to either path) ===
-        if vol_ratio is not None and vol_ratio >= self.VOLUME_RATIO_MIN:
-            points += self.VOLUME_POINTS
+        if vol_ratio is not None and vol_ratio >= float(profile["volume_ratio_min"]):
+            points += int(profile["volume_points"])
 
         # Apply regime threshold shift (bearish = easier entry)
-        shift = self.REGIME_SHIFT.get(regime, 0)
-        threshold = self.BASE_THRESHOLD + shift
+        shift = int(profile["regime_shift"].get(regime, 0))
+        threshold = int(profile["base_threshold"]) + shift
 
         fired = points >= threshold
         side = "buy" if fired else "hold"

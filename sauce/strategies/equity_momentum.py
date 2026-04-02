@@ -23,6 +23,8 @@ from zoneinfo import ZoneInfo
 
 from sauce.core.config import get_settings
 from sauce.core.schemas import Indicators, Order
+from sauce.market_calendar import is_us_equity_trading_day
+from sauce.research.profiles import DEFAULT_STRATEGY_PROFILES, get_strategy_profile
 from sauce.strategy import ExitPlan, Position, SignalResult, TierParams
 
 logger = logging.getLogger(__name__)
@@ -35,34 +37,17 @@ class EquityMomentum:
     """Disciplined momentum strategy for US equities during RTH."""
 
     name: str = "equity_momentum"
+    DEFAULT_PROFILE = DEFAULT_STRATEGY_PROFILES["equity_momentum"]
+
+    def __init__(self, profile_override: dict[str, Any] | None = None) -> None:
+        self._profile_override = profile_override
 
     @property
     def instruments(self) -> list[str]:
         return get_settings().equity_universe
 
-    # Trend confirmation conditions
-    TREND_ABOVE_SMA20_POINTS = 20
-    UPTREND_STRUCTURE_POINTS = 15  # SMA20 > SMA50
-
-    # Momentum conditions
-    RSI_MOMENTUM_MIN = 50
-    RSI_MOMENTUM_MAX = 65  # Tighter ceiling (was 70) — avoid exhaustion
-    RSI_MOMENTUM_POINTS = 20
-
-    # Mean-reversion alternative (oversold bounce)
-    RSI_OVERSOLD = 30  # True oversold (was 40)
-    RSI_OVERSOLD_POINTS = 25
-
-    # MACD momentum
-    MACD_MOMENTUM_POINTS = 20
-
-    # Volume confirmation
-    VOLUME_RATIO_MIN = 1.5
-    VOLUME_POINTS = 15
-
-    BASE_THRESHOLD = 60  # Require 60 pts = strong confluence (was 65 — MR path could never fire at neutral)
-    # CORRECT: Bearish = HARDER to enter (capital preservation)
-    REGIME_SHIFT = {"bullish": -5, "neutral": 0, "bearish": 15}
+    def _profile(self) -> dict[str, Any]:
+        return get_strategy_profile(self.name, self.DEFAULT_PROFILE, self._profile_override)
 
     def eligible(self, instrument: str, regime: str) -> bool:
         """Only trade during regular trading hours (09:30-16:00 ET)."""
@@ -72,6 +57,8 @@ class EquityMomentum:
         now_et = datetime.now(ET)
         # Check weekday (0=Mon, 6=Sun)
         if now_et.weekday() >= 5:
+            return False
+        if not is_us_equity_trading_day(now_et.date()):
             return False
 
         # Check RTH: 09:30-16:00 ET
@@ -95,38 +82,39 @@ class EquityMomentum:
         vol_ratio = indicators.volume_ratio
         sma_20 = indicators.sma_20
         sma_50 = indicators.sma_50
+        profile = self._profile()
 
         # === TREND CONFIRMATION (shared) ===
         trend_points = 0
         if sma_20 is not None and current_price > sma_20:
-            trend_points += self.TREND_ABOVE_SMA20_POINTS
+            trend_points += int(profile["trend_above_sma20_points"])
         if sma_20 is not None and sma_50 is not None and sma_20 > sma_50:
-            trend_points += self.UPTREND_STRUCTURE_POINTS
+            trend_points += int(profile["uptrend_structure_points"])
 
         # === MOMENTUM PATH ===
         mo_points = trend_points
-        if rsi_14 is not None and self.RSI_MOMENTUM_MIN <= rsi_14 <= self.RSI_MOMENTUM_MAX:
-            mo_points += self.RSI_MOMENTUM_POINTS
+        if rsi_14 is not None and float(profile["rsi_momentum_min"]) <= rsi_14 <= float(profile["rsi_momentum_max"]):
+            mo_points += int(profile["rsi_momentum_points"])
         if macd_hist is not None and macd_hist > 0:
-            mo_points += self.MACD_MOMENTUM_POINTS
+            mo_points += int(profile["macd_momentum_points"])
 
         # === MEAN REVERSION PATH ===
         mr_points = 0
-        if rsi_14 is not None and rsi_14 < self.RSI_OVERSOLD:
-            mr_points += self.RSI_OVERSOLD_POINTS
+        if rsi_14 is not None and rsi_14 < float(profile["rsi_oversold"]):
+            mr_points += int(profile["rsi_oversold_points"])
         if macd_hist is not None and macd_hist > 0:
-            mr_points += self.MACD_MOMENTUM_POINTS
+            mr_points += int(profile["macd_momentum_points"])
 
         # Take the stronger path (mutually exclusive)
         points = max(mo_points, mr_points)
 
         # === VOLUME CONFIRMATION (adds to either path) ===
-        if vol_ratio is not None and vol_ratio >= self.VOLUME_RATIO_MIN:
-            points += self.VOLUME_POINTS
+        if vol_ratio is not None and vol_ratio >= float(profile["volume_ratio_min"]):
+            points += int(profile["volume_points"])
 
         # Apply regime threshold shift
-        shift = self.REGIME_SHIFT.get(regime, 0)
-        threshold = self.BASE_THRESHOLD + shift
+        shift = int(profile["regime_shift"].get(regime, 0))
+        threshold = int(profile["base_threshold"]) + shift
 
         fired = points >= threshold
         side = "buy" if fired else "hold"
