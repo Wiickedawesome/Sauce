@@ -1,0 +1,72 @@
+# Trading Loop — Runs Sauce trading cycle on schedule
+#
+# This replaces the Contabo VPS cron job. GitHub Actions provides free compute
+# with 2000 minutes/month on the free tier.
+#
+# Required Secrets (set in repo Settings → Secrets → Actions):
+#   ALPACA_API_KEY
+#   ALPACA_SECRET_KEY
+#   ANTHROPIC_API_KEY
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY
+#   SUPABASE_DB_URL
+
+name: Trading Loop
+
+on:
+  schedule:
+    # Every 15 minutes during market hours (weekdays 9am-4pm ET = 14:00-21:00 UTC)
+    # GitHub Actions cron is not guaranteed to be exact — may drift a few minutes
+    - cron: "*/15 14-20 * * 1-5"  # Equities: weekday market hours
+    - cron: "*/15 * * * *"         # Crypto: 24/7 (comment out to save minutes)
+  workflow_dispatch:  # Manual trigger button
+
+concurrency:
+  group: trading-loop
+  cancel-in-progress: false  # Don't cancel running trades
+
+env:
+  # Force Anthropic for all LLM calls (no Ollama in GHA)
+  DUAL_ANALYSIS_PROVIDER: anthropic
+  PM_VERDICT_PROVIDER: anthropic
+  REFLECTION_PROVIDER: anthropic
+
+jobs:
+  run-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Run trading cycle
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_PAPER: "true"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          python -m sauce.loop
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-${{ github.run_id }}
+          path: data/logs/
+          retention-days: 7

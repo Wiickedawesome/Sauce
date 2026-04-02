@@ -100,8 +100,6 @@ Helpful views: `v_today_signals`, `v_open_positions`, `v_recent_trades`, `v_stra
 | `OPTIONS_ENABLED` | No | `false` | Enable options trading |
 | `TRADING_PAUSE` | No | `false` | Emergency kill switch |
 
-**Note:** If `SUPABASE_*` variables are not set, Sauce falls back to local SQLite (`data/sauce.db`).
-
 See `sauce/core/config.py` for the complete list.
 
 ---
@@ -140,11 +138,8 @@ SELECT purge_old_records();
 
 ## Local Development
 
-For local development without Supabase, simply omit the `SUPABASE_*` variables.
-Sauce will use SQLite at `data/sauce.db`.
-
 ```bash
-# Run tests
+# Run tests (uses isolated temp DBs)
 pytest
 
 # Type check
@@ -179,14 +174,36 @@ psql "$NEW_SUPABASE_DB_URL" < backup.sql
 
 ---
 
-## Scheduling
+## Scheduling (GitHub Actions)
 
-Sauce can run via systemd timer, cron, or any scheduler:
+Sauce runs on **GitHub Actions** — no VPS needed. The workflow is in `.github/workflows/trading-loop.yml`.
 
-```bash
-# cron example (every 15 min during market hours)
-# 30,45 9 * * 1-5 cd /path/to/Sauce && .venv/bin/python -m sauce.loop >> data/logs/cron.log 2>&1
-# */15 10-15 * * 1-5 cd /path/to/Sauce && .venv/bin/python -m sauce.loop >> data/logs/cron.log 2>&1
-```
+### Setup
 
-The loop handles market hours internally, so running outside hours is safe (it exits early).
+1. Go to **Settings → Secrets → Actions** in your GitHub repo
+2. Add these repository secrets:
+   - `ALPACA_API_KEY`
+   - `ALPACA_SECRET_KEY`
+   - `ANTHROPIC_API_KEY`
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `SUPABASE_DB_URL`
+3. Push to `main` — the workflow auto-enables
+
+### Schedule
+
+| Market | Schedule | Notes |
+|--------|----------|-------|
+| Equities | Weekdays 9am-4pm ET | Every 15 min |
+| Crypto | 24/7 | Every 15 min (optional — comment out to save minutes) |
+
+### Manual trigger
+
+Go to **Actions → Trading Loop → Run workflow** for an immediate cycle.
+
+### Costs
+
+GitHub free tier = 2000 minutes/month. Each cycle ~2-3 min → ~96 runs/day = ~6000 min/month.
+For heavy usage, consider GitHub Pro or a $5/mo Railway deployment.
+
+The loop handles market hours internally, so running outside hours is safe (exits early).

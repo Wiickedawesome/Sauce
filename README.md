@@ -12,6 +12,7 @@
 ![DB](https://img.shields.io/badge/Database-Supabase-3ecf8e?style=flat-square&logo=supabase&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPLv3-22c55e?style=flat-square)
 ![Tests](https://img.shields.io/badge/Tests-168%20passed-22c55e?style=flat-square)
+![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?style=flat-square&logo=githubactions&logoColor=white)
 ![Paper](https://img.shields.io/badge/Mode-Paper%20First-f59e0b?style=flat-square)
 
 <br/>
@@ -33,7 +34,7 @@ Sauce is an autonomous trading system. It uses Claude (via the Anthropic API) as
 - **Morning brief** — LLM-generated market context at session start
 - **168 tests, zero real API calls** — full test coverage with no external dependencies
 - **Paper-first default** — live trading requires explicit opt-in
-- **Append-only SQLite audit log** — full forensic trail of every decision
+- **Append-only audit log** — full forensic trail of every decision in Supabase PostgreSQL
 
 ---
 
@@ -71,7 +72,7 @@ sauce/
     broker.py          Alpaca order placement + account queries
     market_data.py     Bars, quotes, snapshots via Alpaca Data API
     llm.py             Claude via Anthropic API (with retry + back-off)
-    db.py              SQLite engine, audit log
+    db.py              Database engine, audit log
     utils.py           Shared adapter utilities
   core/
     config.py          Pydantic v2 settings — single source of truth
