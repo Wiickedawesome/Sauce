@@ -11,6 +11,8 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+import httpx
+
 from sauce.core.config import get_settings
 from sauce.core.schemas import AuditEvent
 

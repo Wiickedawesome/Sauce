@@ -6,16 +6,28 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from sauce.analyst import AnalystVerdict
 from sauce.adapters.market_data import MarketDataError
+from sauce.analyst import AnalystVerdict
 from sauce.core.config import get_settings
-from sauce.core.options_schemas import OptionContract, OptionsOrder, OptionsPosition, OptionsSignalResult
+from sauce.core.options_schemas import (
+    OptionContract,
+    OptionsOrder,
+    OptionsPosition,
+    OptionsSignalResult,
+)
 from sauce.core.schemas import AuditEvent, Order, PriceReference
 from sauce.exit_monitor import ExitSignal
+from sauce.loop import (
+    _scan_entries,
+    _scan_exits,
+    _scan_option_entries,
+    _scan_option_exits,
+    main,
+    run_cycle,
+)
 from sauce.memory import TradeMemory
 from sauce.risk import RiskVerdict
 from sauce.strategy import ExitPlan, Position, SignalResult
-from sauce.loop import _scan_entries, _scan_exits, _scan_option_entries, _scan_option_exits, main, run_cycle
 
 
 def _capture_events(events: list[AuditEvent]):

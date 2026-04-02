@@ -805,7 +805,11 @@ class TestDatabase:
         assert loaded[0].contract_symbol == "SPY250321C00550000"
 
     def test_update_option_position_persists_qty(self):
-        from sauce.db import load_open_option_positions, save_option_position, update_option_position
+        from sauce.db import (
+            load_open_option_positions,
+            save_option_position,
+            update_option_position,
+        )
 
         pos = OptionsPosition(
             position_id="opt-pos-qty",

@@ -28,7 +28,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sauce.adapters.db import log_event
 from sauce.adapters.broker import (
     BrokerError,
     cancel_stale_orders,
@@ -40,6 +39,7 @@ from sauce.adapters.broker import (
     place_option_order,
     place_order,
 )
+from sauce.adapters.db import log_event
 from sauce.adapters.market_data import (
     MarketDataError,
     get_history,
@@ -49,19 +49,19 @@ from sauce.adapters.market_data import (
     get_snapshot_candidates,
     get_universe_snapshot,
 )
-from sauce.analyst import AnalystVerdict, analyst_committee
+from sauce.analyst import analyst_committee
 from sauce.core.config import get_settings
 from sauce.core.options_schemas import OptionsOrder, OptionsPosition
 from sauce.core.schemas import AuditEvent, Indicators, Order, PriceReference
 from sauce.db import (
-    close_position,
     close_option_position,
+    close_position,
     get_daily_regime,
     load_all_memories,
     load_open_option_positions,
     load_open_positions,
-    log_signal,
     log_option_trade,
+    log_signal,
     log_trade,
     save_memory,
     save_option_position,
@@ -72,7 +72,12 @@ from sauce.db import (
 )
 from sauce.exit_monitor import evaluate_exit
 from sauce.indicators.core import compute_all
-from sauce.memory import MemoryEntry, TradeMemory, build_outcome_description, build_situation_description
+from sauce.memory import (
+    MemoryEntry,
+    TradeMemory,
+    build_outcome_description,
+    build_situation_description,
+)
 from sauce.morning_brief import get_regime
 from sauce.options_safety import check_options_position, validate_options_order
 from sauce.reflection import reflect_on_trade
@@ -1769,7 +1774,7 @@ def _reconcile_stale_positions(
 async def run_cycle() -> None:
     """Run a single trading cycle. Called by cron — no internal loop."""
     settings = get_settings()
-    cycle_id = str(uuid.uuid4())[:8]
+    cycle_id = str(uuid.uuid4())
     today = _today()
     regime = "neutral"
     loop_status = "ok"

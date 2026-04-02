@@ -182,7 +182,7 @@ def log_event(event: AuditEvent, db_url: str | None = None) -> None:
             loop_id=event.loop_id,
             event_type=event.event_type,
             symbol=event.symbol,
-            payload=json.dumps(event.payload),
+            payload=json.dumps(event.payload, default=str),
             timestamp=event.timestamp,
             prompt_version=event.prompt_version,
         )

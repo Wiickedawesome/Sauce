@@ -587,7 +587,6 @@ def get_order_by_id(order_id: str, loop_id: str = "unset") -> dict[str, Any]:
     Returns a dict with Alpaca's order fields (id, status, filled_qty,
     filled_avg_price, etc.). Raises BrokerError on failure.
     """
-    from sauce.adapters.db import log_event
 
     try:
         client = _get_trading_client()

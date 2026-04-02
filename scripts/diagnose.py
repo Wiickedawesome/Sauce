@@ -32,7 +32,7 @@ def run() -> None:
     current_pause = settings.trading_pause
     status = "*** PAUSED ***" if current_pause else "NOT PAUSED"
     print(f"  status   : {status}")
-    print(f"  source   : env/config")
+    print("  source   : env/config")
     print(f"  TRADING_PAUSE env/config: {current_pause}")
 
     row = session.execute(

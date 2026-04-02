@@ -607,6 +607,9 @@ def load_instrument_meta_extra(symbol: str, db_url: str | None = None) -> dict[s
         row = session.query(InstrumentMetaRow).filter_by(symbol=symbol).first()
         if row is None or not row.extra:
             return {}
+        # Supabase JSONB returns native Python dicts; SQLite returns strings
+        if isinstance(row.extra, dict):
+            return row.extra
         try:
             value = json.loads(row.extra)
         except json.JSONDecodeError:
@@ -638,8 +641,12 @@ def merge_instrument_meta_extra(
 
         current_extra: dict[str, Any]
         try:
-            parsed = json.loads(row.extra or "{}")
-            current_extra = parsed if isinstance(parsed, dict) else {}
+            raw = row.extra or "{}"
+            if isinstance(raw, dict):
+                current_extra = raw
+            else:
+                parsed = json.loads(raw)
+                current_extra = parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError:
             current_extra = {}
 

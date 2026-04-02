@@ -41,10 +41,11 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+ignore = ["E501", "B905"]  # Line length, zip strict (false-positive in BM25 scoring)
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["SIM117"]  # Nested with statements are often clearer in tests
+"tests/*" = ["SIM117", "B011"]  # Nested with, assert False in tests
+"tests/test_loop.py" = ["E402"]  # Import after sys.modules mock setup
 
 # ── Mypy ─────────────────────────────────────────────────────────────────────
 [tool.mypy]
