@@ -17,7 +17,6 @@ import pytest
 
 from sauce.morning_brief import get_regime, infer_intraday_regime
 
-
 # ── Heuristic regime inference ────────────────────────────────────────────────
 
 

@@ -10,9 +10,7 @@ Covers all 5 risk rules plus edge cases identified in audit:
 
 from __future__ import annotations
 
-import pytest
-
-from sauce.risk import RiskVerdict, check_consecutive_loss_circuit, check_risk
+from sauce.risk import check_consecutive_loss_circuit, check_risk
 
 
 def _passing_kwargs(**overrides) -> dict:

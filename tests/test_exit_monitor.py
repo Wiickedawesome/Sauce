@@ -16,9 +16,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from sauce.exit_monitor import ExitSignal, evaluate_exit
+from sauce.exit_monitor import evaluate_exit
 from sauce.strategy import ExitPlan, Position
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
