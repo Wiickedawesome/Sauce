@@ -39,6 +39,27 @@ class TradeAccounting:
     realized_pnl: float
 
 
+# Notional-tiered market-impact multipliers (proxy for ADV-fraction model).
+# Larger orders have higher price impact relative to available liquidity.
+# Tiers align with capital scale: SEED (<$1k), SCALING ($1k-$10k),
+# GROWTH ($10k-$50k), INSTITUTIONAL (>$50k).
+# Fees are not scaled — exchange/broker fees are flat per-trade.
+_IMPACT_TIERS: tuple[tuple[float, float], ...] = (
+    (1_000.0,    1.0),
+    (10_000.0,   1.5),
+    (50_000.0,   2.0),
+    (float("inf"), 3.0),
+)
+
+
+def _impact_multiplier(notional: float) -> float:
+    """Return a slippage scaling factor based on order notional size."""
+    for threshold, multiplier in _IMPACT_TIERS:
+        if notional < threshold:
+            return multiplier
+    return _IMPACT_TIERS[-1][1]  # unreachable but satisfies type checker
+
+
 def _normalize_asset_class(asset_class: str) -> str:
     normalized = asset_class.strip().lower()
     if normalized in {"options", "option"}:
@@ -69,11 +90,16 @@ def _slippage_bps(asset_class: str) -> float:
 
 
 def estimate_side_costs(asset_class: str, notional: float) -> ExecutionCosts:
-    """Estimate fees and slippage for one side of a trade."""
+    """Estimate fees and slippage for one side of a trade.
+
+    Slippage is scaled by a notional-tiered impact multiplier to model
+    market impact at larger order sizes. Fees are flat (exchange-rate based).
+    """
     normalized = _normalize_asset_class(asset_class)
     safe_notional = max(notional, 0.0)
+    impact = _impact_multiplier(safe_notional)
     fees_paid = safe_notional * (_fee_bps(normalized) / 10_000)
-    slippage_paid = safe_notional * (_slippage_bps(normalized) / 10_000)
+    slippage_paid = safe_notional * (_slippage_bps(normalized) / 10_000) * impact
     return ExecutionCosts(
         notional=safe_notional,
         fees_paid=fees_paid,

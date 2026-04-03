@@ -45,7 +45,7 @@ class TestTierTable:
     def test_seed_tier(self):
         tier = get_tier_params(1_000.0)
         assert tier.tier == "seed"
-        assert tier.max_concurrent == 3
+        assert tier.max_concurrent == 5
         assert tier.max_position_pct == 0.20
 
     def test_building_tier(self):
@@ -784,8 +784,9 @@ class TestDatabase:
             assert len(rows) == 1
             assert rows[0].gross_realized_pnl == pytest.approx(1000.0)
             assert rows[0].fees_paid == pytest.approx(76.5)
-            assert rows[0].slippage_paid == pytest.approx(76.5)
-            assert rows[0].realized_pnl == pytest.approx(847.0)
+            # notionals $25k/$26k are in 2.0× impact tier → slippage doubles
+            assert rows[0].slippage_paid == pytest.approx(153.0)
+            assert rows[0].realized_pnl == pytest.approx(770.5)
             assert rows[0].exit_trigger == "profit_target"
         finally:
             session.close()

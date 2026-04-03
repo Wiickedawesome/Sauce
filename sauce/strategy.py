@@ -103,8 +103,8 @@ class TierParams:
 
 SEED_PARAMS = TierParams(
     tier="seed",
-    max_position_pct=0.20,  # 20% per position (was 40%) — max $200 at risk per trade
-    max_concurrent=3,  # 3 concurrent positions (was 4) — 60% max exposure
+    max_position_pct=0.20,  # 20% per position — ~$200 per order at seed equity
+    max_concurrent=5,  # 5 concurrent positions — fully deploy seed capital
     daily_loss_limit=0.08,  # 8% daily drawdown ceiling (was 20%)
     stop_loss_pct=0.03,  # 3% stop (was 5%) — tighter capital protection
     trail_activation_pct=0.02,  # Trail kicks in at 2% gain (was 3% — protect profits sooner)

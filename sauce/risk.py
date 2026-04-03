@@ -96,17 +96,22 @@ def check_risk(
         )
 
     # Rule 5: Max portfolio exposure using actual position market values.
-    if equity > 0:
-        exposure_after = (total_existing_exposure + order_value) / equity
-        if exposure_after > max_portfolio_exposure:
-            return RiskVerdict(
-                passed=False,
-                rule="max_exposure",
-                reason=(
-                    f"Total exposure {exposure_after:.0%} would exceed "
-                    f"{max_portfolio_exposure:.0%} of equity"
-                ),
-            )
+    if equity <= 0:
+        return RiskVerdict(
+            passed=False,
+            rule="max_exposure",
+            reason="Equity is zero or negative — cannot compute exposure",
+        )
+    exposure_after = (total_existing_exposure + order_value) / equity
+    if exposure_after > max_portfolio_exposure:
+        return RiskVerdict(
+            passed=False,
+            rule="max_exposure",
+            reason=(
+                f"Total exposure {exposure_after:.0%} would exceed "
+                f"{max_portfolio_exposure:.0%} of equity"
+            ),
+        )
 
     return RiskVerdict(passed=True, rule="all", reason="")
 

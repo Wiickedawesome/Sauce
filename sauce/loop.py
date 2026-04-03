@@ -311,6 +311,9 @@ def _poll_order_fill(
     Makes up to _EXIT_POLL_ATTEMPTS checks with _EXIT_POLL_INTERVAL second
     delays. Returns the final (status, filled_qty, filled_price) tuple.
     """
+    status: str = "unknown"
+    filled_qty: float = 0.0
+    filled_price: float | None = None
     for attempt in range(1, _EXIT_POLL_ATTEMPTS + 1):
         time.sleep(_EXIT_POLL_INTERVAL)
         try:
@@ -394,7 +397,10 @@ def _plan_entry_sizing(
 
     current_gain_pct = 0.0
     if position is not None:
-        if position.trailing_active or position.profit_target_price <= 0:
+        # -1.0 sentinel means profit target already hit (partial exit done);
+        # trailing stop now manages the remainder — do not scale in.
+        # 0.0 just means "no explicit target set" — that's fine to scale into.
+        if position.trailing_active or position.profit_target_price < 0:
             return None
         if position.entry_price <= 0:
             return None
@@ -453,21 +459,28 @@ def _reconcile_entry_fill(
     loop_id: str,
     initial_qty: float,
     initial_price: float | None,
-) -> tuple[float, float | None]:
+) -> tuple[float, float | None, bool]:
+    """Reconcile a fill with the broker's reported position.
+
+    Returns (qty, price, reconciled) where *reconciled* is True when the
+    broker was successfully queried and the returned values represent the
+    broker's accumulated totals. When reconciliation fails the returned
+    values are the raw order fill values and *reconciled* is False.
+    """
     try:
         broker_position = _find_broker_position(symbol, get_positions(loop_id))
     except BrokerError as exc:
         logger.warning("Could not reconcile broker fill for %s: %s", symbol, exc)
-        return initial_qty, initial_price
+        return initial_qty, initial_price, False
 
     if broker_position is None:
-        return initial_qty, initial_price
+        return initial_qty, initial_price, False
 
     broker_qty = _parse_positive_float(
         broker_position.get("qty") or broker_position.get("qty_available")
     )
     broker_price = _parse_positive_float(broker_position.get("avg_entry_price"))
-    return broker_qty or initial_qty, broker_price or initial_price
+    return broker_qty or initial_qty, broker_price or initial_price, True
 
 
 def _audit_missing_quotes(loop_id: str, stage: str, requested_symbols: list[str], quotes_map: dict[str, PriceReference]) -> None:
@@ -887,6 +900,32 @@ async def _scan_entries(
             if not signal.fired:
                 continue
 
+            # ── ATR volatility gate (config: max_atr_ratio / max_atr_ratio_crypto) ──
+            atr_14 = getattr(indicators, "atr_14", None)
+            if atr_14 is not None and atr_14 > 0 and current_price > 0:
+                atr_ratio = atr_14 / current_price
+                max_atr = settings.max_atr_ratio_crypto if is_crypto else settings.max_atr_ratio
+                if atr_ratio > max_atr:
+                    _audit_event(
+                        loop_id,
+                        "safety_check",
+                        {
+                            "action": "skip_symbol",
+                            "reason": "ATR ratio exceeds maximum",
+                            "atr_ratio": round(atr_ratio, 4),
+                            "max_atr_ratio": max_atr,
+                        },
+                        symbol=instrument,
+                    )
+                    logger.info(
+                        "Skipping %s: ATR ratio %.4f exceeds max %.4f",
+                        instrument, atr_ratio, max_atr,
+                    )
+                    continue
+            elif not settings.allow_no_atr:
+                logger.info("Skipping %s: no ATR data and allow_no_atr=False", instrument)
+                continue
+
             upsert_daily_stats(today, signals_fired=1)
 
             # ── Analyst committee (2 LLM calls) ──
@@ -1063,7 +1102,7 @@ async def _scan_entries(
                 continue
 
             fallback_entry_price = order.limit_price or fresh_quote.ask or fresh_quote.mid
-            filled_qty, filled_price = _reconcile_entry_fill(
+            filled_qty, filled_price, reconciled = _reconcile_entry_fill(
                 instrument,
                 loop_id,
                 filled_qty,
@@ -1107,6 +1146,21 @@ async def _scan_entries(
                 open_positions_by_symbol[instrument] = position
                 actual_open_position_count += 1
             else:
+                # When broker reconciliation succeeded, filled_qty/filled_price
+                # are the broker's accumulated totals — safe to overwrite.
+                # When it fell back (BrokerError / position not found), they are
+                # just the latest ORDER fill values.  In that case compute a
+                # weighted-average entry and accumulate quantities manually.
+                if not reconciled:
+                    old_qty = existing_position.qty
+                    old_price = existing_position.entry_price
+                    accumulated_qty = old_qty + filled_qty
+                    if accumulated_qty > 0 and old_price and filled_price:
+                        filled_price = (
+                            old_qty * old_price + filled_qty * filled_price
+                        ) / accumulated_qty
+                    filled_qty = accumulated_qty
+
                 existing_position.qty = filled_qty
                 existing_position.entry_price = filled_price
                 existing_position.high_water_price = max(existing_position.high_water_price, fresh_quote.mid)
@@ -1983,11 +2037,14 @@ async def run_cycle() -> None:
         else:
             regime = stored_regime or cached_regime or regime
             now_utc = datetime.now(UTC)
+            regime_stale = stored_refreshed_at is not None and (
+                (now_utc - stored_refreshed_at).total_seconds() > 86_400
+            )
             refresh_due = stored_refreshed_at is None or (
                 (now_utc - stored_refreshed_at).total_seconds()
                 >= settings.intraday_regime_refresh_hours * 3600
             )
-            if cached_regime is not None and refresh_due:
+            if (cached_regime is not None and refresh_due) or regime_stale:
                 brief = _gather_brief_data()
                 regime, reasoning = infer_intraday_regime(
                     brief["btc_change"],
@@ -1996,14 +2053,15 @@ async def run_cycle() -> None:
                     brief["vix"],
                     brief["btc_rsi"],
                 )
-                _set_regime_state(regime, now_utc, "intraday_heuristic")
+                source = "stale_regime_refresh" if regime_stale else "intraday_heuristic"
+                _set_regime_state(regime, now_utc, source)
                 upsert_daily_stats(today, regime=regime)
                 _audit_event(
                     cycle_id,
                     "regime_refresh",
                     {
                         "regime": regime,
-                        "source": "intraday_heuristic",
+                        "source": source,
                         "reasoning": reasoning,
                     },
                 )

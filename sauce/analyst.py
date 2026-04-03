@@ -273,9 +273,7 @@ async def analyst_committee(
         if approve and size_fraction <= 0.0:
             size_fraction = _default_size_fraction_from_confidence(confidence)
 
-        if approve:
-            size_fraction = min(size_fraction, _default_size_fraction_from_confidence(confidence))
-        else:
+        if not approve:
             size_fraction = 0.0
 
         # Reject low-confidence approvals (PM uncertain = skip)

@@ -212,8 +212,9 @@ def evaluate_exit(
     # ── 8. Regime stop ───────────────────────────────────────────────────
     if plan.regime_stop and regime == "bearish":
         gain_pct = (current_price - entry) / entry if entry > 0 else 0
-        # Only exit on regime flip if we're not already in profit
-        if gain_pct < 0.05:
+        # Only exit on regime flip if we're losing money — let winners ride.
+        # Positions with any gain get managed by trailing/profit targets instead.
+        if gain_pct < 0.0:
             return (
                 ExitSignal(
                     trigger="regime_stop",
@@ -221,7 +222,7 @@ def evaluate_exit(
                     position_id=pid,
                     side="sell",
                     current_price=current_price,
-                    reason=f"Regime flipped to bearish with gain {gain_pct:.2%} < 5%",
+                    reason=f"Regime flipped to bearish with loss {gain_pct:.2%}",
                 ),
                 position,
             )
