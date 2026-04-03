@@ -148,7 +148,7 @@ class Settings(BaseSettings):
         description="Comma-separated underlyings approved for options trading.",
     )
 
-    min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
+    min_confidence: float = Field(default=0.50, ge=0.0, le=1.0)
     data_ttl_seconds: int = Field(default=120, ge=1)
     equity_data_ttl_seconds: int = Field(
         default=30,
@@ -275,7 +275,7 @@ class Settings(BaseSettings):
         description="Refresh the regime using a lightweight heuristic every N hours.",
     )
     allow_delayed_equity_entries: bool = Field(
-        default=False,
+        default=True,
         description="If False, block new equity and options entries while using delayed IEX data.",
     )
 

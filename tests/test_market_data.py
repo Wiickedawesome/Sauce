@@ -408,15 +408,15 @@ def test_get_universe_snapshot_suppresses_chronic_missing_symbols(
         patch("sauce.adapters.market_data._get_crypto_client", return_value=mock_crypto_client),
         patch("sauce.adapters.market_data.get_quote", side_effect=MarketDataError("no quote")) as mock_get_quote,
     ):
-        for _ in range(3):
+        for _ in range(5):
             with pytest.raises(MarketDataError, match="returned no quotes"):
                 market_data.get_universe_snapshot(["APT/USD"])
 
         result = market_data.get_snapshot_candidates(["APT/USD"])
 
     assert result == []
-    assert mock_crypto_client.get_crypto_latest_quote.call_count == 3
-    assert mock_get_quote.call_count == 3
+    assert mock_crypto_client.get_crypto_latest_quote.call_count == 5
+    assert mock_get_quote.call_count == 5
     clear_cache()
 
 

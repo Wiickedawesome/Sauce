@@ -1949,16 +1949,41 @@ def _reconcile_stale_positions(
 
     for position in stale:
         exit_price = position.entry_price
+
+        # 1) Try to find the actual broker fill price from recent orders.
         try:
-            quote = get_quote(position.symbol)
-            if quote.mid > 0:
-                exit_price = quote.mid
-        except MarketDataError as exc:
-            logger.warning(
-                "Could not fetch reconciliation quote for %s, falling back to entry price: %s",
-                position.symbol,
-                exc,
-            )
+            recent = get_recent_orders(loop_id)
+            for order in recent:
+                order_sym = str(order.get("symbol", "")).strip().upper()
+                if (
+                    order_sym in {a for a in _symbol_aliases(position.symbol)}
+                    and str(order.get("side", "")).lower() == "sell"
+                    and str(order.get("status", "")).lower() == "filled"
+                ):
+                    filled_price_str = str(order.get("filled_avg_price", ""))
+                    if filled_price_str:
+                        try:
+                            broker_fill = float(filled_price_str)
+                            if broker_fill > 0:
+                                exit_price = broker_fill
+                        except (TypeError, ValueError):
+                            pass
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 2) Fall back to a live quote if no broker fill found.
+        if exit_price == position.entry_price:
+            try:
+                quote = get_quote(position.symbol)
+                if quote.mid > 0:
+                    exit_price = quote.mid
+            except MarketDataError as exc:
+                logger.warning(
+                    "Could not fetch reconciliation quote for %s, falling back to entry price: %s",
+                    position.symbol,
+                    exc,
+                )
 
         log_trade(position, exit_price, "broker_reconciliation")
         close_position(position.id)

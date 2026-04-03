@@ -646,6 +646,7 @@ def get_recent_orders(loop_id: str = "unset") -> list[dict[str, Any]]:
                     "qty": str(getattr(o, "qty", "")),
                     "status": str(getattr(o, "status", "")),
                     "created_at": str(getattr(o, "created_at", "")),
+                    "filled_avg_price": str(getattr(o, "filled_avg_price", "") or ""),
                 }
             )
         return result

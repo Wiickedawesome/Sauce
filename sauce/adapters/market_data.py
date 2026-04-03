@@ -29,8 +29,8 @@ from sauce.market_calendar import calendar_days_for_equity_bars
 
 logger = logging.getLogger(__name__)
 
-_SNAPSHOT_FAILURE_THRESHOLD = 3
-_SNAPSHOT_SUPPRESS_FOR = timedelta(hours=6)
+_SNAPSHOT_FAILURE_THRESHOLD = 5
+_SNAPSHOT_SUPPRESS_FOR = timedelta(hours=1)
 _SNAPSHOT_FAILURES_KEY = "snapshot_failures"
 _SNAPSHOT_SUPPRESS_UNTIL_KEY = "snapshot_suppress_until"
 _snapshot_state_cache: dict[str, tuple[int, datetime | None]] = {}

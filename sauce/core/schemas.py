@@ -154,6 +154,7 @@ class AuditEvent(StrictModel):
         "loop_start",
         "loop_end",
         "regime_refresh",
+        "risk_gate",
         "safety_check",
         "supervisor_decision",
         "options_order_submitted",

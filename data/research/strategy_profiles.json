@@ -11,7 +11,7 @@
   },
   "profiles": {
     "crypto_momentum": {
-      "base_threshold": 40,
+      "base_threshold": 55,
       "bb_points": 20,
       "bb_proximity": 0.15,
       "macd_dip_points": 15,

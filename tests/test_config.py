@@ -110,7 +110,7 @@ def test_max_daily_loss_pct_default(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_min_confidence_default(monkeypatch: pytest.MonkeyPatch) -> None:
     set_required(monkeypatch)
     s = Settings(_env_file=None)
-    assert s.min_confidence == 0.3
+    assert s.min_confidence == 0.5
 
 
 def test_asset_specific_ttl_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +132,7 @@ def test_intraday_regime_and_delayed_equity_defaults(monkeypatch: pytest.MonkeyP
     set_required(monkeypatch)
     s = Settings(_env_file=None)
     assert s.intraday_regime_refresh_hours == 4
-    assert s.allow_delayed_equity_entries is False
+    assert s.allow_delayed_equity_entries is True
 
 
 def test_net_pnl_assumption_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
