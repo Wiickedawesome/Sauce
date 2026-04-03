@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text
@@ -162,7 +162,7 @@ class OptionsPositionRow(Base):
     qty: int = Column(Integer, nullable=False)
     entry_price: float = Column(Float, nullable=False)
     entry_time: datetime = Column(DateTime, nullable=False)
-    expiration = Column(Date, nullable=False)
+    expiration: date = Column(Date, nullable=False)
     high_water_price: float = Column(Float, nullable=False, default=0.0)
     stop_loss_price: float | None = Column(Float, nullable=True)
     take_profit_price: float | None = Column(Float, nullable=True)
@@ -402,7 +402,7 @@ def load_open_option_positions(db_url: str | None = None) -> list[OptionsPositio
                 position_id=row.position_id,
                 underlying=row.underlying,
                 contract_symbol=row.contract_symbol,
-                option_type=row.option_type,
+                option_type=row.option_type,  # type: ignore[arg-type]
                 qty=row.qty,
                 entry_price=row.entry_price,
                 entry_time=row.entry_time.replace(tzinfo=UTC) if row.entry_time.tzinfo is None else row.entry_time,
@@ -721,7 +721,7 @@ def load_all_memories(db_url: str | None = None) -> list[MemoryEntry]:
 
     session = get_session(db_url)
     try:
-        rows = session.query(TradeMemoryRow).order_by(TradeMemoryRow.id).all()
+        rows = session.query(TradeMemoryRow).order_by(TradeMemoryRow.id).all()  # type: ignore[arg-type]
         return [
             MemoryEntry(
                 situation=row.situation,
@@ -742,14 +742,14 @@ def load_recent_closed_trade_pnls(limit: int, db_url: str | None = None) -> list
     session = get_session(db_url)
     try:
         trade_rows = (
-            session.query(TradeRow.exit_time, TradeRow.realized_pnl)
-            .order_by(TradeRow.exit_time.desc())
+            session.query(TradeRow.exit_time, TradeRow.realized_pnl)  # type: ignore[call-overload]
+            .order_by(TradeRow.exit_time.desc())  # type: ignore[attr-defined]
             .limit(limit)
             .all()
         )
         option_rows = (
-            session.query(OptionsTradeRow.exit_time, OptionsTradeRow.realized_pnl)
-            .order_by(OptionsTradeRow.exit_time.desc())
+            session.query(OptionsTradeRow.exit_time, OptionsTradeRow.realized_pnl)  # type: ignore[call-overload]
+            .order_by(OptionsTradeRow.exit_time.desc())  # type: ignore[attr-defined]
             .limit(limit)
             .all()
         )
@@ -772,8 +772,8 @@ def load_completed_trades(limit: int | None = None, db_url: str | None = None) -
     """Load completed spot/equity and options trades into a normalized structure."""
     session = get_session(db_url)
     try:
-        trade_rows = session.query(TradeRow).order_by(TradeRow.exit_time.asc()).all()
-        option_rows = session.query(OptionsTradeRow).order_by(OptionsTradeRow.exit_time.asc()).all()
+        trade_rows: list[TradeRow] = session.query(TradeRow).order_by(TradeRow.exit_time.asc()).all()  # type: ignore[attr-defined]
+        option_rows: list[OptionsTradeRow] = session.query(OptionsTradeRow).order_by(OptionsTradeRow.exit_time.asc()).all()  # type: ignore[attr-defined]
 
         trades: list[TradePerformanceRecord] = []
         for row in trade_rows:
@@ -799,7 +799,7 @@ def load_completed_trades(limit: int | None = None, db_url: str | None = None) -
         for row in option_rows:
             trades.append(
                 TradePerformanceRecord(
-                    symbol=row.contract_symbol,
+                    symbol=row.contract_symbol,  # type: ignore[attr-defined]
                     asset_class="option",
                     strategy_name=row.strategy_name,
                     entry_time=_ensure_utc_timestamp(row.entry_time),

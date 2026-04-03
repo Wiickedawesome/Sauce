@@ -135,6 +135,7 @@ def summarize_performance(
     sortino_ratio = None
 
     if starting_equity is not None and starting_equity > 0:
+        assert ending_equity is not None  # guaranteed: ending_equity = starting_equity + net_pnl
         equity_curve = starting_equity + frame["net_pnl"].cumsum()
         peaks = equity_curve.cummax().replace(0, pd.NA)
         drawdowns = ((equity_curve - peaks) / peaks).fillna(0.0)

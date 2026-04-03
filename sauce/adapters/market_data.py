@@ -16,7 +16,7 @@ NOTE: Verify alpaca-py field names against https://alpaca.markets/docs/api-refer
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, cast
 
 import pandas as pd
 
@@ -594,7 +594,7 @@ def get_option_chain(
             OptionContract(
                 underlying=underlying,
                 contract_symbol=symbol,
-                option_type=str(getattr(contract, "type", "")).lower(),
+                option_type=cast(Literal["call", "put"], str(getattr(contract, "type", "")).lower()),
                 strike=float(getattr(contract, "strike_price", 0.0) or 0.0),
                 expiration=expiration,
                 dte=dte,

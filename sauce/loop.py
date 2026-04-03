@@ -121,7 +121,7 @@ _REGIME_SOURCE_KEY = "regime_source"
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 
-STRATEGIES: list[Strategy] = [CryptoMomentumReversion(), EquityMomentum()]
+STRATEGIES: list[Strategy] = [CryptoMomentumReversion(), EquityMomentum()]  # type: ignore[list-item]
 OPTIONS_STRATEGY = OptionsMomentum()
 
 
@@ -233,7 +233,7 @@ def _audit_event(loop_id: str, event_type: str, payload: dict[str, object], symb
     log_event(
         AuditEvent(
             loop_id=loop_id,
-            event_type=event_type,
+            event_type=event_type,  # type: ignore[arg-type]
             symbol=symbol,
             payload=payload,
             timestamp=datetime.now(UTC),

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from sauce.core.config import get_settings
@@ -49,7 +49,7 @@ class OptionsMomentum:
         self._profile_override = profile_override
 
     @property
-    def _settings(self):
+    def _settings(self) -> Any:
         return get_settings()
 
     def _profile(self) -> dict[str, Any]:
@@ -58,7 +58,7 @@ class OptionsMomentum:
     @property
     def instruments(self) -> list[str]:
         """Underlyings approved for options trading."""
-        return self._settings.options_universe
+        return cast(list[str], self._settings.options_universe)
 
     def eligible(self, underlying: str, regime: str) -> bool:
         """Check if we can trade options on this underlying right now."""
