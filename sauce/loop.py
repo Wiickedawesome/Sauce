@@ -1949,6 +1949,7 @@ def _reconcile_stale_positions(
 
     for position in stale:
         exit_price = position.entry_price
+        price_source = "entry_price_fallback"
 
         # 1) Try to find the actual broker fill price from recent orders.
         try:
@@ -1966,6 +1967,7 @@ def _reconcile_stale_positions(
                             broker_fill = float(filled_price_str)
                             if broker_fill > 0:
                                 exit_price = broker_fill
+                                price_source = "broker_fill"
                         except (TypeError, ValueError):
                             pass
                     break
@@ -1973,17 +1975,35 @@ def _reconcile_stale_positions(
             pass
 
         # 2) Fall back to a live quote if no broker fill found.
-        if exit_price == position.entry_price:
+        if price_source == "entry_price_fallback":
             try:
                 quote = get_quote(position.symbol)
                 if quote.mid > 0:
                     exit_price = quote.mid
+                    price_source = "live_quote"
             except MarketDataError as exc:
                 logger.warning(
                     "Could not fetch reconciliation quote for %s, falling back to entry price: %s",
                     position.symbol,
                     exc,
                 )
+
+        if price_source == "entry_price_fallback":
+            _audit_event(
+                loop_id,
+                "error",
+                {
+                    "stage": "stale_position_reconciliation",
+                    "error": "no broker fill or live quote available — using entry_price as exit_price (P&L will be $0)",
+                    "symbol": position.symbol,
+                    "entry_price": position.entry_price,
+                },
+                symbol=position.symbol,
+            )
+            logger.warning(
+                "RECONCILE %s: using entry_price as exit (no fill / no quote) — P&L will be $0",
+                position.symbol,
+            )
 
         log_trade(position, exit_price, "broker_reconciliation")
         close_position(position.id)
@@ -2109,6 +2129,45 @@ async def run_cycle() -> None:
         tier = get_tier_params(equity)
         daily_loss_limit = min(settings.max_daily_loss_pct, tier.daily_loss_limit)
 
+        # ── Position management (ALWAYS runs — even during cooldown) ────────
+        # Exits, reconciliation, and stop-loss monitoring must never be gated
+        # behind the circuit breaker.  Positions left unmanaged during cooldown
+        # have no downside protection and stale DB records inflate the open
+        # position count, blocking future entries.
+
+        broker_positions = get_positions(cycle_id)
+        stale_orders_cancelled = cancel_stale_orders(loop_id=cycle_id)
+        if stale_orders_cancelled:
+            logger.info("Cancelled %d stale broker orders before exit scan", stale_orders_cancelled)
+        recent_orders = get_recent_orders(cycle_id)
+
+        # Load positions
+        open_positions = load_open_positions()
+        open_option_positions = load_open_option_positions()
+
+        # Reconcile: import any broker positions not yet in our DB.
+        _reconcile_broker_positions(open_positions, broker_positions, tier)
+
+        # Reverse reconciliation: close DB positions that no longer exist at broker.
+        _reconcile_stale_positions(open_positions, broker_positions, cycle_id)
+
+        # Load trade memory (BM25 index for past reflections)
+        memory_entries = load_all_memories()
+        trade_memory = TradeMemory(memory_entries)
+        logger.info("Trade memory loaded: %d entries", trade_memory.size)
+
+        # Exit scan ALWAYS runs — stops and profit targets must be enforced
+        # regardless of cooldown, trading pause, or daily loss limits.
+        if open_positions:
+            await _scan_exits(open_positions, equity, regime, trade_memory, cycle_id)
+        if open_option_positions:
+            await _scan_option_exits(open_option_positions, cycle_id)
+
+        # ── Entry gates (cooldown / circuit-breaker / pause / daily-loss) ───
+        # Everything below here only affects NEW entries.  Exits already ran.
+
+        entries_blocked = False
+
         cooldown_until = _loss_cooldown_until()
         now_utc = datetime.now(UTC)
         if cooldown_until is not None:
@@ -2117,68 +2176,40 @@ async def run_cycle() -> None:
                     cycle_id,
                     "risk_gate",
                     {
-                        "action": "halt_cycle",
+                        "action": "block_entries",
                         "reason": "consecutive loss cooldown active",
                         "cooldown_until": cooldown_until.isoformat(),
                     },
                 )
-                logger.warning("Consecutive-loss cooldown active until %s", cooldown_until.isoformat())
-                loop_status = "halted"
-                return
-            _set_loss_cooldown(None)
+                logger.warning("Consecutive-loss cooldown active until %s — new entries blocked", cooldown_until.isoformat())
+                entries_blocked = True
+            else:
+                _set_loss_cooldown(None)
 
-        loss_verdict = check_consecutive_loss_circuit(
-            load_recent_closed_trade_pnls(settings.max_consecutive_losses),
-            settings.max_consecutive_losses,
-        )
-        if not loss_verdict.passed:
-            cooldown_until = now_utc + timedelta(hours=settings.consecutive_loss_cooldown_hours)
-            _set_loss_cooldown(cooldown_until)
-            _audit_event(
-                cycle_id,
-                "risk_gate",
-                {
-                    "action": "halt_cycle",
-                    "rule": loss_verdict.rule,
-                    "reason": loss_verdict.reason,
-                    "cooldown_until": cooldown_until.isoformat(),
-                },
+        if not entries_blocked:
+            loss_verdict = check_consecutive_loss_circuit(
+                load_recent_closed_trade_pnls(settings.max_consecutive_losses),
+                settings.max_consecutive_losses,
             )
-            logger.warning("Consecutive-loss circuit tripped: %s", loss_verdict.reason)
+            if not loss_verdict.passed:
+                cooldown_until = now_utc + timedelta(hours=settings.consecutive_loss_cooldown_hours)
+                _set_loss_cooldown(cooldown_until)
+                _audit_event(
+                    cycle_id,
+                    "risk_gate",
+                    {
+                        "action": "block_entries",
+                        "rule": loss_verdict.rule,
+                        "reason": loss_verdict.reason,
+                        "cooldown_until": cooldown_until.isoformat(),
+                    },
+                )
+                logger.warning("Consecutive-loss circuit tripped: %s — new entries blocked", loss_verdict.reason)
+                entries_blocked = True
+
+        if entries_blocked:
             loop_status = "halted"
             return
-
-        broker_positions = get_positions(cycle_id)
-        stale_orders_cancelled = cancel_stale_orders(loop_id=cycle_id)
-        if stale_orders_cancelled:
-            logger.info("Cancelled %d stale broker orders before entry scan", stale_orders_cancelled)
-        recent_orders = get_recent_orders(cycle_id)
-
-        # Load positions
-        open_positions = load_open_positions()
-        open_option_positions = load_open_option_positions()
-
-        # Reconcile: import any broker positions not yet in our DB.
-        # Handles positions entered outside the current DB (manual orders,
-        # prior code version, DB migration) so the exit engine can see them.
-        _reconcile_broker_positions(open_positions, broker_positions, tier)
-
-        # Reverse reconciliation: close DB positions that no longer exist at broker.
-        # Prevents phantom sell attempts and false position-count inflation.
-        _reconcile_stale_positions(open_positions, broker_positions, cycle_id)
-
-        # Load trade memory (BM25 index for past reflections)
-        memory_entries = load_all_memories()
-        trade_memory = TradeMemory(memory_entries)
-        logger.info("Trade memory loaded: %d entries", trade_memory.size)
-
-        # Exit scan runs BEFORE the TRADING_PAUSE check.
-        # Open positions must always be monitored for stops and profit targets
-        # even when new entries are disabled.
-        if open_positions:
-            await _scan_exits(open_positions, equity, regime, trade_memory, cycle_id)
-        if open_option_positions:
-            await _scan_option_exits(open_option_positions, cycle_id)
 
         # TRADING_PAUSE halts new entries only — exits already ran above.
         if settings.trading_pause:
